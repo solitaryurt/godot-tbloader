@@ -13,6 +13,11 @@
 
 #include <tb_loader.h>
 
+#include <map>
+#include <string>
+#include <algorithm>
+#include <cctype>
+
 Builder::Builder(TBLoader* loader)
 {
 	m_loader = loader;
@@ -456,6 +461,19 @@ void Builder::add_surface_to_mesh(Ref<ArrayMesh>& mesh, LMSurface& surf)
 	mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
 }
 
+bool check_texture(const std::string& texture_name, const std::string& substring) {
+    // Create uppercase copies of the input strings
+    std::string texture_upper(texture_name);
+    std::string substring_upper(substring);
+
+    // Convert both to uppercase
+    std::transform(texture_name.begin(), texture_name.end(), texture_upper.begin(), ::toupper);
+    std::transform(substring.begin(), substring.end(), substring_upper.begin(), ::toupper);
+
+    // Check if the uppercase substring is in the uppercase texture name
+    return texture_upper.find(substring_upper) != std::string::npos;
+}
+
 MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* parent, ColliderType coltype, ColliderShape colshape)
 {
 	// Create instance name based on entity idx
@@ -472,7 +490,25 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 
 	// Create mesh
 	Ref<ArrayMesh> mesh = memnew(ArrayMesh());
-	Ref<ArrayMesh> collision_mesh = memnew(ArrayMesh());
+
+	// Create a map to store different types of collision meshes
+	// std::unordered_map<String, Ref<ArrayMesh>> collision_mesh_map;
+
+	std::map<String, Ref<ArrayMesh>> collision_mesh_map;
+
+	std::vector<String> collision_surface_types = {"GRASS", "DIRT", "METAL", "WOOD", "GLASS", "SAND", "TILE", "SNOW", "VENT", "WATER"};
+	std::vector<String> collision_special_types = {"DEFAULT", "CLIP"};
+
+	// Initialize the map with the specified types
+	for (auto& collision_type : collision_surface_types) {
+		collision_mesh_map.emplace(collision_type, memnew(ArrayMesh()));
+	}
+	for (auto& collision_type : collision_special_types) {
+		collision_mesh_map.emplace(collision_type, memnew(ArrayMesh()));
+	}
+
+	// Example usage: Assign the collision mesh to the map
+	// collision_mesh_map["GRASS"]->add_surface_from_arrays(...);
 
 	// Give mesh to mesh instance
 	mesh_instance->set_mesh(mesh);
@@ -545,11 +581,22 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 			}
 
 			// Add surface to collision mesh
-			add_surface_to_mesh(collision_mesh, surf);
-
 			// Skip if the texture specifies that we only want collision (invisible walls)
 			if (tex.name == m_loader->get_clip_texture_name()) {
+				add_surface_to_mesh(collision_mesh_map["CLIP"], surf);
 				continue;
+			} else {
+				bool added = false;
+				for (const auto& collision_type : collision_surface_types) {
+					if (check_texture(tex.name, collision_type.utf8().get_data())) {
+						add_surface_to_mesh(collision_mesh_map[collision_type.utf8().get_data()], surf);
+						added = true;
+						break;
+					}
+				}
+				if (!added) {
+					add_surface_to_mesh(collision_mesh_map["DEFAULT"], surf);
+				}
 			}
 
 			// Add surface to visual mesh
@@ -569,20 +616,23 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 	}
 
 	// Create collisions if needed
-	if (!m_loader->m_skip_empty_meshes || collision_mesh->get_surface_count() > 0) {
-		switch (coltype) {
-		case ColliderType::Mesh:
-			add_collider_from_mesh(parent, collision_mesh, colshape);
-			break;
+	// iterate the map and add the surfaces to the appropriate mesh
+	for (auto& [key, collision_mesh] : collision_mesh_map) {
+		if (!m_loader->m_skip_empty_meshes || collision_mesh->get_surface_count() > 0) {
+			switch (coltype) {
+			case ColliderType::Mesh:
+				add_collider_from_mesh(parent, collision_mesh, colshape);
+				break;
 
-		case ColliderType::Static:
-			StaticBody3D* static_body = memnew(StaticBody3D());
-			static_body->set_name(String(mesh_instance->get_name()) + "_col");
-			static_body->set_collision_layer(m_loader->get_collision_layer_mask());
-			parent->add_child(static_body, true);
-			static_body->set_owner(m_loader->get_owner());
-			add_collider_from_mesh(static_body, collision_mesh, colshape);
-			break;
+			case ColliderType::Static:
+				StaticBody3D* static_body = memnew(StaticBody3D());
+				static_body->set_name(String(mesh_instance->get_name()) + "_" + key + "_col");
+				static_body->set_collision_layer(m_loader->get_collision_layer_mask());
+				parent->add_child(static_body, true);
+				static_body->set_owner(m_loader->get_owner());
+				add_collider_from_mesh(static_body, collision_mesh, colshape);
+				break;
+			}
 		}
 	}
 
