@@ -33,6 +33,8 @@ void TBLoader::_bind_methods()
 	ClassDB::bind_method(D_METHOD("get_visual_layer_mask"), &TBLoader::get_visual_layer_mask);
 	ClassDB::bind_method(D_METHOD("set_collision_layer_mask", "option_collision_layer_mask"), &TBLoader::set_collision_layer_mask);
 	ClassDB::bind_method(D_METHOD("get_collision_layer_mask"), &TBLoader::get_collision_layer_mask);
+	ClassDB::bind_method(D_METHOD("set_clip_collision_layer_mask", "option_collision_layer_mask"), &TBLoader::set_clip_collision_layer_mask);
+	ClassDB::bind_method(D_METHOD("get_clip_collision_layer_mask"), &TBLoader::get_clip_collision_layer_mask);
 
 	ClassDB::bind_method(D_METHOD("set_entity_common", "entity_common"), &TBLoader::set_entity_common);
 	ClassDB::bind_method(D_METHOD("get_entity_common"), &TBLoader::get_entity_common);
@@ -66,6 +68,7 @@ void TBLoader::_bind_methods()
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "option_skip_texture_name", PROPERTY_HINT_NONE, "skip Texture"), "set_skip_texture_name", "get_skip_texture_name");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "option_visual_layer_mask", PROPERTY_HINT_LAYERS_3D_RENDER), "set_visual_layer_mask", "get_visual_layer_mask");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "option_collision_layer_mask", PROPERTY_HINT_LAYERS_3D_PHYSICS), "set_collision_layer_mask", "get_collision_layer_mask");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "option_clip_collision_layer_mask", PROPERTY_HINT_LAYERS_3D_PHYSICS), "set_clip_collision_layer_mask", "get_clip_collision_layer_mask");
 
 	ADD_GROUP("Entities", "entity_");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "entity_common", PROPERTY_HINT_NONE, "Common Entities"), "set_entity_common", "get_entity_common");
@@ -203,6 +206,16 @@ uint32_t TBLoader::get_collision_layer_mask()
 void TBLoader::set_collision_layer_mask(uint32_t collision_layer_mask)
 {
 	m_collision_layer_mask = collision_layer_mask;
+}
+
+uint32_t TBLoader::get_clip_collision_layer_mask()
+{
+	return m_clip_collision_layer_mask;
+}
+
+void TBLoader::set_clip_collision_layer_mask(uint32_t collision_layer_mask)
+{
+	m_clip_collision_layer_mask = collision_layer_mask;
 }
 
 void TBLoader::set_entity_common(bool enabled)
