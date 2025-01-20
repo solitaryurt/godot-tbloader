@@ -66,7 +66,7 @@ public:
 protected:
 	Vector3 lm_transform(const vec3& v);
 
-	void add_collider_from_mesh(Node3D* area, Ref<ArrayMesh>& mesh, ColliderShape colshape);
+	void add_collider_from_mesh(Node3D* area, Ref<ArrayMesh>& mesh, ColliderShape colshape, Color* debug_color = nullptr);
 	void add_surface_to_mesh(Ref<ArrayMesh>& mesh, LMSurface& surf);
 	MeshInstance3D* build_entity_mesh(int idx, LMEntity& ent, Node3D* parent, ColliderType coltype, ColliderShape colshape);
 

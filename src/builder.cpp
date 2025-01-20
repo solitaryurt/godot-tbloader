@@ -9,6 +9,7 @@
 #include <godot_cpp/classes/standard_material3d.hpp>
 #include <godot_cpp/classes/convex_polygon_shape3d.hpp>
 #include <godot_cpp/classes/concave_polygon_shape3d.hpp>
+#include <godot_cpp/classes/surface_tool.hpp>
 #include <godot_cpp/templates/vmap.hpp>
 
 #include <tb_loader.h>
@@ -117,6 +118,8 @@ Node* Builder::build_entity(int idx, LMEntity& ent, const String& classname)
 {
 	Node* newEntityNode = nullptr;
 
+	UtilityFunctions::prints("Building entity ", idx, " of class ", classname);
+
 	if (classname == "worldspawn" || classname == "func_group") {
 		// Skip worldspawn if the layer is hidden and the "skip hidden layers" option is checked
 		if (m_loader->m_skip_hidden_layers) {
@@ -136,6 +139,17 @@ Node* Builder::build_entity(int idx, LMEntity& ent, const String& classname)
 				newEntityNode = build_entity_area(idx, ent);
 			} else if (classname == "nocollision") {
 				newEntityNode = build_worldspawn(idx, ent, false);
+			} else if (classname == "trigger_location") {
+				auto location = ent.get_property("message");
+				if (strlen(location) == 0) {
+					UtilityFunctions::printerr("Trigger location entity has no message property!");
+					return nullptr;
+				} else {
+					UtilityFunctions::prints("Trigger location entity with message: ", location);
+				}
+				newEntityNode = build_entity_area(idx, ent);
+				newEntityNode->set_name("location_" + String(location));
+				newEntityNode = nullptr;
 			}
 
 			//TODO: More common entities
@@ -241,6 +255,8 @@ Node* Builder::build_entity_custom(int idx, LMEntity& ent, LMEntityGeometry& geo
 			}
 
 			return instance;
+		} else {
+			UtilityFunctions::push_warning("Entity class not found: ", classname);
 		}
 	}
 
@@ -299,7 +315,7 @@ Node* Builder::build_entity_area(int idx, LMEntity& ent)
 		add_surface_to_mesh(mesh, surf);
 
 		// Create collision shape for the area
-		add_collider_from_mesh(area, mesh, ColliderShape::Concave);
+		add_collider_from_mesh(area, mesh, ColliderShape::Concave, nullptr);
 	}
 
 	return area;
@@ -404,7 +420,7 @@ Vector3 Builder::lm_transform(const vec3& v)
 	return Vector3(sv.y, sv.z, sv.x);
 }
 
-void Builder::add_collider_from_mesh(Node3D* node, Ref<ArrayMesh>& mesh, ColliderShape colshape)
+void Builder::add_collider_from_mesh(Node3D* node, Ref<ArrayMesh>& mesh, ColliderShape colshape, Color* debug_color)
 {
 	Ref<Shape3D> mesh_shape;
 	switch (colshape) {
@@ -421,6 +437,10 @@ void Builder::add_collider_from_mesh(Node3D* node, Ref<ArrayMesh>& mesh, Collide
 	collision_shape->set_shape(mesh_shape);
 	node->add_child(collision_shape, true);
 	collision_shape->set_owner(m_loader->get_owner());
+
+	if (debug_color != nullptr) {
+		collision_shape->set("debug_color", *debug_color);
+	}
 }
 
 void Builder::add_surface_to_mesh(Ref<ArrayMesh>& mesh, LMSurface& surf)
@@ -496,8 +516,25 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 
 	std::map<String, Ref<ArrayMesh>> collision_mesh_map;
 
-	std::vector<String> collision_surface_types = {"GRASS", "DIRT", "METAL", "WOOD", "GLASS", "SAND", "TILE", "SNOW", "VENT", "WATER"};
-	std::vector<String> collision_special_types = {"DEFAULT", "CLIP"};
+	const String SURFACE_GRASS = "GRASS";
+	const String SURFACE_DIRT = "DIRT";
+	const String SURFACE_METAL = "METAL";
+	const String SURFACE_WOOD = "WOOD";
+	const String SURFACE_GLASS = "GLASS";
+	const String SURFACE_SAND = "SAND";
+	const String SURFACE_TILE = "TILE";
+	const String SURFACE_SNOW = "SNOW";
+	const String SURFACE_VENT = "VENT";
+	const String SURFACE_WATER = "WATER";
+
+	const String SURFACE_DEFAULT = "DEFAULT";
+	const String SURFACE_PLAYER_CLIP = "PLAYER_CLIP";
+	const String SURFACE_LADDER_CLIP = "LADDER_CLIP";
+	const String SURFACE_CUSHION_CLIP = "CUSHION_CLIP";
+	const String SURFACE_NO_WALL_JUMP = "NO_WALL_JUMP";
+
+	std::vector<String> collision_surface_types = {SURFACE_GRASS, SURFACE_DIRT, SURFACE_METAL, SURFACE_WOOD, SURFACE_GLASS, SURFACE_SAND, SURFACE_TILE, SURFACE_SNOW, SURFACE_VENT, SURFACE_WATER};
+	std::vector<String> collision_special_types = {SURFACE_DEFAULT, SURFACE_PLAYER_CLIP, SURFACE_LADDER_CLIP, SURFACE_CUSHION_CLIP, SURFACE_NO_WALL_JUMP};
 
 	// Initialize the map with the specified types
 	for (auto& collision_type : collision_surface_types) {
@@ -583,7 +620,16 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 			// Add surface to collision mesh
 			// Skip if the texture specifies that we only want collision (invisible walls)
 			if (tex.name == m_loader->get_clip_texture_name()) {
-				add_surface_to_mesh(collision_mesh_map["CLIP"], surf);
+				add_surface_to_mesh(collision_mesh_map[SURFACE_PLAYER_CLIP], surf);
+				continue;
+			} else if (tex.name == m_loader->get_ladder_texture_name()) {
+				add_surface_to_mesh(collision_mesh_map[SURFACE_LADDER_CLIP], surf);
+				continue;
+			} else if (tex.name == m_loader->get_cushion_texture_name()) {
+				add_surface_to_mesh(collision_mesh_map[SURFACE_CUSHION_CLIP], surf);
+				continue;
+			} else if (tex.name == m_loader->get_no_wall_jump_texture_name()) {
+				add_surface_to_mesh(collision_mesh_map[SURFACE_NO_WALL_JUMP], surf);
 				continue;
 			} else {
 				bool added = false;
@@ -595,7 +641,7 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 					}
 				}
 				if (!added) {
-					add_surface_to_mesh(collision_mesh_map["DEFAULT"], surf);
+					add_surface_to_mesh(collision_mesh_map[SURFACE_DEFAULT], surf);
 				}
 			}
 
@@ -621,20 +667,29 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 		if (!m_loader->m_skip_empty_meshes || collision_mesh->get_surface_count() > 0) {
 			switch (coltype) {
 			case ColliderType::Mesh:
-				add_collider_from_mesh(parent, collision_mesh, colshape);
+				add_collider_from_mesh(parent, collision_mesh, colshape, nullptr);
 				break;
 
 			case ColliderType::Static:
-				StaticBody3D* static_body = memnew(StaticBody3D());
-				static_body->set_name(String(mesh_instance->get_name()) + "_" + key + "_col");
-				if (key == "CLIP") {
-					static_body->set_collision_layer(m_loader->get_clip_collision_layer_mask());
+				CollisionObject3D *container;
+				Color *debug_color = nullptr;
+				if (key == SURFACE_LADDER_CLIP || key == SURFACE_CUSHION_CLIP || key == SURFACE_NO_WALL_JUMP) {
+					container = memnew(Area3D());
+					debug_color = memnew(Color(1.0, 1.0, 0.0, 0.5));
 				} else {
-					static_body->set_collision_layer(m_loader->get_collision_layer_mask());
+					container = memnew(StaticBody3D());
 				}
-				parent->add_child(static_body, true);
-				static_body->set_owner(m_loader->get_owner());
-				add_collider_from_mesh(static_body, collision_mesh, colshape);
+
+				container->set_name(String(mesh_instance->get_name()) + "_" + key + "_col");
+				if (key == SURFACE_PLAYER_CLIP) {
+					container->set_collision_layer(m_loader->get_clip_collision_layer_mask());
+				} else {
+					container->set_collision_layer(m_loader->get_collision_layer_mask());
+				}
+
+				parent->add_child(container, true);
+				container->set_owner(m_loader->get_owner());
+				add_collider_from_mesh(container, collision_mesh, colshape, nullptr);
 				break;
 			}
 		}

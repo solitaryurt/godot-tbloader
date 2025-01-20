@@ -9,24 +9,22 @@ void TBLoader::_bind_methods()
 {
 	ClassDB::bind_method(D_METHOD("set_map", "map_resource"), &TBLoader::set_map);
 	ClassDB::bind_method(D_METHOD("get_map"), &TBLoader::get_map);
-	ClassDB::bind_method(D_METHOD("set_inverse_scale", "map_inverse_scale"), &TBLoader::set_inverse_scale);
-	ClassDB::bind_method(D_METHOD("get_inverse_scale"), &TBLoader::get_inverse_scale);
 
-	ClassDB::bind_method(D_METHOD("set_lighting_unwrap_uv2", "lighting_unwrap_uv2"), &TBLoader::set_lighting_unwrap_uv2);
-	ClassDB::bind_method(D_METHOD("get_lighting_unwrap_uv2"), &TBLoader::get_lighting_unwrap_uv2);
 	ClassDB::bind_method(D_METHOD("set_lighting_unwrap_texel_size", "lighting_unwrap_texel_size"), &TBLoader::set_lighting_unwrap_texel_size);
 	ClassDB::bind_method(D_METHOD("get_lighting_unwrap_texel_size"), &TBLoader::get_lighting_unwrap_texel_size);
 
-	ClassDB::bind_method(D_METHOD("set_collision", "option_collision"), &TBLoader::set_collision);
-	ClassDB::bind_method(D_METHOD("get_collision"), &TBLoader::get_collision);
 	ClassDB::bind_method(D_METHOD("set_skip_hidden_layers", "option_skip_hidden_layers"), &TBLoader::set_skip_hidden_layers);
 	ClassDB::bind_method(D_METHOD("get_skip_hidden_layers"), &TBLoader::get_skip_hidden_layers);
 	ClassDB::bind_method(D_METHOD("set_skip_empty_meshes", "option_skip_empty_meshes"), &TBLoader::set_skip_empty_meshes);
 	ClassDB::bind_method(D_METHOD("get_skip_empty_meshes"), &TBLoader::get_skip_empty_meshes);
-	ClassDB::bind_method(D_METHOD("set_filter_nearest", "option_filter_nearest"), &TBLoader::set_filter_nearest);
-	ClassDB::bind_method(D_METHOD("get_filter_nearest"), &TBLoader::get_filter_nearest);
 	ClassDB::bind_method(D_METHOD("set_clip_texture_name", "option_clip_texture_name"), &TBLoader::set_clip_texture_name);
 	ClassDB::bind_method(D_METHOD("get_clip_texture_name"), &TBLoader::get_clip_texture_name);
+	ClassDB::bind_method(D_METHOD("set_cushion_texture_name", "option_cushion_texture_name"), &TBLoader::set_cushion_texture_name);
+	ClassDB::bind_method(D_METHOD("get_cushion_texture_name"), &TBLoader::get_cushion_texture_name);
+	ClassDB::bind_method(D_METHOD("set_ladder_texture_name", "option_ladder_texture_name"), &TBLoader::set_ladder_texture_name);
+	ClassDB::bind_method(D_METHOD("get_ladder_texture_name"), &TBLoader::get_ladder_texture_name);
+	ClassDB::bind_method(D_METHOD("set_no_wall_jump_texture_name", "option_no_wall_jump_texture_name"), &TBLoader::set_no_wall_jump_texture_name);
+	ClassDB::bind_method(D_METHOD("get_no_wall_jump_texture_name"), &TBLoader::get_no_wall_jump_texture_name);
 	ClassDB::bind_method(D_METHOD("set_skip_texture_name", "option_skip_texture_name"), &TBLoader::set_skip_texture_name);
 	ClassDB::bind_method(D_METHOD("get_skip_texture_name"), &TBLoader::get_skip_texture_name);
 	ClassDB::bind_method(D_METHOD("set_visual_layer_mask", "option_visual_layer_mask"), &TBLoader::set_visual_layer_mask);
@@ -53,18 +51,17 @@ void TBLoader::_bind_methods()
 
 	ADD_GROUP("Map", "map_");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "map_resource", PROPERTY_HINT_FILE, "*.map"), "set_map", "get_map");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "map_inverse_scale", PROPERTY_HINT_NONE, "Inverse Scale"), "set_inverse_scale", "get_inverse_scale");
 
 	ADD_GROUP("Lighting", "lighting_");
-	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "lighting_unwrap_uv2", PROPERTY_HINT_NONE, "Unwrap UV2"), "set_lighting_unwrap_uv2", "get_lighting_unwrap_uv2");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "lighting_unwrap_texel_size", PROPERTY_HINT_NONE, "Unwrap Texel Size"), "set_lighting_unwrap_texel_size", "get_lighting_unwrap_texel_size");
 
 	ADD_GROUP("Options", "option_");
-	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "option_collision", PROPERTY_HINT_NONE, "Collision"), "set_collision", "get_collision");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "option_skip_hidden_layers", PROPERTY_HINT_NONE, "Skip Hidden Layers"), "set_skip_hidden_layers", "get_skip_hidden_layers");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "option_skip_empty_meshes", PROPERTY_HINT_NONE, "Skip Empty Meshes"), "set_skip_empty_meshes", "get_skip_empty_meshes");
-	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "option_filter_nearest", PROPERTY_HINT_NONE, "Texture Filter Nearest"), "set_filter_nearest", "get_filter_nearest");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "option_clip_texture_name", PROPERTY_HINT_NONE, "Clip Texture"), "set_clip_texture_name", "get_clip_texture_name");
+	ADD_PROPERTY(PropertyInfo(Variant::STRING, "option_ladder_texture_name", PROPERTY_HINT_NONE, "Ladder Texture"), "set_ladder_texture_name", "get_ladder_texture_name");
+	ADD_PROPERTY(PropertyInfo(Variant::STRING, "option_cushion_texture_name", PROPERTY_HINT_NONE, "Cushion Texture"), "set_cushion_texture_name", "get_cushion_texture_name");
+	ADD_PROPERTY(PropertyInfo(Variant::STRING, "option_no_wall_jump_texture_name", PROPERTY_HINT_NONE, "No Wall Jump Texture"), "set_no_wall_jump_texture_name", "get_no_wall_jump_texture_name");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "option_skip_texture_name", PROPERTY_HINT_NONE, "skip Texture"), "set_skip_texture_name", "get_skip_texture_name");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "option_visual_layer_mask", PROPERTY_HINT_LAYERS_3D_RENDER), "set_visual_layer_mask", "get_visual_layer_mask");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "option_collision_layer_mask", PROPERTY_HINT_LAYERS_3D_PHYSICS), "set_collision_layer_mask", "get_collision_layer_mask");
@@ -176,6 +173,36 @@ void TBLoader::set_clip_texture_name(const String& clip_texture_name)
 String TBLoader::get_clip_texture_name()
 {
 	return m_clip_texture_name;
+}
+
+void TBLoader::set_ladder_texture_name(const String& ladder_texture_name)
+{
+	m_ladder_texture_name = ladder_texture_name;
+}
+
+String TBLoader::get_ladder_texture_name()
+{
+	return m_ladder_texture_name;
+}
+
+void TBLoader::set_cushion_texture_name(const String& cushion_texture_name)
+{
+	m_cushion_texture_name = cushion_texture_name;
+}
+
+String TBLoader::get_cushion_texture_name()
+{
+	return m_cushion_texture_name;
+}
+
+void TBLoader::set_no_wall_jump_texture_name(const String& no_wall_jump_texture_name)
+{
+	m_no_wall_jump_texture_name = no_wall_jump_texture_name;
+}
+
+String TBLoader::get_no_wall_jump_texture_name()
+{
+	return m_no_wall_jump_texture_name;
 }
 
 void TBLoader::set_skip_texture_name(const String& skip_texture_name)

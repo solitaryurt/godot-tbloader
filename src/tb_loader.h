@@ -16,9 +16,9 @@ class TBLoader : public Node3D
 
 public:
 	String m_map_path;
-	int m_inverse_scale = 16;
+	int m_inverse_scale = 38;
 
-	bool m_lighting_unwrap_uv2 = false;
+	bool m_lighting_unwrap_uv2 = true;
 	double m_lighting_unwrap_texel_size = 0.2;
 
 	bool m_collision = true;
@@ -31,11 +31,14 @@ public:
 	String m_texture_path = "res://textures";
 	Ref<Material> m_material_template;
 	String m_material_texture_path = "albedo_texture";
-	String m_clip_texture_name = "";
-	String m_skip_texture_name = "";
-	uint32_t m_visual_layer_mask = 1;
+	String m_clip_texture_name = "common/player_clip";
+	String m_ladder_texture_name = "common/ladder_clip";
+	String m_cushion_texture_name = "common/cushion_clip";
+	String m_no_wall_jump_texture_name = "common/nowalljump_clip";
+	String m_skip_texture_name = "common/hint_skip";
+	uint32_t m_visual_layer_mask = 32;
 	uint32_t m_collision_layer_mask = 1;
-	uint32_t m_clip_collision_layer_mask = 1;
+	uint32_t m_clip_collision_layer_mask = 2;
 
 protected:
 	static void _bind_methods();
@@ -67,6 +70,12 @@ public:
 	bool get_filter_nearest();
 	void set_clip_texture_name(const String& clip_texture);
 	String get_clip_texture_name();
+	void set_ladder_texture_name(const String& ladder_texture);
+	String get_ladder_texture_name();
+	void set_cushion_texture_name(const String& cushion_texture);
+	String get_cushion_texture_name();
+	void set_no_wall_jump_texture_name(const String& no_wall_jump_texture);
+	String get_no_wall_jump_texture_name();
 	void set_skip_texture_name(const String& skip_texture);
 	String get_skip_texture_name();
 	uint32_t get_visual_layer_mask();
