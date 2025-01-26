@@ -67,9 +67,10 @@ void Builder::load_map(const String& path)
 
 void Builder::build_map()
 {
+	std::map<String, int> entity_class_count;
 	for (int i = 0; i < m_map->entity_count; i++) {
 		auto& ent = m_map->entities[i];
-		build_entity(i, ent, ent.get_property("classname"));
+		build_entity(i, ent, ent.get_property("classname"), entity_class_count);
 	}
 }
 
@@ -114,7 +115,7 @@ Node* Builder::build_worldspawn(int idx, LMEntity& ent, bool collision)
 	return container_node;
 }
 
-Node* Builder::build_entity(int idx, LMEntity& ent, const String& classname)
+Node* Builder::build_entity(int idx, LMEntity& ent, const String& classname, std::map<String, int>& entity_class_count)
 {
 	Node* newEntityNode = nullptr;
 
@@ -157,7 +158,7 @@ Node* Builder::build_entity(int idx, LMEntity& ent, const String& classname)
 
 		if (newEntityNode == nullptr) {
 			// Still no entity? We're building a custom one
-			newEntityNode = build_entity_custom(idx, ent, m_map->entity_geo[idx], classname);
+			newEntityNode = build_entity_custom(idx, ent, m_map->entity_geo[idx], classname, entity_class_count);
 		}
 	}
 
@@ -171,7 +172,7 @@ Node* Builder::build_entity(int idx, LMEntity& ent, const String& classname)
 	return newEntityNode;
 }
 
-Node* Builder::build_entity_custom(int idx, LMEntity& ent, LMEntityGeometry& geo, const String& classname)
+Node* Builder::build_entity_custom(int idx, LMEntity& ent, LMEntityGeometry& geo, const String& classname, std::map<String, int>& entity_class_count)
 {
 	// m_loader->m_entity_path => "res://entities/"
 	// "info_player_start" => "info/player/start.tscn", "info/player_start.tscn", "info_player_start.tscn"
@@ -210,6 +211,17 @@ Node* Builder::build_entity_custom(int idx, LMEntity& ent, LMEntityGeometry& geo
 				if (ent.brush_count > 0) {
 					set_entity_brush_common(idx, (Node3D*)instance, ent);
 				}
+			}
+
+			// Check if this entity class has been counted before
+			auto entity_name = ent.get_property("classname");
+			if (entity_class_count.find(entity_name) != entity_class_count.end()) {
+				// Increment the count and update the instance name
+				entity_class_count[entity_name]++;
+				instance->set_name(String("{0}_{1}").format(Array::make(entity_name, entity_class_count[entity_name])));
+			} else {
+				// First instance of this entity class
+				entity_class_count[entity_name] = 0;
 			}
 
 			for (int j = 0; j < ent.property_count; j++) {

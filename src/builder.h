@@ -16,6 +16,8 @@
 #include <geo_generator.h>
 #include <surface_gatherer.h>
 
+#include <map>
+
 using namespace godot;
 
 class TBLoader;
@@ -55,8 +57,8 @@ public:
 	Node* build_worldspawn(int idx, LMEntity& ent, bool collision);
 	void build_brush(int idx, Node3D* node, LMEntity& ent);
 
-	Node* build_entity(int idx, LMEntity& ent, const String& classname);
-	Node* build_entity_custom(int idx, LMEntity& ent, LMEntityGeometry& geo, const String& classname);
+	Node* build_entity(int idx, LMEntity& ent, const String& classname, std::map<String, int>& entity_class_count);
+	Node* build_entity_custom(int idx, LMEntity& ent, LMEntityGeometry& geo, const String& classname, std::map<String, int>& entity_class_count);
 	Node* build_entity_light(int idx, LMEntity& ent);
 	Node* build_entity_area(int idx, LMEntity& ent);
 

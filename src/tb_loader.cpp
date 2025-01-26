@@ -9,6 +9,8 @@ void TBLoader::_bind_methods()
 {
 	ClassDB::bind_method(D_METHOD("set_map", "map_resource"), &TBLoader::set_map);
 	ClassDB::bind_method(D_METHOD("get_map"), &TBLoader::get_map);
+	ClassDB::bind_method(D_METHOD("set_inverse_scale", "map_inverse_scale"), &TBLoader::set_inverse_scale);
+	ClassDB::bind_method(D_METHOD("get_inverse_scale"), &TBLoader::get_inverse_scale);
 
 	ClassDB::bind_method(D_METHOD("set_lighting_unwrap_texel_size", "lighting_unwrap_texel_size"), &TBLoader::set_lighting_unwrap_texel_size);
 	ClassDB::bind_method(D_METHOD("get_lighting_unwrap_texel_size"), &TBLoader::get_lighting_unwrap_texel_size);
@@ -51,6 +53,7 @@ void TBLoader::_bind_methods()
 
 	ADD_GROUP("Map", "map_");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "map_resource", PROPERTY_HINT_FILE, "*.map"), "set_map", "get_map");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "map_inverse_scale", PROPERTY_HINT_NONE, "Inverse Scale"), "set_inverse_scale", "get_inverse_scale");
 
 	ADD_GROUP("Lighting", "lighting_");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "lighting_unwrap_texel_size", PROPERTY_HINT_NONE, "Unwrap Texel Size"), "set_lighting_unwrap_texel_size", "get_lighting_unwrap_texel_size");
