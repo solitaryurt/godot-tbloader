@@ -447,6 +447,10 @@ void Builder::add_collider_from_mesh(Node3D* node, Ref<ArrayMesh>& mesh, Collide
 
 	auto collision_shape = memnew(CollisionShape3D());
 	collision_shape->set_shape(mesh_shape);
+	if (colshape == ColliderShape::Concave) {
+		auto concave_shape = Object::cast_to<ConcavePolygonShape3D>(mesh_shape.ptr());
+		concave_shape->set_backface_collision_enabled(true); // useful for raycasting exit bullets
+	}
 	node->add_child(collision_shape, true);
 	collision_shape->set_owner(m_loader->get_owner());
 
