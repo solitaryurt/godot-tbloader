@@ -214,14 +214,16 @@ Node* Builder::build_entity_custom(int idx, LMEntity& ent, LMEntityGeometry& geo
 			}
 
 			// Check if this entity class has been counted before
-			auto entity_name = ent.get_property("classname");
-			if (entity_class_count.find(entity_name) != entity_class_count.end()) {
-				// Increment the count and update the instance name
-				entity_class_count[entity_name]++;
-				instance->set_name(String("{0}_{1}").format(Array::make(entity_name, entity_class_count[entity_name])));
-			} else {
-				// First instance of this entity class
-				entity_class_count[entity_name] = 0;
+			if (!ent.has_property("targetname")) {
+				auto entity_name = ent.get_property("classname");
+				if (entity_class_count.find(entity_name) != entity_class_count.end()) {
+					// Increment the count and update the instance name
+					entity_class_count[entity_name]++;
+					instance->set_name(String("{0}_{1}").format(Array::make(entity_name, entity_class_count[entity_name])));
+				} else {
+					// First instance of this entity class
+					entity_class_count[entity_name] = 0;
+				}
 			}
 
 			for (int j = 0; j < ent.property_count; j++) {
@@ -691,6 +693,9 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 				Color *debug_color = nullptr;
 				if (key == SURFACE_LADDER_CLIP || key == SURFACE_CUSHION_CLIP || key == SURFACE_NO_WALL_JUMP) {
 					container = memnew(Area3D());
+					auto container_area3d = Object::cast_to<Area3D>(container);
+					container_area3d->set_monitorable(true);
+					container_area3d->set_monitoring(false);
 					debug_color = memnew(Color(1.0, 1.0, 0.0, 0.5));
 				} else {
 					container = memnew(StaticBody3D());
