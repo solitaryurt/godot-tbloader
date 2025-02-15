@@ -130,6 +130,7 @@ Node* Builder::build_entity(int idx, LMEntity& ent, const String& classname, std
 			}
 		}
 		newEntityNode = build_worldspawn(idx, ent, true);
+		newEntityNode->add_to_group("level");
 
 	} else {
 		// Load common entities if enabled
