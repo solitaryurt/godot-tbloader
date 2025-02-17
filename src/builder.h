@@ -79,4 +79,6 @@ protected:
 	String material_path(const char* name);
 	Ref<Texture2D> texture_from_name(const char* name);
 	Ref<Material> material_from_name(const char* name);
+
+	void smooth_mesh_shading(MeshInstance3D* mesh_instance);
 };

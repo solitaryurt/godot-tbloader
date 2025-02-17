@@ -131,7 +131,6 @@ Node* Builder::build_entity(int idx, LMEntity& ent, const String& classname, std
 		}
 		newEntityNode = build_worldspawn(idx, ent, true);
 		newEntityNode->add_to_group("level");
-
 	} else {
 		// Load common entities if enabled
 		if (m_loader->m_entity_common) {
@@ -168,6 +167,10 @@ Node* Builder::build_entity(int idx, LMEntity& ent, const String& classname, std
 		if (ent.has_property("name")) {
 			newEntityNode->set_name(ent.get_property("name"));
 		}
+	}
+
+	if (ent.has_property("smooth") || ent.has_property("soft")) {
+		smooth_mesh_shading(Object::cast_to<MeshInstance3D>(newEntityNode->get_child(0)));
 	}
 
 	return newEntityNode;
@@ -797,4 +800,78 @@ Ref<Material> Builder::material_from_name(const char* name)
 	}
 
 	return resource_loader->load(path);
+}
+
+void Builder::smooth_mesh_shading(MeshInstance3D* mesh_instance) {
+    if (!mesh_instance || !mesh_instance->get_mesh().is_valid()) {
+        return;
+    }
+
+    Ref<Mesh> source_mesh = mesh_instance->get_mesh();
+    Ref<ArrayMesh> array_mesh = source_mesh;
+    if (array_mesh.is_null()) {
+        UtilityFunctions::push_error("Only ArrayMesh is supported.");
+        return;
+    }
+
+    // Create a new ArrayMesh to avoid modifying the original
+    Ref<ArrayMesh> new_mesh = memnew(ArrayMesh);
+
+    // Process each surface
+    for (int surface_idx = 0; surface_idx < array_mesh->get_surface_count(); surface_idx++) {
+        Array arrays = array_mesh->surface_get_arrays(surface_idx);
+        if (arrays.size() <= Mesh::ARRAY_NORMAL) {
+            continue;
+        }
+
+        PackedVector3Array vertices = arrays[Mesh::ARRAY_VERTEX];
+        PackedVector3Array normals = arrays[Mesh::ARRAY_NORMAL];
+
+        // Map to track unique vertices and their normals
+        std::map<Vector3, std::pair<Vector3, std::vector<int>>> vertex_data;
+
+        // First pass: collect all vertex data
+        for (int idx = 0; idx < vertices.size(); idx++) {
+            Vector3 vertex = vertices[idx];
+            Vector3 normal = normals[idx];
+
+            if (vertex_data.find(vertex) == vertex_data.end()) {
+                vertex_data[vertex] = std::make_pair(Vector3(), std::vector<int>());
+            }
+            vertex_data[vertex].first += normal;
+            vertex_data[vertex].second.push_back(idx);
+        }
+
+        // Second pass: average normals and apply
+        PackedVector3Array new_normals = normals.duplicate();
+        for (auto& pair : vertex_data) {
+            // Normalize the accumulated normal
+            Vector3 avg_normal = pair.second.first.normalized();
+
+            // Apply to all instances of this vertex
+            for (int idx : pair.second.second) {
+                new_normals.set(idx, avg_normal);
+            }
+        }
+
+        // Update the arrays with new normals
+        arrays[Mesh::ARRAY_NORMAL] = new_normals;
+
+        // Add surface to new mesh
+        Dictionary format_info;
+        format_info["primitive"] = array_mesh->surface_get_format(surface_idx);
+        new_mesh->add_surface_from_arrays(
+            array_mesh->surface_get_primitive_type(surface_idx),
+            arrays,
+            Array(), // No blend shapes
+            format_info
+        );
+
+        // Copy surface material
+        new_mesh->surface_set_material(surface_idx, 
+            array_mesh->surface_get_material(surface_idx));
+    }
+
+    // Assign new mesh to the MeshInstance3D
+    mesh_instance->set_mesh(new_mesh);
 }
