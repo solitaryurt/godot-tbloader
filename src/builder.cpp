@@ -543,6 +543,7 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 	const String SURFACE_METAL = "METAL";
 	const String SURFACE_WOOD = "WOOD";
 	const String SURFACE_GLASS = "GLASS";
+	const String SURFACE_WINDOW = "WINDOW";
 	const String SURFACE_SAND = "SAND";
 	const String SURFACE_TILE = "TILE";
 	const String SURFACE_SNOW = "SNOW";
@@ -555,7 +556,7 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 	const String SURFACE_CUSHION_CLIP = "CUSHION_CLIP";
 	const String SURFACE_NO_WALL_JUMP = "NO_WALL_JUMP";
 
-	std::vector<String> collision_surface_types = {SURFACE_GRASS, SURFACE_DIRT, SURFACE_METAL, SURFACE_WOOD, SURFACE_GLASS, SURFACE_SAND, SURFACE_TILE, SURFACE_SNOW, SURFACE_VENT, SURFACE_WATER};
+	std::vector<String> collision_surface_types = {SURFACE_GRASS, SURFACE_DIRT, SURFACE_METAL, SURFACE_WOOD, SURFACE_GLASS, SURFACE_WINDOW, SURFACE_SAND, SURFACE_TILE, SURFACE_SNOW, SURFACE_VENT, SURFACE_WATER};
 	std::vector<String> collision_special_types = {SURFACE_DEFAULT, SURFACE_PLAYER_CLIP, SURFACE_LADDER_CLIP, SURFACE_CUSHION_CLIP, SURFACE_NO_WALL_JUMP};
 
 	// Initialize the map with the specified types
