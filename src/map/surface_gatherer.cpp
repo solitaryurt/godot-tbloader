@@ -9,6 +9,7 @@
 #include "entity.h"
 #include "face.h"
 #include "map_data.h"
+#include "patch.h"
 
 void LMSurfaceGatherer::surface_gatherer_set_split_type(SURFACE_SPLIT_TYPE new_split_type) {
 	split_type = new_split_type;
@@ -195,6 +196,51 @@ void LMSurfaceGatherer::surface_gatherer_run() {
 
 				index_offset += face_geo_inst->vertex_count;
 			}
+		}
+
+		// Gather patch geometry
+		for (int p = 0; p < entity_inst->patch_count; ++p) {
+			LMPatch *patch_inst = &entity_inst->patches[p];
+			LMPatchGeometry *patch_geo_inst = &entity_geo_inst->patches[p];
+
+			if (patch_geo_inst == NULL || patch_geo_inst->vertex_count < 3) {
+				continue;
+			}
+
+			// Apply texture filter for patches
+			if (texture_filter_idx != -1 && patch_inst->texture_idx != texture_filter_idx) {
+				continue;
+			}
+
+			// Apply face filter (skip texture) for patches
+			if (face_filter_texture_idx != -1 && patch_inst->texture_idx == face_filter_texture_idx) {
+				continue;
+			}
+
+			if (split_type == SST_BRUSH) {
+				index_offset = 0;
+				surf_inst = surface_gatherer_add_surface();
+			}
+
+			for (int v = 0; v < patch_geo_inst->vertex_count; ++v) {
+				LMFaceVertex vertex = patch_geo_inst->vertices[v];
+
+				if (entity_inst->spawn_type == EST_ENTITY || entity_inst->spawn_type == EST_GROUP) {
+					vertex.vertex = vec3_sub(vertex.vertex, entity_inst->center);
+				}
+
+				surf_inst->vertices = (LMFaceVertex *)realloc(surf_inst->vertices, (surf_inst->vertex_count + 1) * sizeof(LMFaceVertex));
+				surf_inst->vertices[surf_inst->vertex_count] = vertex;
+				surf_inst->vertex_count++;
+			}
+
+			for (int i = 0; i < patch_geo_inst->index_count; ++i) {
+				surf_inst->indices = (int *)realloc(surf_inst->indices, (surf_inst->index_count + 1) * sizeof(int));
+				surf_inst->indices[surf_inst->index_count] = patch_geo_inst->indices[i] + index_offset;
+				surf_inst->index_count++;
+			}
+
+			index_offset += patch_geo_inst->vertex_count;
 		}
 	}
 }

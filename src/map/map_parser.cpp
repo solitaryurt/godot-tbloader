@@ -9,6 +9,7 @@
 #include "entity.h"
 #include "face.h"
 #include "map_data.h"
+#include "patch.h"
 #include "platform.h"
 
 #define DEBUG false
@@ -26,11 +27,35 @@ void LMMapParser::reset_current_brush() {
 	current_brush.face_count = 0;
 }
 
+void LMMapParser::reset_current_patch() {
+	if (current_patch.control_points != NULL) {
+		free(current_patch.control_points);
+		current_patch.control_points = NULL;
+	}
+
+	current_patch.width = 0;
+	current_patch.height = 0;
+	current_patch.texture_idx = -1;
+	current_patch.subdiv_x = 0;
+	current_patch.subdiv_y = 0;
+	patch_row_idx = 0;
+	patch_cp_idx = 0;
+	patch_header_idx = 0;
+	patch_is_def3 = false;
+}
+
 void LMMapParser::reset_current_entity() {
 	for (int i = 0; i < current_entity.brush_count; ++i) {
 		if (current_entity.brushes[i].faces != NULL) {
 			free(current_entity.brushes[i].faces);
 			current_entity.brushes[i].faces = NULL;
+		}
+	}
+
+	for (int i = 0; i < current_entity.patch_count; ++i) {
+		if (current_entity.patches[i].control_points != NULL) {
+			free(current_entity.patches[i].control_points);
+			current_entity.patches[i].control_points = NULL;
 		}
 	}
 
@@ -57,6 +82,13 @@ void LMMapParser::reset_current_entity() {
 	}
 
 	current_entity.brush_count = 0;
+
+	if (current_entity.patches != NULL) {
+		free(current_entity.patches);
+		current_entity.patches = NULL;
+	}
+
+	current_entity.patch_count = 0;
 }
 
 bool LMMapParser::load_from_path(const char *map_file) {
@@ -64,6 +96,7 @@ bool LMMapParser::load_from_path(const char *map_file) {
 
 	reset_current_face();
 	reset_current_brush();
+	reset_current_patch();
 	reset_current_entity();
 
 	scope = PS_FILE;
@@ -71,6 +104,7 @@ bool LMMapParser::load_from_path(const char *map_file) {
 	entity_idx = -1;
 	brush_idx = -1;
 	face_idx = -1;
+	patch_idx = -1;
 	component_idx = 0;
 	valve_uvs = false;
 
@@ -115,6 +149,7 @@ void LMMapParser::load_from_godot_file(godot::Ref<godot::FileAccess> f) {
 
 	reset_current_face();
 	reset_current_brush();
+	reset_current_patch();
 	reset_current_entity();
 
 	scope = PS_FILE;
@@ -122,6 +157,7 @@ void LMMapParser::load_from_godot_file(godot::Ref<godot::FileAccess> f) {
 	entity_idx = -1;
 	brush_idx = -1;
 	face_idx = -1;
+	patch_idx = -1;
 	component_idx = 0;
 	valve_uvs = false;
 
@@ -199,6 +235,27 @@ void LMMapParser::set_scope(PARSE_SCOPE new_scope) {
 			break;
 		case PS_V_SCALE:
 			puts("Switching to V scale scope\n");
+			break;
+		case PS_PATCH_DEF:
+			puts("Switching to patch def scope\n");
+			break;
+		case PS_PATCH_TEXTURE:
+			puts("Switching to patch texture scope\n");
+			break;
+		case PS_PATCH_HEADER:
+			puts("Switching to patch header scope\n");
+			break;
+		case PS_PATCH_ROWS:
+			puts("Switching to patch rows scope\n");
+			break;
+		case PS_PATCH_ROW:
+			puts("Switching to patch row scope\n");
+			break;
+		case PS_PATCH_CP:
+			puts("Switching to patch control point scope\n");
+			break;
+		case PS_PATCH_DONE:
+			puts("Switching to patch done scope\n");
 			break;
 	}
 
@@ -310,6 +367,12 @@ void LMMapParser::token(const char *buf) {
 				face_idx++;
 				component_idx = 0;
 				set_scope(PS_PLANE_0);
+			} else if (strings_match(buf, "patchDef2")) {
+				patch_is_def3 = false;
+				set_scope(PS_PATCH_DEF);
+			} else if (strings_match(buf, "patchDef3")) {
+				patch_is_def3 = true;
+				set_scope(PS_PATCH_DEF);
 			} else if (strings_match(buf, "}")) {
 				commit_brush();
 				set_scope(PS_ENTITY);
@@ -478,6 +541,135 @@ void LMMapParser::token(const char *buf) {
 			set_scope(PS_BRUSH);
 			break;
 		}
+
+		// Patch parsing scopes
+		case PS_PATCH_DEF: {
+			// Expecting '{' to open the patch definition body
+			if (strings_match(buf, "{")) {
+				patch_idx++;
+				reset_current_patch();
+				patch_is_def3 = patch_is_def3; // preserve
+				set_scope(PS_PATCH_TEXTURE);
+			}
+			break;
+		}
+		case PS_PATCH_TEXTURE: {
+			// Read the texture name
+			current_patch.texture_idx = map_data->map_data_register_texture(buf);
+			patch_header_idx = 0;
+			set_scope(PS_PATCH_HEADER);
+			break;
+		}
+		case PS_PATCH_HEADER: {
+			// Read ( width height 0 0 0 ) for patchDef2
+			// or ( width height subdiv_x subdiv_y 0 0 0 ) for patchDef3
+			if (strings_match(buf, "(")) {
+				break; // skip opening paren
+			} else if (strings_match(buf, ")")) {
+				// Header complete, allocate control points
+				int cp_count = current_patch.width * current_patch.height;
+				if (cp_count > 0) {
+					current_patch.control_points = (LMPatchControlPoint *)malloc(cp_count * sizeof(LMPatchControlPoint));
+					memset(current_patch.control_points, 0, cp_count * sizeof(LMPatchControlPoint));
+				}
+				patch_row_idx = 0;
+				patch_cp_idx = 0;
+				set_scope(PS_PATCH_ROWS);
+			} else {
+				if (patch_is_def3) {
+					// patchDef3 header: width height subdiv_x subdiv_y 0 0 0
+					switch (patch_header_idx) {
+						case 0: current_patch.width = atoi(buf); break;
+						case 1: current_patch.height = atoi(buf); break;
+						case 2: current_patch.subdiv_x = atoi(buf); break;
+						case 3: current_patch.subdiv_y = atoi(buf); break;
+						// remaining values are padding (ignored)
+					}
+				} else {
+					// patchDef2 header: width height 0 0 0
+					switch (patch_header_idx) {
+						case 0: current_patch.width = atoi(buf); break;
+						case 1: current_patch.height = atoi(buf); break;
+						// remaining values are padding (ignored)
+					}
+				}
+				patch_header_idx++;
+			}
+			break;
+		}
+		case PS_PATCH_ROWS: {
+			// Waiting for outer '(' that wraps all columns
+			if (strings_match(buf, "(")) {
+				set_scope(PS_PATCH_ROW);
+			}
+			break;
+		}
+		case PS_PATCH_ROW: {
+			// At the column level. '(' starts a column or a control point.
+			// ')' closes a column or the outer rows container.
+			if (strings_match(buf, "(")) {
+				if (patch_cp_idx == 0 && component_idx == 0) {
+					// Starting a new column -- the first '(' opens the column,
+					// the next '(' will start the first control point.
+					// We use PS_PATCH_CP for reading inside a column.
+					set_scope(PS_PATCH_CP);
+				}
+			} else if (strings_match(buf, ")")) {
+				// Closing the outer rows container -- all columns read
+				patch_done_brace_count = 0;
+				set_scope(PS_PATCH_DONE);
+			}
+			break;
+		}
+		case PS_PATCH_CP: {
+			// Inside a column, reading control points.
+			// Format: ( x y z u v ) ( x y z u v ) ...
+			// ')' with component_idx > 0 means end of a control point.
+			// ')' with component_idx == 0 means end of the column.
+			if (strings_match(buf, "(")) {
+				// Start of a control point
+				component_idx = 0;
+			} else if (strings_match(buf, ")")) {
+				if (component_idx > 0) {
+					// End of a control point
+					patch_cp_idx++;
+					component_idx = 0;
+				} else {
+					// End of this column
+					patch_row_idx++;
+					patch_cp_idx = 0;
+					set_scope(PS_PATCH_ROW);
+				}
+			} else {
+				// Numeric component of a control point
+				int cp_index = patch_cp_idx * current_patch.width + patch_row_idx;
+				if (current_patch.control_points != NULL && cp_index < current_patch.width * current_patch.height) {
+					LMPatchControlPoint *cp = &current_patch.control_points[cp_index];
+					switch (component_idx) {
+						case 0: cp->position.x = atof(buf); break;
+						case 1: cp->position.y = atof(buf); break;
+						case 2: cp->position.z = atof(buf); break;
+						case 3: cp->u = atof(buf); break;
+						case 4: cp->v = atof(buf); break;
+					}
+				}
+				component_idx++;
+			}
+			break;
+		}
+		case PS_PATCH_DONE: {
+			// We need to consume two '}' tokens:
+			// first closes the patchDef body, second closes the brush block
+			if (strings_match(buf, "}")) {
+				patch_done_brace_count++;
+				if (patch_done_brace_count >= 2) {
+					commit_patch();
+					set_scope(PS_ENTITY);
+				}
+			}
+			break;
+		}
+
 		default:
 			break;
 	}
@@ -519,6 +711,28 @@ void LMMapParser::commit_brush() {
 	reset_current_brush();
 }
 
+void LMMapParser::commit_patch() {
+	current_entity.patch_count++;
+	current_entity.patches = (LMPatch *)realloc(current_entity.patches, current_entity.patch_count * sizeof(LMPatch));
+
+	LMPatch *dest_patch = &current_entity.patches[current_entity.patch_count - 1];
+	*dest_patch = { 0 };
+
+	dest_patch->texture_idx = current_patch.texture_idx;
+	dest_patch->width = current_patch.width;
+	dest_patch->height = current_patch.height;
+	dest_patch->subdiv_x = current_patch.subdiv_x;
+	dest_patch->subdiv_y = current_patch.subdiv_y;
+
+	int cp_count = current_patch.width * current_patch.height;
+	if (cp_count > 0 && current_patch.control_points != NULL) {
+		dest_patch->control_points = (LMPatchControlPoint *)malloc(cp_count * sizeof(LMPatchControlPoint));
+		memcpy(dest_patch->control_points, current_patch.control_points, cp_count * sizeof(LMPatchControlPoint));
+	}
+
+	reset_current_patch();
+}
+
 void LMMapParser::commit_entity() {
 	map_data->entity_count++;
 	map_data->entities = (LMEntity *)realloc(map_data->entities, map_data->entity_count * sizeof(LMEntity));
@@ -547,6 +761,28 @@ void LMMapParser::commit_entity() {
 		dest_brush->faces = (LMFace *)realloc(dest_brush->faces, dest_brush->face_count * sizeof(LMFace));
 		for (int f = 0; f < dest_brush->face_count; ++f) {
 			dest_brush->faces[f] = current_entity.brushes[b].faces[f];
+		}
+	}
+
+	dest_entity->patch_count = current_entity.patch_count;
+	if (dest_entity->patch_count > 0) {
+		dest_entity->patches = (LMPatch *)malloc(dest_entity->patch_count * sizeof(LMPatch));
+		for (int p = 0; p < dest_entity->patch_count; ++p) {
+			LMPatch *dest_patch = &dest_entity->patches[p];
+			LMPatch *src_patch = &current_entity.patches[p];
+			*dest_patch = { 0 };
+
+			dest_patch->texture_idx = src_patch->texture_idx;
+			dest_patch->width = src_patch->width;
+			dest_patch->height = src_patch->height;
+			dest_patch->subdiv_x = src_patch->subdiv_x;
+			dest_patch->subdiv_y = src_patch->subdiv_y;
+
+			int cp_count = src_patch->width * src_patch->height;
+			if (cp_count > 0 && src_patch->control_points != NULL) {
+				dest_patch->control_points = (LMPatchControlPoint *)malloc(cp_count * sizeof(LMPatchControlPoint));
+				memcpy(dest_patch->control_points, src_patch->control_points, cp_count * sizeof(LMPatchControlPoint));
+			}
 		}
 	}
 

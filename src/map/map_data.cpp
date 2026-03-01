@@ -2,6 +2,7 @@
 
 #include "brush.h"
 #include "face.h"
+#include "patch.h"
 #include "platform.h"
 
 #include <stdio.h>
@@ -41,6 +42,38 @@ void LMMapData::map_data_reset() {
 						free(brush_geo_inst->faces);
 						brush_geo_inst->faces = NULL;
 					}
+				}
+
+				// Free patch geometry
+				if (entity_geo_inst->patches != NULL) {
+					for (int p = 0; p < ent_inst->patch_count; ++p) {
+						LMPatchGeometry *patch_geo_inst = &entity_geo_inst->patches[p];
+						if (patch_geo_inst != NULL) {
+							if (patch_geo_inst->vertices != NULL) {
+								free(patch_geo_inst->vertices);
+								patch_geo_inst->vertices = NULL;
+							}
+							if (patch_geo_inst->indices != NULL) {
+								free(patch_geo_inst->indices);
+								patch_geo_inst->indices = NULL;
+							}
+						}
+					}
+					free(entity_geo_inst->patches);
+					entity_geo_inst->patches = NULL;
+				}
+
+				// Free patch data
+				for (int p = 0; p < ent_inst->patch_count; ++p) {
+					LMPatch *patch_inst = &ent_inst->patches[p];
+					if (patch_inst->control_points != NULL) {
+						free(patch_inst->control_points);
+						patch_inst->control_points = NULL;
+					}
+				}
+				if (ent_inst->patches != NULL) {
+					free(ent_inst->patches);
+					ent_inst->patches = NULL;
 				}
 
 				if (ent_inst->properties != NULL) {

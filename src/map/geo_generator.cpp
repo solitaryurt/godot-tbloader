@@ -9,6 +9,7 @@
 #include "entity.h"
 #include "face.h"
 #include "libmap_math.h"
+#include "patch.h"
 
 const vec3 UP_VECTOR = { 0.0, 0.0, 1.0 };
 const vec3 RIGHT_VECTOR = { 0.0, 1.0, 0.0 };
@@ -78,6 +79,15 @@ void LMGeoGenerator::run() {
 				*face_geo_inst = { 0 };
 			}
 		}
+
+		// Allocate patch geometry
+		if (ent_inst->patch_count > 0) {
+			entity_geo_inst->patches = (LMPatchGeometry *)malloc(ent_inst->patch_count * sizeof(LMPatchGeometry));
+			for (int p = 0; p < ent_inst->patch_count; ++p) {
+				LMPatchGeometry *patch_geo_inst = &entity_geo_inst->patches[p];
+				*patch_geo_inst = { 0 };
+			}
+		}
 	}
 
 	for (int e = 0; e < map_data->entity_count; ++e) {
@@ -108,8 +118,24 @@ void LMGeoGenerator::run() {
 			ent_inst->center = vec3_add(ent_inst->center, brush_inst->center);
 		}
 
-		if (ent_inst->brush_count > 0) {
-			ent_inst->center = vec3_div_double(ent_inst->center, ent_inst->brush_count);
+		// Generate patch geometry
+		for (int p = 0; p < ent_inst->patch_count; ++p) {
+			generate_patch_geometry(e, p);
+
+			LMPatchGeometry *patch_geo_inst = &map_data->entity_geo[e].patches[p];
+			vec3 patch_center = { 0.0, 0.0, 0.0 };
+			for (int v = 0; v < patch_geo_inst->vertex_count; ++v) {
+				patch_center = vec3_add(patch_center, patch_geo_inst->vertices[v].vertex);
+			}
+			if (patch_geo_inst->vertex_count > 0) {
+				patch_center = vec3_div_double(patch_center, patch_geo_inst->vertex_count);
+			}
+			ent_inst->center = vec3_add(ent_inst->center, patch_center);
+		}
+
+		int total_geo_sources = ent_inst->brush_count + ent_inst->patch_count;
+		if (total_geo_sources > 0) {
+			ent_inst->center = vec3_div_double(ent_inst->center, total_geo_sources);
 		}
 	}
 
@@ -264,6 +290,195 @@ void LMGeoGenerator::generate_brush_vertices(int entity_idx, int brush_idx) {
 
 		for (int v = 0; v < face_geo_inst->vertex_count; ++v) {
 			face_geo_inst->vertices[v].normal = vec3_normalize(face_geo_inst->vertices[v].normal);
+		}
+	}
+}
+
+// Evaluate a quadratic bezier curve at parameter t (0..1)
+static vec3 bezier_quad_vec3(const vec3 &p0, const vec3 &p1, const vec3 &p2, double t) {
+	double it = 1.0 - t;
+	// B(t) = (1-t)^2 * P0 + 2*(1-t)*t * P1 + t^2 * P2
+	return vec3_add(vec3_add(
+		vec3_mul_double(p0, it * it),
+		vec3_mul_double(p1, 2.0 * it * t)),
+		vec3_mul_double(p2, t * t));
+}
+
+static double bezier_quad_scalar(double p0, double p1, double p2, double t) {
+	double it = 1.0 - t;
+	return it * it * p0 + 2.0 * it * t * p1 + t * t * p2;
+}
+
+// Evaluate derivative of quadratic bezier at parameter t
+static vec3 bezier_quad_deriv_vec3(const vec3 &p0, const vec3 &p1, const vec3 &p2, double t) {
+	double it = 1.0 - t;
+	// B'(t) = 2*(1-t)*(P1-P0) + 2*t*(P2-P1)
+	return vec3_add(
+		vec3_mul_double(vec3_sub(p1, p0), 2.0 * it),
+		vec3_mul_double(vec3_sub(p2, p1), 2.0 * t));
+}
+
+void LMGeoGenerator::generate_patch_geometry(int entity_idx, int patch_idx) {
+	LMEntity *ent_inst = &map_data->entities[entity_idx];
+	LMPatch *patch = &ent_inst->patches[patch_idx];
+	LMPatchGeometry *patch_geo = &map_data->entity_geo[entity_idx].patches[patch_idx];
+
+	if (patch->width < 3 || patch->height < 3) {
+		return;
+	}
+
+	// Number of 3x3 sub-patches in each direction
+	int num_patches_x = (patch->width - 1) / 2;
+	int num_patches_y = (patch->height - 1) / 2;
+
+	// Tessellation level per sub-patch (number of subdivisions)
+	// Use a fixed tessellation level; patchDef3 subdivision hints could override this
+	int tess_level = 4;
+	if (patch->subdiv_x > 0) {
+		tess_level = patch->subdiv_x;
+	}
+	int tess_level_y = tess_level;
+	if (patch->subdiv_y > 0) {
+		tess_level_y = patch->subdiv_y;
+	}
+
+	// Total number of vertices in the tessellated mesh
+	int tess_width = num_patches_x * tess_level + 1;
+	int tess_height = num_patches_y * tess_level_y + 1;
+
+	int total_verts = tess_width * tess_height;
+	int total_indices = (tess_width - 1) * (tess_height - 1) * 6;
+
+	patch_geo->vertices = (LMFaceVertex *)malloc(total_verts * sizeof(LMFaceVertex));
+	memset(patch_geo->vertices, 0, total_verts * sizeof(LMFaceVertex));
+	patch_geo->vertex_count = total_verts;
+
+	patch_geo->indices = (int *)malloc(total_indices * sizeof(int));
+	patch_geo->index_count = 0;
+
+	// Helper macro to get control point at (col, row) in the grid
+	// The grid is stored column-major: control_points[row * width + col]
+	#define CP(col, row) patch->control_points[(row) * patch->width + (col)]
+
+	// Tessellate each sub-patch and fill in the vertex grid
+	for (int py = 0; py < num_patches_y; ++py) {
+		for (int px = 0; px < num_patches_x; ++px) {
+			// Control point indices for this 3x3 sub-patch
+			int cp_x0 = px * 2;
+			int cp_x1 = px * 2 + 1;
+			int cp_x2 = px * 2 + 2;
+			int cp_y0 = py * 2;
+			int cp_y1 = py * 2 + 1;
+			int cp_y2 = py * 2 + 2;
+
+			// The 9 control points for this sub-patch
+			LMPatchControlPoint cp00 = CP(cp_x0, cp_y0);
+			LMPatchControlPoint cp10 = CP(cp_x1, cp_y0);
+			LMPatchControlPoint cp20 = CP(cp_x2, cp_y0);
+			LMPatchControlPoint cp01 = CP(cp_x0, cp_y1);
+			LMPatchControlPoint cp11 = CP(cp_x1, cp_y1);
+			LMPatchControlPoint cp21 = CP(cp_x2, cp_y1);
+			LMPatchControlPoint cp02 = CP(cp_x0, cp_y2);
+			LMPatchControlPoint cp12 = CP(cp_x1, cp_y2);
+			LMPatchControlPoint cp22 = CP(cp_x2, cp_y2);
+
+			int steps_u = tess_level;
+			int steps_v = tess_level_y;
+
+			// Don't re-generate the first row/column of subsequent sub-patches
+			// (they share the boundary with the previous sub-patch)
+			int start_u = (px == 0) ? 0 : 1;
+			int start_v = (py == 0) ? 0 : 1;
+
+			for (int iv = start_v; iv <= steps_v; ++iv) {
+				double v = (double)iv / (double)steps_v;
+
+				for (int iu = start_u; iu <= steps_u; ++iu) {
+					double u = (double)iu / (double)steps_u;
+
+					// Evaluate the bicubic bezier surface at (u, v)
+					// First, evaluate 3 curves along v for x=0,1,2
+					vec3 p0 = bezier_quad_vec3(cp00.position, cp01.position, cp02.position, v);
+					vec3 p1 = bezier_quad_vec3(cp10.position, cp11.position, cp12.position, v);
+					vec3 p2 = bezier_quad_vec3(cp20.position, cp21.position, cp22.position, v);
+
+					// Then evaluate along u
+					vec3 pos = bezier_quad_vec3(p0, p1, p2, u);
+
+					// UV coordinates: same bezier interpolation
+					double uv_u0 = bezier_quad_scalar(cp00.u, cp01.u, cp02.u, v);
+					double uv_u1 = bezier_quad_scalar(cp10.u, cp11.u, cp12.u, v);
+					double uv_u2 = bezier_quad_scalar(cp20.u, cp21.u, cp22.u, v);
+					double tex_u = bezier_quad_scalar(uv_u0, uv_u1, uv_u2, u);
+
+					double uv_v0 = bezier_quad_scalar(cp00.v, cp01.v, cp02.v, v);
+					double uv_v1 = bezier_quad_scalar(cp10.v, cp11.v, cp12.v, v);
+					double uv_v2 = bezier_quad_scalar(cp20.v, cp21.v, cp22.v, v);
+					double tex_v = bezier_quad_scalar(uv_v0, uv_v1, uv_v2, u);
+
+					// Compute tangent vectors for normal calculation
+					// dP/du
+					vec3 du0 = bezier_quad_vec3(cp00.position, cp01.position, cp02.position, v);
+					vec3 du1 = bezier_quad_vec3(cp10.position, cp11.position, cp12.position, v);
+					vec3 du2 = bezier_quad_vec3(cp20.position, cp21.position, cp22.position, v);
+					vec3 dpdu = bezier_quad_deriv_vec3(du0, du1, du2, u);
+
+					// dP/dv
+					vec3 dv0 = bezier_quad_vec3(cp00.position, cp10.position, cp20.position, u);
+					vec3 dv1 = bezier_quad_vec3(cp01.position, cp11.position, cp21.position, u);
+					vec3 dv2 = bezier_quad_vec3(cp02.position, cp12.position, cp22.position, u);
+					vec3 dpdv = bezier_quad_deriv_vec3(dv0, dv1, dv2, v);
+
+					vec3 normal = vec3_cross(dpdv, dpdu);
+					if (vec3_sqlen(normal) > CMP_EPSILON * CMP_EPSILON) {
+						normal = vec3_normalize(normal);
+					} else {
+						normal = { 0.0, 0.0, 1.0 };
+					}
+
+					// Tangent (along u direction)
+					LMVertexTangent tangent = { 0 };
+					if (vec3_sqlen(dpdu) > CMP_EPSILON * CMP_EPSILON) {
+						vec3 t = vec3_normalize(dpdu);
+						// Compute bitangent sign
+						vec3 bitangent = vec3_cross(normal, t);
+						double w = (vec3_dot(bitangent, dpdv) < 0.0) ? -1.0 : 1.0;
+						tangent = { t.x, t.y, t.z, w };
+					}
+
+					// Compute vertex grid position
+					int grid_x = px * tess_level + iu;
+					int grid_y = py * tess_level_y + iv;
+					int vert_idx = grid_y * tess_width + grid_x;
+
+					patch_geo->vertices[vert_idx].vertex = pos;
+					patch_geo->vertices[vert_idx].normal = normal;
+					patch_geo->vertices[vert_idx].uv = { tex_u, tex_v };
+					patch_geo->vertices[vert_idx].tangent = tangent;
+				}
+			}
+		}
+	}
+
+	#undef CP
+
+	// Generate indices (two triangles per quad)
+	for (int y = 0; y < tess_height - 1; ++y) {
+		for (int x = 0; x < tess_width - 1; ++x) {
+			int i00 = y * tess_width + x;
+			int i10 = y * tess_width + (x + 1);
+			int i01 = (y + 1) * tess_width + x;
+			int i11 = (y + 1) * tess_width + (x + 1);
+
+			// Triangle 1
+			patch_geo->indices[patch_geo->index_count++] = i00;
+			patch_geo->indices[patch_geo->index_count++] = i01;
+			patch_geo->indices[patch_geo->index_count++] = i11;
+
+			// Triangle 2
+			patch_geo->indices[patch_geo->index_count++] = i00;
+			patch_geo->indices[patch_geo->index_count++] = i11;
+			patch_geo->indices[patch_geo->index_count++] = i10;
 		}
 	}
 }

@@ -3,6 +3,7 @@
 
 #include "brush.h"
 #include "libmap.h"
+#include "patch.h"
 #include "vector.h"
 #include "map_data.h"
 #include <memory>
@@ -14,6 +15,7 @@ public:
 	void run();
 
 	void generate_brush_vertices(int entity_idx, int brush_idx);
+	void generate_patch_geometry(int entity_idx, int patch_idx);
 	bool intersect_faces(LMFace f0, LMFace f1, LMFace f2, vec3 *o_vertex);
 	bool vertex_in_hull(LMFace *faces, int face_count, vec3 vertex);
 

@@ -5,6 +5,7 @@
 #include <stdlib.h>
 
 typedef struct LMBrush LMBrush;
+struct LMPatch;
 
 enum ENTITY_SPAWN_TYPE {
 	EST_WORLDSPAWN = 0,
@@ -25,6 +26,9 @@ public:
 
 	int brush_count = 0;
 	LMBrush *brushes = NULL;
+
+	int patch_count = 0;
+	LMPatch *patches = NULL;
 
 	vec3 center;
 	enum ENTITY_SPAWN_TYPE spawn_type;

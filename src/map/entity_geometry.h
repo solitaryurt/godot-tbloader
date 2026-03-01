@@ -34,8 +34,17 @@ typedef struct LMBrushGeometry {
 	LMFaceGeometry *faces = NULL;
 } LMBrushGeometry;
 
+// Tessellated patch mesh geometry (single surface with vertices + indices)
+typedef struct LMPatchGeometry {
+	int vertex_count = 0;
+	LMFaceVertex *vertices = NULL;
+	int index_count = 0;
+	int *indices = NULL;
+} LMPatchGeometry;
+
 typedef struct LMEntityGeometry {
 	LMBrushGeometry *brushes = NULL;
+	LMPatchGeometry *patches = NULL;
 } LMEntityGeometry;
 
 #endif
