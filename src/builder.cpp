@@ -2,6 +2,8 @@
 
 #include <godot_cpp/classes/resource_loader.hpp>
 #include <godot_cpp/classes/omni_light3d.hpp>
+#include <godot_cpp/classes/audio_stream_player3d.hpp>
+#include <godot_cpp/classes/audio_stream.hpp>
 #include <godot_cpp/classes/area3d.hpp>
 #include <godot_cpp/classes/collision_shape3d.hpp>
 #include <godot_cpp/classes/shape3d.hpp>
@@ -140,6 +142,8 @@ Node* Builder::build_entity(int idx, LMEntity& ent, const String& classname, std
 				newEntityNode = build_entity_area(idx, ent);
 			} else if (classname == "nocollision") {
 				newEntityNode = build_worldspawn(idx, ent, false);
+			} else if (classname == "target_speaker") {
+				newEntityNode = build_entity_sound(idx, ent);
 			} else if (classname == "trigger_location") {
 				auto location = ent.get_property("message");
 				if (strlen(location) == 0) {
@@ -339,6 +343,67 @@ Node* Builder::build_entity_area(int idx, LMEntity& ent)
 	return area;
 }
 
+Node* Builder::build_entity_sound(int idx, LMEntity& ent)
+{
+	auto player = memnew(AudioStreamPlayer3D());
+
+	// Load the audio stream resource
+	const char* sound_path = ent.get_property("sound", "");
+	if (strlen(sound_path) > 0) {
+		auto resource_loader = ResourceLoader::get_singleton();
+		if (resource_loader->exists(sound_path, "AudioStream")) {
+			Ref<AudioStream> stream = resource_loader->load(sound_path);
+			if (stream.is_valid()) {
+				player->set_stream(stream);
+			} else {
+				UtilityFunctions::printerr("Failed to load audio stream: ", sound_path);
+			}
+		} else {
+			UtilityFunctions::printerr("Audio stream resource not found: ", sound_path);
+		}
+	}
+
+	// Volume
+	player->set_max_db(ent.get_property_float("max_db", 0.0f));
+
+	// Distance attenuation
+	player->set_unit_size(ent.get_property_float("unit_size", 10.0f));
+	player->set_max_distance(ent.get_property_float("max_distance", 0.0f));
+
+	// Attenuation model
+	const char* attenuation = ent.get_property("attenuation_model", "");
+	if (strlen(attenuation) > 0) {
+		if (!strcmp(attenuation, "inverse") || !strcmp(attenuation, "0")) {
+			player->set_attenuation_model(AudioStreamPlayer3D::ATTENUATION_INVERSE_DISTANCE);
+		} else if (!strcmp(attenuation, "inverse_square") || !strcmp(attenuation, "1")) {
+			player->set_attenuation_model(AudioStreamPlayer3D::ATTENUATION_INVERSE_SQUARE_DISTANCE);
+		} else if (!strcmp(attenuation, "logarithmic") || !strcmp(attenuation, "2")) {
+			player->set_attenuation_model(AudioStreamPlayer3D::ATTENUATION_LOGARITHMIC);
+		} else if (!strcmp(attenuation, "disabled") || !strcmp(attenuation, "3")) {
+			player->set_attenuation_model(AudioStreamPlayer3D::ATTENUATION_DISABLED);
+		}
+	}
+
+	// Audio bus
+	const char* bus = ent.get_property("bus", "");
+	if (strlen(bus) > 0) {
+		player->set_bus(StringName(bus));
+	}
+
+	// Autoplay (default true for ambient sounds)
+	bool autoplay = ent.get_property_int("autoplay", 1) != 0;
+	player->set_autoplay(autoplay);
+
+	// Position and rotation
+	set_entity_node_common(player, ent);
+
+	// Add to scene tree
+	m_loader->add_child(player);
+	player->set_owner(m_loader->get_owner());
+
+	return player;
+}
+
 void Builder::set_entity_node_common(Node3D* node, LMEntity& ent)
 {
 	// Target name
@@ -527,6 +592,11 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 
 	// Set the layers that the mesh instance will be rendered in
 	mesh_instance->set_layer_mask(m_loader->get_visual_layer_mask());
+
+	if (ent.has_property("skybox")) {
+		mesh_instance->set_layer_mask(m_loader->get_skybox_layer_mask());
+	}
+
 	mesh_instance->set_owner(m_loader->get_owner());
 	mesh_instance->set_name(instance_name);
 

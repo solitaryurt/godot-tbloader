@@ -37,6 +37,7 @@ public:
 	String m_no_wall_jump_texture_name = "common/nowalljump_clip";
 	String m_skip_texture_name = "common/hint_skip";
 	uint32_t m_visual_layer_mask = 32;
+	uint32_t m_skybox_layer_mask = 128;
 	uint32_t m_collision_layer_mask = 1;
 	uint32_t m_clip_collision_layer_mask = 2;
 
@@ -81,6 +82,8 @@ public:
 	uint32_t get_visual_layer_mask();
 	void set_visual_layer_mask(uint32_t visual_layer_mask);
 	uint32_t get_collision_layer_mask();
+	void set_skybox_layer_mask(uint32_t skybox_layer_mask);
+	uint32_t get_skybox_layer_mask();
 	void set_collision_layer_mask(uint32_t collision_layer_mask);
 	uint32_t get_clip_collision_layer_mask();
 	void set_clip_collision_layer_mask(uint32_t collision_layer_mask);

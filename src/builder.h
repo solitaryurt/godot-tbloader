@@ -61,6 +61,7 @@ public:
 	Node* build_entity_custom(int idx, LMEntity& ent, LMEntityGeometry& geo, const String& classname, std::map<String, int>& entity_class_count);
 	Node* build_entity_light(int idx, LMEntity& ent);
 	Node* build_entity_area(int idx, LMEntity& ent);
+	Node* build_entity_sound(int idx, LMEntity& ent);
 
 	void set_entity_node_common(Node3D* node, LMEntity& ent);
 	void set_entity_brush_common(int idx, Node3D* node, LMEntity& ent);

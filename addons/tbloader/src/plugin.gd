@@ -4,13 +4,24 @@ class_name TBPlugin
 
 var map_control: Control = null
 var editing_loader: WeakRef = weakref(null)
+var materials_panel: Control = null
+var materials_tree: Tree = null
+var materials_button: Button = null
+var materials_count_label: Label = null
 
 func _enter_tree():
 	map_control = create_map_control()
 	map_control.set_visible(false)
 	add_control_to_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, map_control)
 
+	materials_panel = create_materials_panel()
+	add_control_to_bottom_panel(materials_panel, "Map Materials")
+
 func _exit_tree():
+	remove_control_from_bottom_panel(materials_panel)
+	materials_panel.queue_free()
+	materials_panel = null
+
 	remove_control_from_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, map_control)
 	map_control.queue_free()
 	map_control = null
@@ -23,6 +34,7 @@ func _make_visible(visible: bool):
 
 func _edit(object):
 	editing_loader = weakref(object)
+	refresh_materials()
 
 func create_map_control() -> Control:
 	var button_build_meshes = Button.new()
@@ -30,10 +42,130 @@ func create_map_control() -> Control:
 	button_build_meshes.text = "Build Meshes"
 	button_build_meshes.connect("pressed", Callable(self, "build_meshes"))
 
+	materials_button = Button.new()
+	materials_button.flat = true
+	materials_button.text = "Map Materials"
+	materials_button.connect("pressed", Callable(self, "show_materials"))
+
 	var ret = HBoxContainer.new()
 	ret.add_child(button_build_meshes)
+	ret.add_child(materials_button)
 	return ret
 
 func build_meshes():
 	var loader = editing_loader.get_ref()
+	if loader == null:
+		return
 	loader.build_meshes()
+	refresh_materials()
+
+func create_materials_panel() -> Control:
+	var panel = VBoxContainer.new()
+	panel.custom_minimum_size.y = 220
+
+	var header = HBoxContainer.new()
+	materials_count_label = Label.new()
+	materials_count_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	header.add_child(materials_count_label)
+
+	var refresh_button = Button.new()
+	refresh_button.text = "Refresh"
+	refresh_button.connect("pressed", Callable(self, "refresh_materials"))
+	header.add_child(refresh_button)
+	panel.add_child(header)
+
+	materials_tree = Tree.new()
+	materials_tree.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	materials_tree.hide_root = true
+	materials_tree.columns = 2
+	materials_tree.set_column_title(0, "Material")
+	materials_tree.set_column_title(1, "Resource")
+	materials_tree.set_column_titles_visible(true)
+	materials_tree.set_column_expand(0, true)
+	materials_tree.set_column_expand(1, true)
+	materials_tree.connect("item_selected", Callable(self, "material_selected"))
+	panel.add_child(materials_tree)
+
+	return panel
+
+func show_materials():
+	refresh_materials()
+	make_bottom_panel_item_visible(materials_panel)
+
+func refresh_materials():
+	if materials_tree == null:
+		return
+
+	materials_tree.clear()
+	var root = materials_tree.create_item()
+	var loader = editing_loader.get_ref()
+	if loader == null:
+		materials_count_label.text = "Select a TBLoader node to view its materials."
+		materials_button.text = "Map Materials"
+		return
+
+	var materials = {}
+	for mesh_instance in loader.find_children("*", "MeshInstance3D", true, false):
+		add_material(materials, mesh_instance.material_override, loader)
+		if mesh_instance.mesh == null:
+			continue
+		for surface_index in mesh_instance.mesh.get_surface_count():
+			var material = mesh_instance.get_surface_override_material(surface_index)
+			if material == null:
+				material = mesh_instance.mesh.surface_get_material(surface_index)
+			add_material(materials, material, loader)
+
+	var entries = materials.values()
+	entries.sort_custom(func(a, b): return a.name.naturalnocasecmp_to(b.name) < 0)
+	for entry in entries:
+		var item = materials_tree.create_item(root)
+		item.set_text(0, entry.name)
+		item.set_text(1, entry.path)
+		item.set_metadata(0, entry.material)
+		item.set_tooltip_text(0, "Show this material in the Inspector")
+
+	var count = entries.size()
+	materials_count_label.text = "%d unique material%s" % [count, "" if count == 1 else "s"]
+	materials_button.text = "Map Materials (%d)" % count
+
+func add_material(materials: Dictionary, material: Material, loader: TBLoader):
+	if material == null:
+		return
+
+	var path = material.resource_path
+	var texture_path = ""
+	var texture = material.get(loader.texture_material_texture_path)
+	if texture is Texture2D:
+		texture_path = texture.resource_path
+
+	var key = path
+	if key.is_empty():
+		key = texture_path
+	if key.is_empty() and not material.resource_name.is_empty():
+		key = material.resource_name
+	if key.is_empty():
+		key = "instance:%d" % material.get_instance_id()
+	if materials.has(key):
+		return
+
+	var name = material.resource_name
+	if name.is_empty() and not path.is_empty():
+		name = path.trim_prefix(loader.texture_path + "/").get_basename()
+	if name.is_empty() and not texture_path.is_empty():
+		name = texture_path.trim_prefix(loader.texture_path + "/").get_basename()
+	if name.is_empty():
+		name = material.get_class()
+
+	materials[key] = {
+		"material": material,
+		"name": name,
+		"path": path if not path.is_empty() else texture_path,
+	}
+
+func material_selected():
+	var item = materials_tree.get_selected()
+	if item == null:
+		return
+	var material = item.get_metadata(0)
+	if material is Material:
+		get_editor_interface().edit_resource(material)

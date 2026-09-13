@@ -29,6 +29,9 @@ typedef enum PARSE_SCOPE {
 	PS_ROT,
 	PS_U_SCALE,
 	PS_V_SCALE,
+	PS_CONTENT_FLAGS,
+	PS_SURFACE_FLAGS,
+	PS_FACE_VALUE,
 	// Patch parsing scopes
 	PS_PATCH_DEF,           // saw patchDef2/patchDef3, waiting for '{'
 	PS_PATCH_TEXTURE,       // reading texture name

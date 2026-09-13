@@ -31,6 +31,13 @@ typedef struct LMFaceUVExtra {
 	double scale_y;
 } LMFaceUVExtra;
 
+typedef struct LMFaceSurfaceFlags {
+	bool specified;
+	int contents;
+	int surface;
+	int value;
+} LMFaceSurfaceFlags;
+
 typedef struct LMFace {
 	LMFacePoints plane_points;
 	vec3 plane_normal;
@@ -42,6 +49,7 @@ typedef struct LMFace {
 	LMStandardUV uv_standard;
 	LMValveUV uv_valve;
 	LMFaceUVExtra uv_extra;
+	LMFaceSurfaceFlags surface_flags;
 } face;
 
 #endif

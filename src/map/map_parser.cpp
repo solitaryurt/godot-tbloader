@@ -236,6 +236,15 @@ void LMMapParser::set_scope(PARSE_SCOPE new_scope) {
 		case PS_V_SCALE:
 			puts("Switching to V scale scope\n");
 			break;
+		case PS_CONTENT_FLAGS:
+			puts("Switching to content flags scope\n");
+			break;
+		case PS_SURFACE_FLAGS:
+			puts("Switching to surface flags scope\n");
+			break;
+		case PS_FACE_VALUE:
+			puts("Switching to face value scope\n");
+			break;
 		case PS_PATCH_DEF:
 			puts("Switching to patch def scope\n");
 			break;
@@ -535,9 +544,32 @@ void LMMapParser::token(const char *buf) {
 		}
 		case PS_V_SCALE: {
 			current_face.uv_extra.scale_y = atof(buf);
-
+			set_scope(PS_CONTENT_FLAGS);
+			break;
+		}
+		case PS_CONTENT_FLAGS: {
+			if (buf[0] == '\0') {
+				break;
+			}
+			current_face.surface_flags.specified = true;
+			current_face.surface_flags.contents = atoi(buf);
+			set_scope(PS_SURFACE_FLAGS);
+			break;
+		}
+		case PS_SURFACE_FLAGS: {
+			if (buf[0] == '\0') {
+				break;
+			}
+			current_face.surface_flags.surface = atoi(buf);
+			set_scope(PS_FACE_VALUE);
+			break;
+		}
+		case PS_FACE_VALUE: {
+			if (buf[0] == '\0') {
+				break;
+			}
+			current_face.surface_flags.value = atoi(buf);
 			commit_face();
-
 			set_scope(PS_BRUSH);
 			break;
 		}
@@ -678,6 +710,11 @@ void LMMapParser::token(const char *buf) {
 void LMMapParser::newline() {
 	if (comment) {
 		comment = false;
+	}
+
+	if (scope == PS_CONTENT_FLAGS) {
+		commit_face();
+		set_scope(PS_BRUSH);
 	}
 }
 

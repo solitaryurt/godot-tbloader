@@ -31,6 +31,8 @@ void TBLoader::_bind_methods()
 	ClassDB::bind_method(D_METHOD("get_skip_texture_name"), &TBLoader::get_skip_texture_name);
 	ClassDB::bind_method(D_METHOD("set_visual_layer_mask", "option_visual_layer_mask"), &TBLoader::set_visual_layer_mask);
 	ClassDB::bind_method(D_METHOD("get_visual_layer_mask"), &TBLoader::get_visual_layer_mask);
+	ClassDB::bind_method(D_METHOD("set_skybox_layer_mask", "option_skybox_layer_mask"), &TBLoader::set_skybox_layer_mask);
+	ClassDB::bind_method(D_METHOD("get_skybox_layer_mask"), &TBLoader::get_skybox_layer_mask);
 	ClassDB::bind_method(D_METHOD("set_collision_layer_mask", "option_collision_layer_mask"), &TBLoader::set_collision_layer_mask);
 	ClassDB::bind_method(D_METHOD("get_collision_layer_mask"), &TBLoader::get_collision_layer_mask);
 	ClassDB::bind_method(D_METHOD("set_clip_collision_layer_mask", "option_collision_layer_mask"), &TBLoader::set_clip_collision_layer_mask);
@@ -67,6 +69,7 @@ void TBLoader::_bind_methods()
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "option_no_wall_jump_texture_name", PROPERTY_HINT_NONE, "No Wall Jump Texture"), "set_no_wall_jump_texture_name", "get_no_wall_jump_texture_name");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "option_skip_texture_name", PROPERTY_HINT_NONE, "skip Texture"), "set_skip_texture_name", "get_skip_texture_name");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "option_visual_layer_mask", PROPERTY_HINT_LAYERS_3D_RENDER), "set_visual_layer_mask", "get_visual_layer_mask");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "option_skybox_layer_mask", PROPERTY_HINT_LAYERS_3D_RENDER), "set_skybox_layer_mask", "get_skybox_layer_mask");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "option_collision_layer_mask", PROPERTY_HINT_LAYERS_3D_PHYSICS), "set_collision_layer_mask", "get_collision_layer_mask");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "option_clip_collision_layer_mask", PROPERTY_HINT_LAYERS_3D_PHYSICS), "set_clip_collision_layer_mask", "get_clip_collision_layer_mask");
 
@@ -226,6 +229,16 @@ uint32_t TBLoader::get_visual_layer_mask()
 void TBLoader::set_visual_layer_mask(uint32_t visual_layer_mask)
 {
 	m_visual_layer_mask = visual_layer_mask;
+}
+
+uint32_t TBLoader::get_skybox_layer_mask()
+{
+	return m_skybox_layer_mask;
+}
+
+void TBLoader::set_skybox_layer_mask(uint32_t skybox_layer_mask)
+{
+	m_skybox_layer_mask = skybox_layer_mask;
 }
 
 uint32_t TBLoader::get_collision_layer_mask()
