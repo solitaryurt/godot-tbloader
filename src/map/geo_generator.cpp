@@ -56,13 +56,17 @@ int sort_vertices_by_winding(const void *lhs_in, const void *rhs_in) {
 }
 
 void LMGeoGenerator::run() {
-	map_data->entity_geo = (LMEntityGeometry *)malloc(map_data->entity_count * sizeof(LMEntityGeometry));
+	map_data->map_data_free_geometry();
+	map_data->geometry_entity_count = map_data->entity_count;
+	map_data->entity_geo = (LMEntityGeometry *)calloc(map_data->entity_count, sizeof(LMEntityGeometry));
 
 	for (int e = 0; e < map_data->entity_count; ++e) {
 		LMEntity *ent_inst = &map_data->entities[e];
 
 		LMEntityGeometry *entity_geo_inst = &map_data->entity_geo[e];
 		*entity_geo_inst = { 0 };
+		entity_geo_inst->brush_count = ent_inst->brush_count;
+		entity_geo_inst->patch_count = ent_inst->patch_count;
 
 		entity_geo_inst->brushes = (LMBrushGeometry *)malloc(ent_inst->brush_count * sizeof(LMBrushGeometry));
 
@@ -71,6 +75,7 @@ void LMGeoGenerator::run() {
 
 			LMBrushGeometry *brush_geo_inst = &entity_geo_inst->brushes[b];
 			*brush_geo_inst = { 0 };
+			brush_geo_inst->face_count = brush_inst->face_count;
 
 			brush_geo_inst->faces = (LMFaceGeometry *)malloc(brush_inst->face_count * sizeof(LMFaceGeometry));
 

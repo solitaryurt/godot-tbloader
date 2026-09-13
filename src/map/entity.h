@@ -3,6 +3,13 @@
 
 #include "vector.h"
 #include <stdlib.h>
+#include <stdint.h>
+
+// Source primitive order; index addresses the owning entity's brush or patch array.
+struct LMPrimitive {
+	bool is_patch;
+	int index;
+};
 
 typedef struct LMBrush LMBrush;
 struct LMPatch;
@@ -21,6 +28,9 @@ typedef struct LMProperty {
 
 class LMEntity {
 public:
+	int64_t id = 0;
+	int primitive_count = 0;
+	LMPrimitive *primitives = NULL;
 	int property_count = 0;
 	LMProperty *properties = NULL;
 

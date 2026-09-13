@@ -8,124 +8,73 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <utility>
+
+void LMMapData::map_data_free_geometry() {
+	// Allocation counts belong to the cache, never to subsequently edited topology.
+	if (entity_geo) {
+		for (int e = 0; e < geometry_entity_count; ++e) {
+			auto &geo = entity_geo[e];
+			if (geo.brushes) for (int b = 0; b < geo.brush_count; ++b) {
+				auto &brush = geo.brushes[b];
+				if (brush.faces) for (int f = 0; f < brush.face_count; ++f) {
+					free(brush.faces[f].vertices);
+					free(brush.faces[f].indices);
+				}
+				free(brush.faces);
+			}
+			if (geo.patches) for (int p = 0; p < geo.patch_count; ++p) {
+				free(geo.patches[p].vertices);
+				free(geo.patches[p].indices);
+			}
+			free(geo.brushes);
+			free(geo.patches);
+		}
+	}
+	free(entity_geo);
+	entity_geo = nullptr;
+	geometry_entity_count = 0;
+}
 
 void LMMapData::map_data_reset() {
-	if (entities != NULL) {
-		for (int e = 0; e < entity_count; ++e) {
-			LMEntity *ent_inst = &entities[e];
-			LMEntityGeometry *entity_geo_inst = &entity_geo[e];
-
-			if (entity_geo_inst != NULL) {
-				for (int b = 0; b < ent_inst->brush_count; ++b) {
-					LMBrush *brush_inst = &ent_inst->brushes[b];
-					LMBrushGeometry *brush_geo_inst = &entity_geo_inst->brushes[b];
-
-					if (brush_geo_inst != NULL) {
-						for (int f = 0; f < brush_inst->face_count; ++f) {
-							LMFaceGeometry *face_geo_inst = &brush_geo_inst->faces[f];
-							if (face_geo_inst != NULL) {
-								if (face_geo_inst->vertices != NULL) {
-									free(face_geo_inst->vertices);
-									face_geo_inst->vertices = NULL;
-								}
-
-								if (face_geo_inst->indices != NULL) {
-									free(face_geo_inst->indices);
-									face_geo_inst->indices = NULL;
-								}
-							}
-						}
-
-						free(brush_inst->faces);
-						brush_inst->faces = NULL;
-
-						free(brush_geo_inst->faces);
-						brush_geo_inst->faces = NULL;
-					}
-				}
-
-				// Free patch geometry
-				if (entity_geo_inst->patches != NULL) {
-					for (int p = 0; p < ent_inst->patch_count; ++p) {
-						LMPatchGeometry *patch_geo_inst = &entity_geo_inst->patches[p];
-						if (patch_geo_inst != NULL) {
-							if (patch_geo_inst->vertices != NULL) {
-								free(patch_geo_inst->vertices);
-								patch_geo_inst->vertices = NULL;
-							}
-							if (patch_geo_inst->indices != NULL) {
-								free(patch_geo_inst->indices);
-								patch_geo_inst->indices = NULL;
-							}
-						}
-					}
-					free(entity_geo_inst->patches);
-					entity_geo_inst->patches = NULL;
-				}
-
-				// Free patch data
-				for (int p = 0; p < ent_inst->patch_count; ++p) {
-					LMPatch *patch_inst = &ent_inst->patches[p];
-					if (patch_inst->control_points != NULL) {
-						free(patch_inst->control_points);
-						patch_inst->control_points = NULL;
-					}
-				}
-				if (ent_inst->patches != NULL) {
-					free(ent_inst->patches);
-					ent_inst->patches = NULL;
-				}
-
-				if (ent_inst->properties != NULL) {
-					for (int p = 0; p < ent_inst->property_count; ++p) {
-						if (ent_inst->properties[p].key != NULL) {
-							free(ent_inst->properties[p].key);
-						}
-
-						if (ent_inst->properties[p].value != NULL) {
-							free(ent_inst->properties[p].value);
-						}
-					}
-
-					free(ent_inst->properties);
-					ent_inst->properties = NULL;
-				}
-
-				free(ent_inst->brushes);
-				ent_inst->brushes = NULL;
-
-				free(entity_geo_inst->brushes);
-				entity_geo_inst->brushes = NULL;
-			}
+	map_data_free_geometry();
+	for (int e = 0; e < entity_count; ++e) {
+		auto &ent = entities[e];
+		for (int b = 0; b < ent.brush_count; ++b) free(ent.brushes[b].faces);
+		for (int p = 0; p < ent.patch_count; ++p) free(ent.patches[p].control_points);
+		for (int p = 0; p < ent.property_count; ++p) {
+			free(ent.properties[p].key);
+			free(ent.properties[p].value);
 		}
-
-		free(entities);
-		entities = NULL;
-
-		free(entity_geo);
-		entity_geo = NULL;
+		free(ent.brushes);
+		free(ent.patches);
+		free(ent.properties);
+		free(ent.primitives);
 	}
-
+	free(entities);
+	entities = nullptr;
 	entity_count = 0;
-
-	if (textures != NULL) {
-		for (int t = 0; t < texture_count; t++) {
-			LMTextureData *texture = &textures[t];
-			free(texture->name);
-		}
-
-		free(textures);
-		textures = NULL;
-	}
-
+	for (int t = 0; t < texture_count; ++t) free(textures[t].name);
+	free(textures);
+	textures = nullptr;
 	texture_count = 0;
-
-	if (worldspawn_layers != NULL) {
-		free(worldspawn_layers);
-		worldspawn_layers = NULL;
-	}
-
+	free(worldspawn_layers);
+	worldspawn_layers = nullptr;
 	worldspawn_layer_count = 0;
+}
+
+LMMapData::~LMMapData() { map_data_reset(); }
+
+void LMMapData::swap(LMMapData &other) {
+	using std::swap;
+	swap(entities, other.entities);
+	swap(entity_count, other.entity_count);
+	swap(entity_geo, other.entity_geo);
+	swap(geometry_entity_count, other.geometry_entity_count);
+	swap(textures, other.textures);
+	swap(texture_count, other.texture_count);
+	swap(worldspawn_layers, other.worldspawn_layers);
+	swap(worldspawn_layer_count, other.worldspawn_layer_count);
 }
 
 void LMMapData::map_data_register_worldspawn_layer(const char *name, bool build_visuals) {
@@ -170,6 +119,7 @@ int LMMapData::map_data_register_texture(const char *name) {
 	LMTextureData *texture = &textures[texture_count];
 	*texture = { 0 };
 	texture->name = STRDUP(name);
+	texture->width = texture->height = 1;
 	texture_count++;
 	return texture_count - 1;
 }
@@ -238,7 +188,7 @@ const LMEntity *LMMapData::map_data_get_entities() {
 }
 
 const char *LMMapData::map_data_get_entity_property(int entity_idx, const char *key) {
-	if (entity_idx < 0) {
+	if (entity_idx < 0 || entity_idx >= entity_count) {
 		return NULL;
 	}
 

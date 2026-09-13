@@ -31,6 +31,7 @@ typedef struct LMFaceGeometry {
 } LMFaceGeometry;
 
 typedef struct LMBrushGeometry {
+	int face_count = 0;
 	LMFaceGeometry *faces = NULL;
 } LMBrushGeometry;
 
@@ -43,6 +44,8 @@ typedef struct LMPatchGeometry {
 } LMPatchGeometry;
 
 typedef struct LMEntityGeometry {
+	int brush_count = 0;
+	int patch_count = 0;
 	LMBrushGeometry *brushes = NULL;
 	LMPatchGeometry *patches = NULL;
 } LMEntityGeometry;

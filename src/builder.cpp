@@ -43,7 +43,10 @@ void Builder::load_map(const String& path)
 	// Parse the map from the file
 	Ref<FileAccess> f = FileAccess::open(path, FileAccess::ModeFlags::READ);
 	LMMapParser parser(m_map);
-	parser.load_from_godot_file(f);
+	if (!parser.load_from_godot_file(f)) {
+		UtilityFunctions::printerr("Map parse failed at ", parser.error.line, ":", parser.error.column, ": ", String(parser.error.message.c_str()));
+		return;
+	}
 
 	load_and_cache_map_textures();
 
@@ -132,7 +135,7 @@ Node* Builder::build_entity(int idx, LMEntity& ent, const String& classname, std
 			}
 		}
 		newEntityNode = build_worldspawn(idx, ent, true);
-		newEntityNode->add_to_group("level");
+		if (newEntityNode) newEntityNode->add_to_group("level");
 	} else {
 		// Load common entities if enabled
 		if (m_loader->m_entity_common) {
@@ -173,7 +176,7 @@ Node* Builder::build_entity(int idx, LMEntity& ent, const String& classname, std
 		}
 	}
 
-	if (ent.has_property("smooth") || ent.has_property("soft")) {
+	if (newEntityNode && newEntityNode->get_child_count() > 0 && (ent.has_property("smooth") || ent.has_property("soft"))) {
 		smooth_mesh_shading(Object::cast_to<MeshInstance3D>(newEntityNode->get_child(0)));
 	}
 
@@ -794,6 +797,8 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 	// Remove the empty mesh instances if enabled
 	if (m_loader->m_skip_empty_meshes && mesh->get_surface_count() == 0) {
 		parent->remove_child(mesh_instance);
+		memdelete(mesh_instance);
+		return nullptr;
 	}
 
 	return mesh_instance;

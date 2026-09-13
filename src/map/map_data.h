@@ -22,6 +22,7 @@ public:
 	int entity_count = 0;
 	LMEntity *entities = NULL;
 	LMEntityGeometry *entity_geo = NULL;
+	int geometry_entity_count = 0;
 
 	int texture_count = 0;
 	LMTextureData *textures = NULL;
@@ -46,6 +47,11 @@ public:
 	const LMEntity *map_data_get_entities();
 
 	LMMapData();
+	~LMMapData();
+	LMMapData(const LMMapData &) = delete;
+	LMMapData &operator=(const LMMapData &) = delete;
+	void swap(LMMapData &other);
+	void map_data_free_geometry();
 	void map_data_reset();
 	int map_data_register_texture(const char *name);
 	int map_data_find_texture(const char *texture_name);

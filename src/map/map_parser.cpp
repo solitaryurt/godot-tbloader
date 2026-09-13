@@ -1,827 +1,257 @@
 #include "map_parser.h"
-
-#include <ctype.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
 #include "brush.h"
-#include "entity.h"
 #include "face.h"
-#include "map_data.h"
 #include "patch.h"
 #include "platform.h"
+#include <cmath>
+#include <cctype>
+#include <cstring>
+#include <fstream>
+#include <limits>
+#include <locale>
+#include <sstream>
 
-#define DEBUG false
-
-void LMMapParser::reset_current_face() {
-	current_face = { 0 };
+namespace {
+template <typename T> T &append(T *&items, int &count) {
+	items = static_cast<T *>(realloc(items, (count + 1) * sizeof(T)));
+	items[count] = T{};
+	return items[count++];
 }
 
-void LMMapParser::reset_current_brush() {
-	if (current_brush.faces != NULL) {
-		free(current_brush.faces);
-		current_brush.faces = NULL;
+struct Token {
+	std::string text;
+	int line = 1, column = 1;
+	bool quoted = false;
+};
+
+class Parser {
+	const std::string &source;
+	LMMapData &map;
+	LMParseError &error;
+	size_t offset = 0;
+	int line = 1, column = 1;
+	size_t work = 0;
+	Token current;
+	char peek(size_t ahead = 0) const { return offset + ahead < source.size() ? source[offset + ahead] : '\0'; }
+	char take() {
+		char c = source[offset++];
+		if (c == '\n') { ++line; column = 1; } else { ++column; }
+		return c;
 	}
-
-	current_brush.face_count = 0;
-}
-
-void LMMapParser::reset_current_patch() {
-	if (current_patch.control_points != NULL) {
-		free(current_patch.control_points);
-		current_patch.control_points = NULL;
-	}
-
-	current_patch.width = 0;
-	current_patch.height = 0;
-	current_patch.texture_idx = -1;
-	current_patch.subdiv_x = 0;
-	current_patch.subdiv_y = 0;
-	patch_row_idx = 0;
-	patch_cp_idx = 0;
-	patch_header_idx = 0;
-	patch_is_def3 = false;
-}
-
-void LMMapParser::reset_current_entity() {
-	for (int i = 0; i < current_entity.brush_count; ++i) {
-		if (current_entity.brushes[i].faces != NULL) {
-			free(current_entity.brushes[i].faces);
-			current_entity.brushes[i].faces = NULL;
-		}
-	}
-
-	for (int i = 0; i < current_entity.patch_count; ++i) {
-		if (current_entity.patches[i].control_points != NULL) {
-			free(current_entity.patches[i].control_points);
-			current_entity.patches[i].control_points = NULL;
-		}
-	}
-
-	if (current_entity.properties != NULL) {
-		for (int p = 0; p < current_entity.property_count; ++p) {
-			if (current_entity.properties[p].key != NULL) {
-				free(current_entity.properties[p].key);
-			}
-
-			if (current_entity.properties[p].value != NULL) {
-				free(current_entity.properties[p].value);
-			}
-		}
-
-		free(current_entity.properties);
-		current_entity.properties = NULL;
-	}
-
-	current_entity.property_count = 0;
-
-	if (current_entity.brushes != NULL) {
-		free(current_entity.brushes);
-		current_entity.brushes = NULL;
-	}
-
-	current_entity.brush_count = 0;
-
-	if (current_entity.patches != NULL) {
-		free(current_entity.patches);
-		current_entity.patches = NULL;
-	}
-
-	current_entity.patch_count = 0;
-}
-
-bool LMMapParser::load_from_path(const char *map_file) {
-	map_data->map_data_reset();
-
-	reset_current_face();
-	reset_current_brush();
-	reset_current_patch();
-	reset_current_entity();
-
-	scope = PS_FILE;
-	comment = false;
-	entity_idx = -1;
-	brush_idx = -1;
-	face_idx = -1;
-	patch_idx = -1;
-	component_idx = 0;
-	valve_uvs = false;
-
-	FILE *map = fopen(map_file, "r");
-
-	if (!map) {
-		printf("Error: Failed to open map file.\n");
+	bool fail(const char *message, const char *code = "PARSE_ERROR") {
+		if (error.code.empty()) error = { code, message, current.line, current.column };
 		return false;
 	}
-
-	int c;
-	char buf[255];
-	int buf_head = 0;
-	bool is_quoted = false;
-	while ((c = fgetc(map)) != EOF) {
-		if (c == '\n') {
-			buf[buf_head] = '\0';
-			token(buf);
-			buf_head = 0;
-
-			newline();
-		} else if (isspace(c) && !is_quoted) {
-			buf[buf_head] = '\0';
-			token(buf);
-			buf_head = 0;
+	bool next() {
+		for (;;) {
+			while (peek() && std::isspace(static_cast<unsigned char>(peek()))) take();
+			if (peek() == '/' && peek(1) == '/') {
+				while (peek() && peek() != '\n') take();
+			} else if (peek() == '/' && peek(1) == '*') {
+				current = { "", line, column, false };
+				take(); take();
+				while (peek() && !(peek() == '*' && peek(1) == '/')) take();
+				if (!peek()) return fail("Unterminated block comment");
+				take(); take();
+			} else break;
+		}
+		current = { "", line, column, false };
+		if (!peek()) return offset == source.size() || fail("NUL byte in map");
+		char c = take();
+		if (c == '"') {
+			current.quoted = true;
+			while (peek() && peek() != '"') {
+				c = take();
+				// Only quote/backslash escapes are interpreted. Unknown escapes keep
+				// their slash (e.g. entity paths); writer escapes all literal slashes.
+				if (c == '\\' && (peek() == '"' || peek() == '\\')) c = take();
+				current.text += c;
+				if (current.text.size() > 65536) return fail("Token exceeds 64 KiB", "LIMIT_EXCEEDED");
+			}
+			if (!peek()) return fail("Unterminated quoted string");
+			take();
+		} else if (std::string("{}()[]").find(c) != std::string::npos) {
+			current.text += c;
 		} else {
-			if (scope == PS_TEXTURE && c == '"') {
-				is_quoted = !is_quoted;
-			} else {
-				buf[buf_head++] = c;
+			current.text += c;
+			while (peek() && !std::isspace(static_cast<unsigned char>(peek())) && std::string("{}()[]\"").find(peek()) == std::string::npos) {
+				if (peek() == '/' && (peek(1) == '/' || peek(1) == '*')) break;
+				current.text += take();
+				if (current.text.size() > 65536) return fail("Token exceeds 64 KiB", "LIMIT_EXCEEDED");
 			}
 		}
+		return true;
 	}
+	bool is(const char *s) const { return !current.quoted && current.text == s; }
+	bool expect(const char *s) {
+		if (!is(s)) return fail("Unexpected token or end of file");
+		return next();
+	}
+	bool number(double &out) {
+		std::istringstream in(current.text);
+		in.imbue(std::locale::classic());
+		if (current.quoted || !(in >> out) || !in.eof() || !std::isfinite(out)) return fail("Expected a finite number");
+		if (std::abs(out) > 1e9) return fail("Numeric magnitude exceeds 1e9", "LIMIT_EXCEEDED");
+		return next();
+	}
+	bool integer(int &out) {
+		// Flags use the complete signed 32-bit range, independently of coordinate limits.
+		std::istringstream in(current.text);
+		in.imbue(std::locale::classic());
+		int64_t value;
+		if (current.quoted || !(in >> value) || !in.eof() || value < INT32_MIN || value > INT32_MAX) return fail("Expected a signed 32-bit integer");
+		out = static_cast<int>(value);
+		return next();
+	}
+	bool vector(vec3 &v) { return number(v.x) && number(v.y) && number(v.z); }
+	bool point(vec3 &v) { return expect("(") && vector(v) && expect(")"); }
+	bool texture(int &index) {
+		if (current.text.empty() || (!current.quoted && current.text.find_first_of("{}()[]") != std::string::npos)) return fail("Expected texture name");
+		index = map.map_data_register_texture(current.text.c_str());
+		return next();
+	}
+	bool face(LMFace &f) {
+		if (!point(f.plane_points.v0) || !point(f.plane_points.v1) || !point(f.plane_points.v2) || !texture(f.texture_idx)) return false;
+		f.is_valve_uv = is("[");
+		if (f.is_valve_uv) {
+			if (!expect("[") || !vector(f.uv_valve.u.axis) || !number(f.uv_valve.u.offset) || !expect("]") ||
+					!expect("[") || !vector(f.uv_valve.v.axis) || !number(f.uv_valve.v.offset) || !expect("]")) return false;
+			if (vec3_dot(f.uv_valve.u.axis, f.uv_valve.u.axis) < 1e-18 || vec3_dot(f.uv_valve.v.axis, f.uv_valve.v.axis) < 1e-18) return fail("Zero Valve projection axis", "INVALID_GEOMETRY");
+		} else if (!number(f.uv_standard.u) || !number(f.uv_standard.v)) return false;
+		if (!number(f.uv_extra.rot) || !number(f.uv_extra.scale_x) || !number(f.uv_extra.scale_y)) return false;
+		if (std::abs(f.uv_extra.scale_x) < 1e-9 || std::abs(f.uv_extra.scale_y) < 1e-9) return fail("Texture scale is zero or too small", "INVALID_GEOMETRY");
+		if (!is("(") && !is("}") && !current.text.empty()) {
+			f.surface_flags.specified = true;
+			if (!integer(f.surface_flags.contents) || !integer(f.surface_flags.surface) || !integer(f.surface_flags.value)) return false;
+		}
+		vec3 n = vec3_cross(vec3_sub(f.plane_points.v2, f.plane_points.v1), vec3_sub(f.plane_points.v1, f.plane_points.v0));
+		if (vec3_dot(n, n) < 1e-18) return fail("Degenerate face plane", "INVALID_GEOMETRY");
+		f.plane_normal = vec3_normalize(n);
+		f.plane_dist = vec3_dot(f.plane_normal, f.plane_points.v0);
+		return true;
+	}
+	bool patch(LMPatch &p) {
+		p.is_def3 = is("patchDef3");
+		if (!next() || !expect("{") || !texture(p.texture_idx) || !expect("(") || !integer(p.width) || !integer(p.height)) return false;
+		if (p.width < 3 || p.height < 3 || !(p.width & 1) || !(p.height & 1)) return fail("Patch dimensions must be odd and at least three");
+		if (p.width > 31 || p.height > 31) return fail("Patch dimensions exceed 31", "LIMIT_EXCEEDED");
+		if (p.is_def3 && (!integer(p.subdiv_x) || !integer(p.subdiv_y))) return false;
+		if (p.subdiv_x < 0 || p.subdiv_y < 0) return fail("Negative patch subdivisions");
+		if (p.subdiv_x > 32 || p.subdiv_y > 32) return fail("Patch subdivisions exceed 32", "LIMIT_EXCEEDED");
+		for (int &flag : p.header_flags) if (!integer(flag)) return false;
+		if (!expect(")") || !expect("(")) return false;
+		work += size_t(p.width) * p.height * 33 * 33;
+		if (work > 8000000) return fail("Geometry work budget exceeded", "LIMIT_EXCEEDED");
+		p.control_points = static_cast<LMPatchControlPoint *>(calloc(p.width * p.height, sizeof(LMPatchControlPoint)));
+		for (int x = 0; x < p.width; ++x) {
+			if (!expect("(")) return false;
+			for (int y = 0; y < p.height; ++y) {
+				auto &cp = p.control_points[y * p.width + x];
+				if (!expect("(") || !vector(cp.position) || !number(cp.u) || !number(cp.v) || !expect(")")) return false;
+			}
+			if (!expect(")")) return false;
+		}
+		return expect(")") && expect("}") && expect("}");
+	}
+	bool primitive(LMEntity &e) {
+		if (!expect("{")) return false;
+		auto &order = append(e.primitives, e.primitive_count);
+		if (is("patchDef2") || is("patchDef3")) {
+			order = { true, e.patch_count };
+			return patch(append(e.patches, e.patch_count));
+		}
+		if (!is("(")) return fail("Unsupported or empty primitive; expected brush faces or patchDef2/3", "UNSUPPORTED_SYNTAX");
+		order = { false, e.brush_count };
+		auto &b = append(e.brushes, e.brush_count);
+		while (is("(")) {
+			if (b.face_count >= 64) return fail("Brush exceeds 64 faces", "LIMIT_EXCEEDED");
+			if (!face(append(b.faces, b.face_count))) return false;
+		}
+		if (b.face_count < 4) return fail("Brush requires at least four planes", "INVALID_GEOMETRY");
+		work += size_t(b.face_count) * b.face_count * b.face_count;
+		if (work > 8000000) return fail("Geometry work budget exceeded", "LIMIT_EXCEEDED");
+		return expect("}");
+	}
+public:
+	Parser(const std::string &s, LMMapData &m, LMParseError &e) : source(s), map(m), error(e) {}
+	bool run() {
+		if (source.size() > LMMapParser::MAX_TEXT_BYTES) return fail("Map exceeds 16 MiB", "LIMIT_EXCEEDED");
+		// Validate before any Godot String conversion: invalid bytes must return a
+		// Result diagnostic, not engine Unicode errors or replacement characters.
+		int byte_line = 1, byte_column = 1;
+		for (size_t i = 0; i < source.size();) {
+			unsigned char c = source[i];
+			current.line = byte_line; current.column = byte_column;
+			if (c == 0) return fail("NUL byte in map");
+			int length = c < 0x80 ? 1 : c >= 0xc2 && c <= 0xdf ? 2 : c >= 0xe0 && c <= 0xef ? 3 : c >= 0xf0 && c <= 0xf4 ? 4 : 0;
+			if (!length || i + length > source.size()) return fail("Map is not valid UTF-8");
+			for (int j = 1; j < length; ++j) {
+				unsigned char next = source[i + j];
+				if (next < 0x80 || next > 0xbf) return fail("Map is not valid UTF-8");
+			}
+			if (length >= 3) {
+				unsigned char second = source[i + 1];
+				if ((c == 0xe0 && second < 0xa0) || (c == 0xed && second >= 0xa0) || (c == 0xf0 && second < 0x90) || (c == 0xf4 && second >= 0x90)) return fail("Map is not valid UTF-8");
+			}
+			if (c == '\n') { ++byte_line; byte_column = 1; } else byte_column += length;
+			i += length;
+		}
+		// UTF-8 BOM is formatting, not an entity or a shader token.
+		if (source.compare(0, 3, "\xef\xbb\xbf") == 0) { offset = 3; column = 4; }
+		if (!next()) return false;
+		while (!current.text.empty() || current.quoted) {
+			if (map.entity_count >= 65536) return fail("Too many entities", "LIMIT_EXCEEDED");
+			if (!expect("{")) return false;
+			auto &e = append(map.entities, map.entity_count);
+			e.spawn_type = EST_ENTITY;
+			while (!is("}")) {
+				if (current.quoted) {
+					auto &prop = append(e.properties, e.property_count);
+					prop.key = STRDUP(current.text.c_str());
+					if (!next()) return false;
+					if (!current.quoted) return fail("Expected quoted entity property value");
+					prop.value = STRDUP(current.text.c_str());
+					if (!next()) return false;
+				} else if (is("{")) {
+					if (!primitive(e)) return false;
+				} else return fail("Expected entity property, primitive or closing brace");
+			}
+			if (!next()) return false;
+		}
+		if (!map.entity_count) return fail("Map contains no entities");
+		return true;
+	}
+};
+}
 
-	fclose(map);
-
+bool LMMapParser::load_from_text(const std::string &text) {
+	error = {};
+	LMMapData candidate;
+	if (!Parser(text, candidate, error).run()) return false;
+	map_data->swap(candidate);
 	return true;
 }
 
-void LMMapParser::load_from_godot_file(godot::Ref<godot::FileAccess> f) {
-	map_data->map_data_reset();
-
-	reset_current_face();
-	reset_current_brush();
-	reset_current_patch();
-	reset_current_entity();
-
-	scope = PS_FILE;
-	comment = false;
-	entity_idx = -1;
-	brush_idx = -1;
-	face_idx = -1;
-	patch_idx = -1;
-	component_idx = 0;
-	valve_uvs = false;
-
-	int c;
-	char buf[255];
-	int buf_head = 0;
-	bool is_quoted = false;
-	while (!f->eof_reached()) {
-		c = (int)f->get_8();
-
-		if (c == '\n') {
-			buf[buf_head] = '\0';
-			token(buf);
-			buf_head = 0;
-
-			newline();
-		} else if (isspace(c) && !is_quoted) {
-			buf[buf_head] = '\0';
-			token(buf);
-			buf_head = 0;
-		} else {
-			if (scope == PS_TEXTURE && c == '"') {
-				is_quoted = !is_quoted;
-			} else {
-				buf[buf_head++] = c;
-			}
-		}
-	}
+bool LMMapParser::load_from_path(const char *path) {
+	error = {};
+	std::ifstream file(path, std::ios::binary | std::ios::ate);
+	if (!file) { error = { "IO_READ", "Cannot open map", 0, 0 }; return false; }
+	auto size = file.tellg();
+	if (size < 0 || size > static_cast<std::streamoff>(MAX_TEXT_BYTES)) { error = { "LIMIT_EXCEEDED", "Map exceeds 16 MiB", 0, 0 }; return false; }
+	std::string text(static_cast<size_t>(size), '\0');
+	file.seekg(0);
+	if (!file.read(&text[0], size)) { error = { "IO_READ", "Cannot read map", 0, 0 }; return false; }
+	return load_from_text(text);
 }
 
-void LMMapParser::set_scope(PARSE_SCOPE new_scope) {
-#if DEBUG
-	switch (new_scope) {
-		case PS_FILE:
-			puts("Switching to file scope\n");
-			break;
-		case PS_ENTITY:
-			printf("Switching to entity %d scope\n", entity_idx);
-			break;
-		case PS_PROPERTY_VALUE:
-			puts("Switching to property value scope\n");
-			break;
-		case PS_BRUSH:
-			printf("Switching to brush %d scope\n", brush_idx);
-			break;
-		case PS_PLANE_0:
-			printf("Switching to face %d plane 0 scope\n", face_idx);
-			break;
-		case PS_PLANE_1:
-			printf("Switching to face %d plane 1 scope\n", face_idx);
-			break;
-		case PS_PLANE_2:
-			printf("Switching to face %d plane 2 scope\n", face_idx);
-			break;
-		case PS_TEXTURE:
-			puts("Switching to texture scope\n");
-			break;
-		case PS_U:
-			puts("Switching to U scope\n");
-			break;
-		case PS_V:
-			puts("Switching to V scope\n");
-			break;
-		case PS_VALVE_U:
-			puts("Switching to Valve U scope\n");
-			break;
-		case PS_VALVE_V:
-			puts("Switching to Valve V scope\n");
-			break;
-		case PS_ROT:
-			puts("Switching to rotation scope\n");
-			break;
-		case PS_U_SCALE:
-			puts("Switching to U scale scope\n");
-			break;
-		case PS_V_SCALE:
-			puts("Switching to V scale scope\n");
-			break;
-		case PS_CONTENT_FLAGS:
-			puts("Switching to content flags scope\n");
-			break;
-		case PS_SURFACE_FLAGS:
-			puts("Switching to surface flags scope\n");
-			break;
-		case PS_FACE_VALUE:
-			puts("Switching to face value scope\n");
-			break;
-		case PS_PATCH_DEF:
-			puts("Switching to patch def scope\n");
-			break;
-		case PS_PATCH_TEXTURE:
-			puts("Switching to patch texture scope\n");
-			break;
-		case PS_PATCH_HEADER:
-			puts("Switching to patch header scope\n");
-			break;
-		case PS_PATCH_ROWS:
-			puts("Switching to patch rows scope\n");
-			break;
-		case PS_PATCH_ROW:
-			puts("Switching to patch row scope\n");
-			break;
-		case PS_PATCH_CP:
-			puts("Switching to patch control point scope\n");
-			break;
-		case PS_PATCH_DONE:
-			puts("Switching to patch done scope\n");
-			break;
-	}
-
+#ifndef LM_STANDALONE
+bool LMMapParser::load_from_godot_file(godot::Ref<godot::FileAccess> file) {
+	error = {};
+	if (file.is_null()) { error = { "IO_READ", "Cannot open map", 0, 0 }; return false; }
+	if (file->get_length() > MAX_TEXT_BYTES) { error = { "LIMIT_EXCEEDED", "Map exceeds 16 MiB", 0, 0 }; return false; }
+	file->seek(0);
+	auto bytes = file->get_buffer(file->get_length());
+	if (static_cast<uint64_t>(bytes.size()) != file->get_length()) { error = { "IO_READ", "Short map read", 0, 0 }; return false; }
+	return load_from_text(std::string(reinterpret_cast<const char *>(bytes.ptr()), bytes.size()));
+}
 #endif
-	scope = new_scope;
-}
-
-bool LMMapParser::strings_match(const char *lhs, const char *rhs) {
-	return strcmp(lhs, rhs) == 0;
-}
-
-void LMMapParser::token(const char *buf) {
-	LMProperty *prop = NULL;
-
-	if (comment) {
-		return;
-	} else if (strings_match(buf, "//")) {
-		comment = true;
-		return;
-	}
-
-#if DEBUG
-	puts(buf);
-#endif
-
-	switch (scope) {
-		case PS_FILE: {
-			if (strings_match(buf, "{")) {
-				entity_idx++;
-				brush_idx = -1;
-				set_scope(PS_ENTITY);
-			}
-			break;
-		}
-		case PS_ENTITY: {
-			if (buf[0] == '"') {
-				current_entity.properties = (LMProperty *)realloc(current_entity.properties, (current_entity.property_count + 1) * sizeof(LMProperty));
-				prop = &current_entity.properties[current_entity.property_count];
-				*prop = { 0 };
-				prop->key = STRDUP(&buf[1]);
-
-				size_t last = strlen(prop->key) - 1;
-				if (prop->key[last] == '"') {
-					prop->key[strlen(prop->key) - 1] = '\0';
-					set_scope(PS_PROPERTY_VALUE);
-				}
-			} else if (strings_match(buf, "{")) {
-				brush_idx++;
-				face_idx = -1;
-				set_scope(PS_BRUSH);
-			} else if (strings_match(buf, "}")) {
-				commit_entity();
-				set_scope(PS_FILE);
-			}
-			break;
-		}
-		case PS_PROPERTY_VALUE: {
-			prop = &current_entity.properties[current_entity.property_count];
-
-			size_t current_length = 0;
-			if (current_property != NULL) {
-				current_length = strlen(current_property);
-			}
-
-			size_t buf_length = strlen(buf);
-
-			bool is_first, is_last;
-			if (buf_length == 1 && buf[0] == '"') {
-				is_first = current_length == 0;
-				is_last = !is_first;
-			} else if (buf_length == 0) {
-				is_first = is_last = false;
-			} else {
-				is_first = buf[0] == '"';
-				is_last = buf[buf_length - 1] == '"';
-			}
-
-			if (!is_first && is_last) {
-				current_property = (char *)realloc(current_property, current_length + buf_length + 2);
-				current_property[current_length] = ' ';
-				memcpy(&current_property[current_length + 1], buf, buf_length + 1);
-
-			} else if (is_first || is_last) {
-				current_property = (char *)realloc(current_property, current_length + buf_length + 1);
-				memcpy(&current_property[current_length], buf, buf_length + 1);
-
-			} else {
-				current_property = (char *)realloc(current_property, current_length + buf_length + 2);
-				current_property[current_length] = ' ';
-				if (buf_length > 0) {
-					memcpy(&current_property[current_length + 1], buf, buf_length);
-				}
-				current_property[current_length + buf_length + 1] = '\0';
-			}
-
-			if (is_last) {
-				prop->value = STRDUP(&current_property[1]);
-				prop->value[strlen(prop->value) - 1] = '\0';
-				current_entity.property_count++;
-				set_scope(PS_ENTITY);
-
-				free(current_property);
-				current_property = NULL;
-			}
-			break;
-		}
-		case PS_BRUSH: {
-			if (strings_match(buf, "(")) {
-				face_idx++;
-				component_idx = 0;
-				set_scope(PS_PLANE_0);
-			} else if (strings_match(buf, "patchDef2")) {
-				patch_is_def3 = false;
-				set_scope(PS_PATCH_DEF);
-			} else if (strings_match(buf, "patchDef3")) {
-				patch_is_def3 = true;
-				set_scope(PS_PATCH_DEF);
-			} else if (strings_match(buf, "}")) {
-				commit_brush();
-				set_scope(PS_ENTITY);
-			}
-			break;
-		}
-		case PS_PLANE_0: {
-			if (strings_match(buf, ")")) {
-				component_idx = 0;
-				set_scope(PS_PLANE_1);
-			} else {
-				switch (component_idx) {
-					case 0:
-						current_face.plane_points.v0.x = atof(buf);
-						break;
-					case 1:
-						current_face.plane_points.v0.y = atof(buf);
-						break;
-					case 2:
-						current_face.plane_points.v0.z = atof(buf);
-						break;
-					default:
-						break;
-				}
-				component_idx++;
-			}
-			break;
-		}
-		case PS_PLANE_1: {
-			if (strings_match(buf, "(")) {
-				break;
-			} else if (strings_match(buf, ")")) {
-				component_idx = 0;
-				set_scope(PS_PLANE_2);
-			} else {
-				switch (component_idx) {
-					case 0:
-						current_face.plane_points.v1.x = atof(buf);
-						break;
-					case 1:
-						current_face.plane_points.v1.y = atof(buf);
-						break;
-					case 2:
-						current_face.plane_points.v1.z = atof(buf);
-						break;
-					default:
-						break;
-				}
-				component_idx++;
-			}
-			break;
-		}
-		case PS_PLANE_2: {
-			if (strings_match(buf, "(")) {
-				break;
-			} else if (strings_match(buf, ")")) {
-				set_scope(PS_TEXTURE);
-			} else {
-				switch (component_idx) {
-					case 0:
-						current_face.plane_points.v2.x = atof(buf);
-						break;
-					case 1:
-						current_face.plane_points.v2.y = atof(buf);
-						break;
-					case 2:
-						current_face.plane_points.v2.z = atof(buf);
-						break;
-					default:
-						break;
-				}
-				component_idx++;
-			}
-			break;
-		}
-		case PS_TEXTURE: {
-			current_face.texture_idx = map_data->map_data_register_texture(buf);
-			set_scope(PS_U);
-			break;
-		}
-		case PS_U: {
-			if (strings_match(buf, "[")) {
-				valve_uvs = true;
-				component_idx = 0;
-				set_scope(PS_VALVE_U);
-			} else {
-				valve_uvs = false;
-				current_face.uv_standard.u = atof(buf);
-				set_scope(PS_V);
-			}
-			break;
-		}
-		case PS_V: {
-			current_face.uv_standard.v = atof(buf);
-			set_scope(PS_ROT);
-			break;
-		}
-		case PS_VALVE_U: {
-			if (strings_match(buf, "]")) {
-				component_idx = 0;
-				set_scope(PS_VALVE_V);
-			} else {
-				switch (component_idx) {
-					case 0:
-						current_face.uv_valve.u.axis.x = atof(buf);
-						break;
-					case 1:
-						current_face.uv_valve.u.axis.y = atof(buf);
-						break;
-					case 2:
-						current_face.uv_valve.u.axis.z = atof(buf);
-						break;
-					case 3:
-						current_face.uv_valve.u.offset = atof(buf);
-						break;
-					default:
-						break;
-				}
-
-				component_idx++;
-			}
-			break;
-		}
-		case PS_VALVE_V: {
-			if (strings_match(buf, "[")) {
-				break;
-			} else if (strings_match(buf, "]")) {
-				set_scope(PS_ROT);
-			} else {
-				switch (component_idx) {
-					case 0:
-						current_face.uv_valve.v.axis.x = atof(buf);
-						break;
-					case 1:
-						current_face.uv_valve.v.axis.y = atof(buf);
-						break;
-					case 2:
-						current_face.uv_valve.v.axis.z = atof(buf);
-						break;
-					case 3:
-						current_face.uv_valve.v.offset = atof(buf);
-						break;
-					default:
-						break;
-				}
-
-				component_idx++;
-			}
-			break;
-		}
-		case PS_ROT: {
-			current_face.uv_extra.rot = atof(buf);
-			set_scope(PS_U_SCALE);
-			break;
-		}
-		case PS_U_SCALE: {
-			current_face.uv_extra.scale_x = atof(buf);
-			set_scope(PS_V_SCALE);
-			break;
-		}
-		case PS_V_SCALE: {
-			current_face.uv_extra.scale_y = atof(buf);
-			set_scope(PS_CONTENT_FLAGS);
-			break;
-		}
-		case PS_CONTENT_FLAGS: {
-			if (buf[0] == '\0') {
-				break;
-			}
-			current_face.surface_flags.specified = true;
-			current_face.surface_flags.contents = atoi(buf);
-			set_scope(PS_SURFACE_FLAGS);
-			break;
-		}
-		case PS_SURFACE_FLAGS: {
-			if (buf[0] == '\0') {
-				break;
-			}
-			current_face.surface_flags.surface = atoi(buf);
-			set_scope(PS_FACE_VALUE);
-			break;
-		}
-		case PS_FACE_VALUE: {
-			if (buf[0] == '\0') {
-				break;
-			}
-			current_face.surface_flags.value = atoi(buf);
-			commit_face();
-			set_scope(PS_BRUSH);
-			break;
-		}
-
-		// Patch parsing scopes
-		case PS_PATCH_DEF: {
-			// Expecting '{' to open the patch definition body
-			if (strings_match(buf, "{")) {
-				patch_idx++;
-				reset_current_patch();
-				patch_is_def3 = patch_is_def3; // preserve
-				set_scope(PS_PATCH_TEXTURE);
-			}
-			break;
-		}
-		case PS_PATCH_TEXTURE: {
-			// Read the texture name
-			current_patch.texture_idx = map_data->map_data_register_texture(buf);
-			patch_header_idx = 0;
-			set_scope(PS_PATCH_HEADER);
-			break;
-		}
-		case PS_PATCH_HEADER: {
-			// Read ( width height 0 0 0 ) for patchDef2
-			// or ( width height subdiv_x subdiv_y 0 0 0 ) for patchDef3
-			if (strings_match(buf, "(")) {
-				break; // skip opening paren
-			} else if (strings_match(buf, ")")) {
-				// Header complete, allocate control points
-				int cp_count = current_patch.width * current_patch.height;
-				if (cp_count > 0) {
-					current_patch.control_points = (LMPatchControlPoint *)malloc(cp_count * sizeof(LMPatchControlPoint));
-					memset(current_patch.control_points, 0, cp_count * sizeof(LMPatchControlPoint));
-				}
-				patch_row_idx = 0;
-				patch_cp_idx = 0;
-				set_scope(PS_PATCH_ROWS);
-			} else {
-				if (patch_is_def3) {
-					// patchDef3 header: width height subdiv_x subdiv_y 0 0 0
-					switch (patch_header_idx) {
-						case 0: current_patch.width = atoi(buf); break;
-						case 1: current_patch.height = atoi(buf); break;
-						case 2: current_patch.subdiv_x = atoi(buf); break;
-						case 3: current_patch.subdiv_y = atoi(buf); break;
-						// remaining values are padding (ignored)
-					}
-				} else {
-					// patchDef2 header: width height 0 0 0
-					switch (patch_header_idx) {
-						case 0: current_patch.width = atoi(buf); break;
-						case 1: current_patch.height = atoi(buf); break;
-						// remaining values are padding (ignored)
-					}
-				}
-				patch_header_idx++;
-			}
-			break;
-		}
-		case PS_PATCH_ROWS: {
-			// Waiting for outer '(' that wraps all columns
-			if (strings_match(buf, "(")) {
-				set_scope(PS_PATCH_ROW);
-			}
-			break;
-		}
-		case PS_PATCH_ROW: {
-			// At the column level. '(' starts a column or a control point.
-			// ')' closes a column or the outer rows container.
-			if (strings_match(buf, "(")) {
-				if (patch_cp_idx == 0 && component_idx == 0) {
-					// Starting a new column -- the first '(' opens the column,
-					// the next '(' will start the first control point.
-					// We use PS_PATCH_CP for reading inside a column.
-					set_scope(PS_PATCH_CP);
-				}
-			} else if (strings_match(buf, ")")) {
-				// Closing the outer rows container -- all columns read
-				patch_done_brace_count = 0;
-				set_scope(PS_PATCH_DONE);
-			}
-			break;
-		}
-		case PS_PATCH_CP: {
-			// Inside a column, reading control points.
-			// Format: ( x y z u v ) ( x y z u v ) ...
-			// ')' with component_idx > 0 means end of a control point.
-			// ')' with component_idx == 0 means end of the column.
-			if (strings_match(buf, "(")) {
-				// Start of a control point
-				component_idx = 0;
-			} else if (strings_match(buf, ")")) {
-				if (component_idx > 0) {
-					// End of a control point
-					patch_cp_idx++;
-					component_idx = 0;
-				} else {
-					// End of this column
-					patch_row_idx++;
-					patch_cp_idx = 0;
-					set_scope(PS_PATCH_ROW);
-				}
-			} else {
-				// Numeric component of a control point
-				int cp_index = patch_cp_idx * current_patch.width + patch_row_idx;
-				if (current_patch.control_points != NULL && cp_index < current_patch.width * current_patch.height) {
-					LMPatchControlPoint *cp = &current_patch.control_points[cp_index];
-					switch (component_idx) {
-						case 0: cp->position.x = atof(buf); break;
-						case 1: cp->position.y = atof(buf); break;
-						case 2: cp->position.z = atof(buf); break;
-						case 3: cp->u = atof(buf); break;
-						case 4: cp->v = atof(buf); break;
-					}
-				}
-				component_idx++;
-			}
-			break;
-		}
-		case PS_PATCH_DONE: {
-			// We need to consume two '}' tokens:
-			// first closes the patchDef body, second closes the brush block
-			if (strings_match(buf, "}")) {
-				patch_done_brace_count++;
-				if (patch_done_brace_count >= 2) {
-					commit_patch();
-					set_scope(PS_ENTITY);
-				}
-			}
-			break;
-		}
-
-		default:
-			break;
-	}
-}
-
-void LMMapParser::newline() {
-	if (comment) {
-		comment = false;
-	}
-
-	if (scope == PS_CONTENT_FLAGS) {
-		commit_face();
-		set_scope(PS_BRUSH);
-	}
-}
-
-void LMMapParser::commit_face() {
-	vec3 v0v1 = vec3_sub(current_face.plane_points.v1, current_face.plane_points.v0);
-	vec3 v1v2 = vec3_sub(current_face.plane_points.v2, current_face.plane_points.v1);
-	current_face.plane_normal = vec3_normalize(vec3_cross(v1v2, v0v1));
-	current_face.plane_dist = vec3_dot(current_face.plane_normal, current_face.plane_points.v0);
-	current_face.is_valve_uv = valve_uvs;
-
-	current_brush.face_count++;
-	current_brush.faces = (LMFace *)realloc(current_brush.faces, current_brush.face_count * sizeof(LMFace));
-	current_brush.faces[current_brush.face_count - 1] = current_face;
-
-	reset_current_face();
-}
-
-void LMMapParser::commit_brush() {
-	current_entity.brush_count++;
-	current_entity.brushes = (LMBrush *)realloc(current_entity.brushes, current_entity.brush_count * sizeof(LMBrush));
-
-	LMBrush *dest_brush = &current_entity.brushes[current_entity.brush_count - 1];
-	*dest_brush = { 0 };
-
-	dest_brush->face_count = current_brush.face_count;
-	dest_brush->faces = (LMFace *)realloc(dest_brush->faces, dest_brush->face_count * sizeof(LMFace));
-	for (int i = 0; i < dest_brush->face_count; ++i) {
-		dest_brush->faces[i] = current_brush.faces[i];
-	}
-
-	reset_current_brush();
-}
-
-void LMMapParser::commit_patch() {
-	current_entity.patch_count++;
-	current_entity.patches = (LMPatch *)realloc(current_entity.patches, current_entity.patch_count * sizeof(LMPatch));
-
-	LMPatch *dest_patch = &current_entity.patches[current_entity.patch_count - 1];
-	*dest_patch = { 0 };
-
-	dest_patch->texture_idx = current_patch.texture_idx;
-	dest_patch->width = current_patch.width;
-	dest_patch->height = current_patch.height;
-	dest_patch->subdiv_x = current_patch.subdiv_x;
-	dest_patch->subdiv_y = current_patch.subdiv_y;
-
-	int cp_count = current_patch.width * current_patch.height;
-	if (cp_count > 0 && current_patch.control_points != NULL) {
-		dest_patch->control_points = (LMPatchControlPoint *)malloc(cp_count * sizeof(LMPatchControlPoint));
-		memcpy(dest_patch->control_points, current_patch.control_points, cp_count * sizeof(LMPatchControlPoint));
-	}
-
-	reset_current_patch();
-}
-
-void LMMapParser::commit_entity() {
-	map_data->entity_count++;
-	map_data->entities = (LMEntity *)realloc(map_data->entities, map_data->entity_count * sizeof(LMEntity));
-
-	LMEntity *dest_entity = &map_data->entities[map_data->entity_count - 1];
-	*dest_entity = { 0 };
-	dest_entity->spawn_type = EST_ENTITY;
-
-	dest_entity->property_count = current_entity.property_count;
-	dest_entity->properties = (LMProperty *)realloc(dest_entity->properties, dest_entity->property_count * sizeof(LMProperty));
-	for (int p = 0; p < dest_entity->property_count; ++p) {
-		LMProperty *dest_property = &dest_entity->properties[p];
-		*dest_property = { 0 };
-
-		dest_property->key = STRDUP(current_entity.properties[p].key);
-		dest_property->value = STRDUP(current_entity.properties[p].value);
-	}
-
-	dest_entity->brush_count = current_entity.brush_count;
-	dest_entity->brushes = (LMBrush *)realloc(dest_entity->brushes, dest_entity->brush_count * sizeof(LMBrush));
-	for (int b = 0; b < dest_entity->brush_count; ++b) {
-		LMBrush *dest_brush = &dest_entity->brushes[b];
-		*dest_brush = { 0 };
-
-		dest_brush->face_count = current_entity.brushes[b].face_count;
-		dest_brush->faces = (LMFace *)realloc(dest_brush->faces, dest_brush->face_count * sizeof(LMFace));
-		for (int f = 0; f < dest_brush->face_count; ++f) {
-			dest_brush->faces[f] = current_entity.brushes[b].faces[f];
-		}
-	}
-
-	dest_entity->patch_count = current_entity.patch_count;
-	if (dest_entity->patch_count > 0) {
-		dest_entity->patches = (LMPatch *)malloc(dest_entity->patch_count * sizeof(LMPatch));
-		for (int p = 0; p < dest_entity->patch_count; ++p) {
-			LMPatch *dest_patch = &dest_entity->patches[p];
-			LMPatch *src_patch = &current_entity.patches[p];
-			*dest_patch = { 0 };
-
-			dest_patch->texture_idx = src_patch->texture_idx;
-			dest_patch->width = src_patch->width;
-			dest_patch->height = src_patch->height;
-			dest_patch->subdiv_x = src_patch->subdiv_x;
-			dest_patch->subdiv_y = src_patch->subdiv_y;
-
-			int cp_count = src_patch->width * src_patch->height;
-			if (cp_count > 0 && src_patch->control_points != NULL) {
-				dest_patch->control_points = (LMPatchControlPoint *)malloc(cp_count * sizeof(LMPatchControlPoint));
-				memcpy(dest_patch->control_points, src_patch->control_points, cp_count * sizeof(LMPatchControlPoint));
-			}
-		}
-	}
-
-	reset_current_entity();
-}

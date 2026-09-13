@@ -1,4 +1,4 @@
-# Map editor baseline harness
+# Map editor document and baseline harness
 
 Run from the repository root with Python **3.11+**, SCons and a C++ compiler.
 The engine is pinned in `engine_version.txt`; a different version is a failure.
@@ -13,10 +13,13 @@ python -m unittest discover -s tests/map_editor -p test_harness.py -v
 DISPLAY=:0 python tests/map_editor/run_tests.py --godot "$GODOT_BIN" --suite ui
 ```
 
-`document` currently checks **TBLoader**, before TBMapDocument exists: native
-registration, properties, actual cube bake, coordinate conversion/bounds, twelve
-triangles, finite vertices/normals/UVs, imported texture dimensions and collision.
-Phase 1 must add real document assertions; this baseline is not a mock document.
+`document` checks the real **TBMapDocument** Result API: registration, new/load/import/
+export/save/rebuild, deterministic semantic roundtrips, ordered epairs/ownership,
+classic/Valve/flags/patch data, malformed/unsupported/UTF-8/limit errors, caller-owned
+queries, stable IDs and epoch-bound snapshots, dirty baseline undo/redo, atomic-save
+failure cleanup, external changes/removal and path aliases. It also retains the real
+**TBLoader** cube bake, coordinate conversion/bounds, twelve triangles, finite UVs,
+normals, collision and imported texture checks, and adds empty-worldspawn bake.
 
 `editor` runs an actual `@tool EditorPlugin` inside `--editor`: addon startup,
 Build Meshes visibility callbacks, Map Materials, real EditorUndoRedoManager
@@ -65,11 +68,33 @@ python tests/map_editor/run_tests.py --godot "$GODOT_BIN" --suite document --pro
 | Input | Purpose/current use |
 |---|---|
 | `classic_cube.map` | Baked baseline: bounds (-16,-32,-8)..(48,32,24), six planes, absent/zero flags, non-default classic UVs |
-| `empty.map` | Worldspawn-only Phase 1 seed; intentionally not sent through current bake |
-| `valve_cube.map` | Phase 1 seed: explicit axes and fractional offsets |
-| `patches.map` | Phase 1 seed: def2/def3 header values/subdivisions, fractional point, ordered light epairs |
+| `empty.map` | Worldspawn-only document and empty bake regression |
+| `valve_cube.map` | Roundtrip explicit axes and fractional offsets |
+| `patches.map` | def2/def3 header values/subdivisions, fractional point, ordered light epairs |
+| `ownership.map` | Ordered duplicate/empty/escaped/Unicode epairs, point/brush owners, fractional planes and nonzero flags |
 | Generated `textures/baseline/checker.png` | 64x32 checker with unique red top-left tile; stdlib-only generator in runner |
 
-Semantic round-trip, unsupported/malformed input, ownership instrumentation,
-brush/entity preservation and larger-map performance coverage are upcoming gates.
-See [implementation contract/progress](../../MAP_EDITOR_IMPLEMENTATION.md).
+The document suite also composes interleaved brush/patch input and malformed cases
+from these fixtures. Test file writes only target disposable `user://` paths.
+
+## Native ownership instrumentation
+
+From repository root, with Clang installed and `/tmp/opencode` available:
+
+```bash
+timeout 180s bash tests/map_editor/run_native_tests.sh > /tmp/opencode/tbloader-phase1-native.log 2>&1
+rg 'error:|ERROR|runtime error|Assertion|PASS|SUMMARY' /tmp/opencode/tbloader-phase1-native.log
+```
+
+The script compiles **production** parser/writer/model/geometry sources in standalone
+mode with ASan, UBSan and leak detection, then requires successful native assertions.
+There are no sanitizer suppressions or engine dependencies in this target. It checks
+field-by-field semantic equality, patch tessellation subdivisions, every fixture's
+truncation prefixes, a deterministic byte mutation corpus, repeated load/rebuild/
+reset/destruction, and cache disposal independent of source counts. It leaves the
+normal extension binary untouched. `CXX` and `TB_NATIVE_OUTPUT` override compiler and
+output path. The Godot wrapper and filesystem API are covered by the runtime suite,
+not by this standalone instrumentation target.
+
+Brush operations, draw/preview data, entity authoring and larger-map performance
+coverage are upcoming gates. See [implementation contract/progress](../../MAP_EDITOR_IMPLEMENTATION.md).

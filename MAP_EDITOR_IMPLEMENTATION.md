@@ -1,8 +1,9 @@
 # Map editor implementation contract and progress
 
-Phase 0, 2026-09-13. Specification: [MAP_EDITOR_PRD.md](MAP_EDITOR_PRD.md), especially
-§§6–8 and 14–16. **The API below is frozen for upcoming implementation, not yet
-implemented.** Changes require updating this document and its consumers together.
+Phases 0–1, 2026-09-13. Specification: [MAP_EDITOR_PRD.md](MAP_EDITOR_PRD.md), especially
+§§6–8 and 14–16. **API v1 is frozen; the Phase 1 subset is implemented below.**
+Brush operations and draw/preview payloads remain Phase 2. Changes require updating
+this document and its consumers together.
 
 ## Phase 0 gate / environment
 
@@ -13,7 +14,8 @@ implemented.** Changes require updating this document and its consumers together
 - [x] Disposable first-party project, maps, input hashes and retained failure logs.
 - [x] Document/editor ownership, API, identity, snapshots and preview contracts.
 - [x] Display feasibility established using existing X11 display `:0`.
-- [ ] Phases 1–6: document, authoring UI, persistence integration, full acceptance.
+- [x] Phase 1: transactional document, semantic persistence, identity and ownership gate.
+- [ ] Phases 2–6: brush operations, authoring UI, integration and full acceptance.
 
 Supported **tested baseline**: Linux x86_64, Godot
 `4.8.dev.custom_build.3924ec46f`, executable
@@ -147,6 +149,8 @@ user input errors return diagnostics rather than `push_error`/assert/crash.
 Infallible copied queries: `is_dirty()->bool`, `get_path()->String`,
 `get_revision()->int`, `get_epoch()->int`, `get_draw_data()->Array[Dictionary]`,
 `get_preview_data()->Array[Dictionary]`, `get_texture_names()->PackedStringArray`.
+Phase 1 adds `get_entities()->Array[Dictionary]`; concrete ordered ownership/epair
+schema is specified in the Phase 1 handoff below.
 `get_face_uv` value includes `projection` (`classic`/`valve`), `shift:Vector2`,
 `rotation:float`, `scale:Vector2`, `u_axis:Vector3`, `v_axis:Vector3`; Valve retains
 axes and offsets exactly. Scale zero/nonfinite arguments are rejected.
@@ -243,6 +247,143 @@ brushes; the UI filters by triangle IDs using its hidden set.
   tokens, cancels gestures, disconnects signals and releases preview/document data.
   Phase 3 must test replacement, scene switches, retired tokens and focus routing.
 
-Next gate: implement transactional parser/model/writer/cache cleanup and the Phase 1
-API above; expand fixture assertions before graph/UI work. Full Phase 6 interaction,
-ownership instrumentation and performance measurement remain incomplete.
+## Phase 1 implementation / handoff
+
+Implemented at SCENE initialization: `TBMapDocument : RefCounted` in
+`src/map_document.{h,cpp}`. Construction creates an unsaved worldspawn.
+
+### Actual bound surface
+
+- Result commands: `new_map`, `load_map`, `import_text`, `save_map`, `export_text`,
+  `snapshot`, `restore_snapshot`, `rebuild`.
+- Copied queries: `is_dirty`, `get_path`, `get_revision`, `get_epoch`,
+  `get_texture_names`, plus **`get_entities()->Array[Dictionary]`**.
+- Signals: `map_changed(revision:int)`, `dirty_changed(dirty:bool)`,
+  `preview_changed()`; failure/no-op restore emits nothing. Rebuild replaces caches,
+  refreshes topology tokens and emits preview only. Save reports path/baseline
+  changes without changing content revision or emitting a map-history signal.
+- No brush-mutation, selection-clipboard, face-UV, draw or preview methods are bound
+  yet. They are Phase 2 work, rather than placeholder implementations.
+
+Snapshot identity schema is now concrete:
+
+```text
+identities = {entities: [{id:int, primitives: [{kind:StringName, id:int}, ...]}, ...]}
+kind = "brush" | "patch"; primitive arrays follow source order.
+get_entities() returns that entities array with epairs:[{key:String,value:String}]
+on each entity, including duplicate keys and empty/unknown properties.
+```
+
+Entity/brush/patch IDs share one positive, monotonic lifetime allocator. Issued-ID
+kind checks reject forged, duplicate, cross-kind and foreign-epoch snapshot handles.
+Epochs are process-unique across document objects; replacement clears the issued
+namespace but never resets the lifetime high-water mark. Restore keeps the latest
+save baseline/path and compares normalized semantic text to determine dirty state.
+It validates all metadata on a candidate before swapping. Snapshot dictionaries and
+queries are freshly allocated; caller changes cannot mutate the live document.
+
+### Parser, writer and ownership
+
+- Replaced the old token-state parser with bounded recursive descent, shared by
+  document and bake. `LMMapParser::load_from_text`, `load_from_path` and
+  `load_from_godot_file` return bool and expose `LMParseError`. Parsing never clears
+  its destination until the full candidate succeeds. Expected errors return
+  diagnostics; document operations do not print engine errors.
+- Handles whitespace-independent punctuation, line/block comments, long quoted or
+  bare tokens, escaped quote/backslash, UTF-8/BOM, and EOF without a final newline.
+  Invalid UTF-8, embedded NUL, nonfinite/malformed numbers, zero scales, incomplete
+  flags/grids, unknown primitive blocks and incomplete entities are rejected.
+  Diagnostic columns count UTF-8 bytes, starting at 1; geometry diagnostics without
+  a source token use 0. Unknown escape sequences retain their literal backslash.
+- Preserves classic/Valve projection, absent versus explicit-zero flags, all signed
+  32-bit flag values, ordered epairs, owner entities, and interleaved brush/patch
+  order. Patch model now retains def2/def3, all three trailing header fields,
+  subdivisions and every position/UV. Writer is locale-independent, uses 17-digit
+  double precision and quotes/escapes names deterministically.
+- Explicit bounds: input and canonical output 16 MiB; decoded token 64 KiB; 65,536
+  entities; 64 faces/brush; odd patch dimensions 3..31; subdivisions 0..32;
+  numeric magnitude <=1e9 (flags instead use signed int32); absolute texture scale
+  >=1e-9. Aggregate work estimate <=8,000,000 (`faces³` per brush plus
+  `width*height*33²` per patch). Unsupported excess returns `LIMIT_EXCEEDED`.
+- Document candidates build geometry with 1x1 texture fallback and validate finite
+  brush positions/UVs, nonempty faces, paired hull edges and positive volume.
+  Patches are preserved and tessellated for native cache/bake; patch display is not
+  exposed in this phase. No performance/scaling claim is made.
+- `LMMapData` is noncopyable and destroys its own allocations; `swap` transfers
+  ownership. Null-safe, repeatable `map_data_free_geometry` uses cache-owned
+  entity/brush/face/patch counts, independent of mutable source topology. `run()`
+  frees prior geometry. Bake's empty-worldspawn null dereference and detached empty
+  mesh leak were fixed and covered by the runtime gate.
+
+### Persistence platform boundary
+
+POSIX saving uses an exclusive sibling `mkstemp`, complete checked writes, `fsync`,
+checked close, a second destination-byte check, and atomic `rename`; failures unlink
+the temporary file and preserve path/baseline/content. Existing permission bits are
+retained. External changes/removal compare exact loaded/saved bytes, including
+formatting-only edits. Path aliases resolve to their target; saving through symlinks
+preserves the link. A failed Save As cannot change the document path.
+
+The tested platform is Linux. Windows currently returns a structured `IO_WRITE`
+for save (atomic replacement backend still needed); macOS POSIX code is untested.
+External-change checks detect changes before and during a save; there is no
+cross-process compare-and-swap filesystem primitive or cooperative editor locking.
+This is atomic replacement, not a claim of crash-durable parent-directory metadata.
+
+### Entity-authoring extension point (Phase 4)
+
+The N inspector must consume ordered epairs and stable entity IDs from
+`get_entities`, including owners of selected primitives; no selection targets
+worldspawn. Point origin/classname are ordinary preserved epairs. Future
+create/move/property-edit/reparent/delete commands must use candidates and the same
+Result/snapshot/dirty/ID pipeline; do not use array offsets as identities or mutate
+the copied query dictionaries expecting native changes. Preserve unknown/duplicate
+properties deliberately when designing mixed-value editing. Ownership changes must
+update both entity arrays and `LMEntity::primitives` source-order entries. Entity
+markers, editable epairs/ownership, N routing and associated undo remain Phase 4.
+
+### Verification and next gate
+
+- Real pinned-engine document suite: semantic preservation, lifecycle, malformed
+  rejection, copied ownership data, epoch/identity snapshots, dirty undo/redo,
+  failed saves/rename cleanup/external changes, plus real cube and empty-map bake.
+  Canonical saved classic/Valve/ownership fixtures each bake 12 triangles; saved
+  def2/def3 patches bake 80 triangles, including the preserved 4x6 subdivisions.
+- `bash tests/map_editor/run_native_tests.sh`: standalone production parser/writer/
+  model/geometry sources with Clang ASan+UBSan+LSan, no suppressions. Field-by-field
+  semantic comparison, every fixture truncation prefix, deterministic byte mutation
+  corpus, 500 load/reset cycles and 1,000 rebuilds pass. Tests explicitly dispose
+  caches while source entity counts differ, then double-free/reset safely.
+  Instrumentation covers native map ownership; the engine and RefCounted wrapper
+  are exercised by the real runtime but are not sanitizer-instrumented here.
+- Build and suite logs: `/tmp/opencode/tbloader-phase1-{build,document,editor,ui,native,negative}.log`.
+  The sanitizer binary is `/tmp/opencode/tbloader-native-document` and the checked-in
+  script records its full compiler invocation. No instrumented addon is substituted
+  into the normal extension build.
+- Independent subagent review could not run: this harness exposes no delegation
+  tool. Integration review was performed directly; coordinator review remains useful.
+
+Final recorded evidence (commands run from repository root):
+
+| Gate | Result / retained artifacts |
+|---|---|
+| `timeout 600s scons platform=linux target=template_debug arch=x86_64 -j2` | PASS, exit 0; final source-built debug library |
+| `python tests/map_editor/run_tests.py --godot "$GODOT_BIN" --suite document` | PASS, **609 checks**, `tests/map_editor/artifacts/document-wy5ehnpl/` |
+| Same runner, `--suite editor` | PASS, **19 checks**, `artifacts/editor-86p_87l0/` |
+| `DISPLAY=:0` with same runner, `--suite ui` | PASS, **22 checks**, `artifacts/ui-x62ljq1k/`; baseline display smoke only |
+| `GODOT_BIN=... python -m unittest discover -s tests/map_editor -p test_harness.py -v` | PASS, one unittest covering four real-engine negative probes; each probe runner correctly failed |
+| `timeout 180s bash tests/map_editor/run_native_tests.sh` | PASS, ASan+UBSan+LSan, no suppressions or reported defects/leaks |
+
+`GODOT_BIN` remains `/mnt/data/code/godot/bin/godot.linuxbsd.editor.x86_64`.
+Runtime artifacts retain exact commands and input/library SHA-256 hashes. The first
+extended run detected empty-bake RID/ObjectDB leaks despite 552 successful checks;
+the strict runner rejected it, and the detached-mesh fix resolved it. No diagnostic
+was allowlisted. Release, Windows and macOS builds were not exercised.
+
+Next gate: Phase 2 validated brush operations and map-space draw/preview payloads.
+Start with `src/map_document.{h,cpp}`, `src/map/{map_data,map_parser,map_writer}.*`,
+`src/map/{entity,brush,patch,entity_geometry}.h`, and
+`tests/map_editor/{document_suite.gd,native_document_test.cpp}`. Keep issued IDs
+across deletion/restore and advance allocation high-water marks on every new
+primitive; keep cache-only changes out of geometry history. Full Phase 6 interaction
+and representative-map performance measurements remain incomplete.
