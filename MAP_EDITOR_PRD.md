@@ -1,6 +1,13 @@
 # TBLoader Map Editor PRD
 
-Status: Phases 0–1 implemented and tested on pinned Linux/Godot; brush operations/UI phases pending. See [implementation contract and progress](MAP_EDITOR_IMPLEMENTATION.md) for actual API scope and platform limits.  
+Status: Phases 0–5 P0/P1 functional implementation delivered on pinned Linux/Godot.
+Phase 6 genuine X11 input handoff passes **594 checks**, including fresh displayed
+reopen and 32/256-brush observations; controlled 60 Hz responsiveness, broader
+platform/native-dialog validation and explicit lifecycle limitations remain open.
+See [UI handoff and evidence](MAP_EDITOR_UI_IMPLEMENTATION.md),
+[native performance](MAP_EDITOR_PERFORMANCE.md), and
+[window-input protocol](tests/map_editor/window_input.md). P2 remains future scope.
+
 Audience: implementation LLM / engineer  
 Repo: `godot-tbloader`  
 Related but separate: `PRD.md` (import overrides, smoothing, materials). This document is the **in-Godot `.map` authoring** product. Do not treat generated `MeshInstance3D` / collision nodes as the source of truth.
@@ -440,37 +447,45 @@ P0/P1/P2 are feature priorities. Dependency-ordered implementation phases and ve
 
 ### P0 — blockout and persistence milestone
 
+Checked items mean implemented with native/editor/rendered acceptance on the pinned
+Linux debug addon, not parity on all platforms or every input path. Evidence:
+Phase 5 native **10,528** checks; final review editor **495**, displayed handler
+journey **506** and fresh reopen/recovery **11**; Phase 6 genuine XTest **594**.
+The [handoff](MAP_EDITOR_UI_IMPLEMENTATION.md) separates those methods and lists
+the exact limitations. This checklist does not close the open responsiveness or
+exit-failure gates.
+
 - [x] `TBMapDocument` load/save/new, writer round-trip of parsed maps (classic + Valve + flags + patches + epair order; tested POSIX save)
-- [ ] Geo rebuild after edit
-- [ ] Map main-screen tab, 2×2 layout, grid, pan, zoom-to-cursor
-- [ ] Camera + material browser + two grid panes; Ctrl+Tab orientation cycling on the focused grid
-- [ ] Right-click camera fly mode with reliable input capture/release
-- [ ] Project material/texture index, search, folder navigation and lazy thumbnails
-- [ ] Draw all brush outlines
-- [ ] Bind to selected `TBLoader.map_resource`
-- [ ] Cuboid drag-create with snap, workzone thickness, Shift square, Ctrl cube, degenerate → select
-- [ ] Workzone maintained from selection
-- [ ] Primitive select / shift-add / box-select
-- [ ] H hides selected brushes; Shift+H unhides all; hidden brushes are excluded from all Map-view picking
-- [ ] Move brushes in view plane
-- [ ] Silhouette face resize
-- [ ] Clone (Space), copy/paste map text, delete
-- [ ] Grid keys 1–9 and `[` `]`
-- [ ] Default-on grid snapping with rigid multi-brush movement, negative/fractional coordinates, and zoom-independent results
-- [ ] Undo/redo
-- [ ] Texture assign whole brush; UV shift/scale/rotate on selected brush faces (all faces if primitive)
-- [ ] Minimal textured camera preview and texture-size resolution for preview/bake UV parity
-- [ ] Save `.map` and rebuild TBLoader
-- [ ] N entity inspector; point/brush entity creation, property editing, ownership, and undoable persistence
+- [x] Geo rebuild after edit
+- [x] Map main-screen tab, 2×2 layout, grid, pan, zoom-to-cursor
+- [x] Camera + material browser + two grid panes; Ctrl+Tab orientation cycling on the focused grid
+- [x] Right-click camera fly mode with reliable input capture/release
+- [x] Project material/texture index, search, folder navigation and lazy thumbnails
+- [x] Draw all brush outlines
+- [x] Bind to selected `TBLoader.map_resource`
+- [x] Cuboid drag-create with snap, workzone thickness, Shift square, Ctrl cube, degenerate → select
+- [x] Workzone maintained from selection
+- [x] Primitive select / shift-add / box-select
+- [x] H hides selected brushes; Shift+H unhides all; hidden brushes are excluded from all Map-view picking
+- [x] Move brushes in view plane
+- [x] Silhouette face resize
+- [x] Clone (Space), copy/paste map text, delete
+- [x] Grid keys 1–9 and `[` `]`
+- [x] Default-on grid snapping with rigid multi-brush movement, negative/fractional coordinates, and zoom-independent results
+- [x] Undo/redo
+- [x] Texture assign whole brush; UV shift/scale/rotate on selected brush faces (all faces if primitive)
+- [x] Minimal textured camera preview and texture-size resolution for preview/bake UV parity
+- [x] Save `.map` and rebuild TBLoader
+- [x] N entity inspector; point/brush entity creation, property editing, ownership, and undoable persistence
 
 ### P1 — Radiant parity for graph editing
 
-- [ ] Face / vertex / edge modes with visible handles
-- [ ] Assign texture to **selected faces only**
-- [ ] Clipper: 2-point 2D, Enter clip, Shift+Enter split, flip, caulk cap
-- [ ] `Ctrl+3`–`9` prism
-- [ ] QE4 axis constrain (Shift) and AABB snap (Ctrl) while moving
-- [ ] Expanded camera/material inspection UX
+- [x] Face / vertex / edge modes with visible handles
+- [x] Assign texture to **selected faces only**
+- [x] Clipper: 2-point 2D, Enter clip, Shift+Enter split, flip, caulk cap
+- [x] `Ctrl+3`–`9` prism
+- [x] QE4 axis constrain (Shift) and AABB snap (Ctrl) while moving
+- [x] Expanded camera/material inspection UX (indexed browser, classic surface controls, Frame/fly, selection preview)
 
 ### P2 — later
 
@@ -651,6 +666,16 @@ Exit gate:
 
 ### Phase 6 — Display-backed acceptance and handoff
 
+Current evidence: the full displayed in-engine journey and fresh reopen/rebake
+gates pass; the separate genuine XTest suite passes **594** checks, with actual
+widgets, splitters, tab changes, all grid orientations, focus/capture, save/open
+and fresh-process native assertions. Native 32/256/512 measurements and real
+32/256-brush input/frame/memory observations are delivered. The **16.7 ms complete
+frame / 60 Hz** responsiveness gate is **not established**; observer overhead and
+event pacing preclude treating these intervals as isolated frame cost. Native
+dialog windows, broader OS-input tool coverage, release/other platforms and the
+handoff's lifecycle limitations remain explicitly incomplete.
+
 Run the actual Godot editor with a display or suitable virtual display/software renderer. Automate repeatable input sequences and capture screenshots plus serialized map assertions. Use in-engine event injection for reproducible widget tests and window-system input where available to validate real focus/mouse capture. Headless tests do not establish visual correctness.
 
 Required end-to-end journey:
@@ -686,7 +711,7 @@ Continue autonomously through planned P0/P1 gates; resolve ordinary implementati
 
 ## 16. Test environment and reproducible commands
 
-Environment preflight on 2026-09-13:
+Historical environment preflight (before Phase 0) on 2026-09-13:
 
 - `scons`, `g++`, and `clang++` are available on `PATH`.
 - `godot`/`godot4`, `Xvfb`/`xvfb-run`, and `xdotool` were not found on `PATH`.
@@ -696,17 +721,21 @@ Environment preflight on 2026-09-13:
 
 Use the confirmed local Godot executable and record its version with test results. Establish a usable display-backed test environment before claiming full verification. If display automation cannot be provisioned, implementation and headless tests can proceed, but Phase 6 stays incomplete.
 
-The following commands implement the **Phase 0 harness interface**. `document` currently verifies the real TBLoader runtime before TBMapDocument exists; `editor` verifies real editor-plugin lifecycle/history; `ui` is display feasibility/editor screenshot smoke, not Phase 6 acceptance. See `tests/map_editor/README.md` for coverage and failure probes. `GODOT_BIN` is the absolute path to the pinned engine executable.
+Current commands below run the real native document suite, editor integration,
+displayed handler journey and genuine XTest journey. `TBMapDocument` and the Map
+authoring UI are implemented. See `tests/map_editor/README.md` for exact coverage,
+failure protocol and limitations. `GODOT_BIN` is the pinned engine executable.
 
 ```bash
 # Run from the repository root. Prepare the test project with the actual addon
-# and freshly built library; isolate debug/release artifacts (names currently overlap).
+# and freshly built library; debug/release libraries have target-qualified names.
 export GODOT_BIN="/mnt/data/code/godot/bin/godot.linuxbsd.editor.x86_64"
 scons platform=linux target=template_debug arch=x86_64 -j2
 python tests/map_editor/run_tests.py --godot "$GODOT_BIN" --suite document
 python tests/map_editor/run_tests.py --godot "$GODOT_BIN" --suite editor
 python -m unittest discover -s tests/map_editor -p test_harness.py -v
 DISPLAY=:0 python tests/map_editor/run_tests.py --godot "$GODOT_BIN" --suite ui
+DISPLAY=:0 python3 tests/map_editor/window_input_runner.py --godot "$GODOT_BIN" --samples 31 --timeout 180
 ```
 
 Runner obligations:

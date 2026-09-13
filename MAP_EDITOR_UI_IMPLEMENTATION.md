@@ -2,6 +2,11 @@
 
 ## Progress — 2026-09-13
 
+**P0/P1 functional implementation and genuine X11 input handoff are delivered on
+the pinned Linux debug addon.** The broad native/editor/displayed handler gates
+below are complemented by the new XTest gate. A controlled 60 Hz responsiveness
+gate and the explicit product/platform limitations at the end remain incomplete.
+
 - Implemented real Map main screen, camera/materials left and independent Top/Front
   grids right, resizable splitters, per-orientation pan/zoom, shared fractional grid.
 - Graph handlers implement cuboid creation, click/Shift/directional box selection,
@@ -69,6 +74,7 @@ Pinned engine: `/mnt/data/code/godot/bin/godot.linuxbsd.editor.x86_64`.
 python tests/map_editor/run_tests.py --godot /mnt/data/code/godot/bin/godot.linuxbsd.editor.x86_64 --suite editor --timeout 60
 DISPLAY=:0 python tests/map_editor/ui_journey_runner.py --godot /mnt/data/code/godot/bin/godot.linuxbsd.editor.x86_64 --suite ui --timeout 90
 python tests/map_editor/run_tests.py --godot /mnt/data/code/godot/bin/godot.linuxbsd.editor.x86_64 --suite document --timeout 90
+DISPLAY=:0 python3 tests/map_editor/window_input_runner.py --godot /mnt/data/code/godot/bin/godot.linuxbsd.editor.x86_64 --samples 31 --timeout 180
 ```
 
 Work step 1 (`72a3753`): real editor **93 checks**,
@@ -192,6 +198,83 @@ restore identity. The registry retains open documents for the plugin lifetime;
 snapshot budgets do not cap the current document content. Recovery checkpoints
 on orderly teardown, not continuously on every edit.
 
+### Phase 6 genuine window-system gate — 2026-09-13
+
+**594 checks passed** in two actual X11 editor processes, with XTEST **2.2** on
+`DISPLAY=:0`. Final run: `tests/map_editor/artifacts/window-input-p_80a_gv/`.
+Full outer log: `/tmp/opencode/tbloader-window-input-final.log`. Both processes
+exited zero with empty stderr, exact completion/count markers and no recognized
+engine/script errors. Sources were staged from `58e46df`; no production or
+native changes were required. Exact source/library/engine hashes are in `result.json`.
+
+All edits in this suite enter via **ctypes libX11/libXtst**, never direct handlers:
+Map tab and both splitters; snapped cuboid creation, click selection and Top/Front/
+Side moves; H/Shift+H; grid keys and both panes' Ctrl+Tab cycles; real Ctrl+Z/Y;
+material search text focus and checker assignment; N worldspawn typing/property
+commit/undo/redo; 3D/Map tab switching; RMB/W fly with Esc, RMB and actual OS-focus
+exits; Save As, New, Open and a fresh displayed-process reopen with exact canonical
+document, bounds, six checker faces, persisted property and twelve preview triangles.
+
+The regression gate specifically proves **moved, still-held** LMB previews in each
+grid before focus transfers to a test-owned X window. Actual Godot window focus
+becomes false; gestures cancel with unchanged native revision, canonical text and
+real undo-history version, including after release/refocus. The input guard rejects
+keys while the sink owns focus. It accepts text entry only in the staged editor's
+verified PID window or its IME child. Original desktop window/focus and cursor are
+restored; no global desktop settings are changed. The observer is a test-only
+read-side plugin. The new suite uses embedded real dialogs (`--single-window`).
+
+Screenshots, visually inspected, are under the retained project's
+`window-captures/`: `window-textured.png`, `window-entity.png`,
+`window-blockout-256.png`, `window-reopened.png`; also retained are hidden/saved
+and 32-brush captures. The saved source is `project/window-authored.map`.
+Full protocol, case list and artifact index: [window input acceptance](tests/map_editor/window_input.md).
+
+Real 32/256-brush fixtures additionally execute **31** begin/motion/commit/undo/redo
+cycles apiece, checking exact saved baselines. Observer-inclusive release latency
+was median/p95 **44.00/67.02 ms** (32) and **168.26/190.79 ms** (256). Corresponding
+rendered-callback intervals were **43.47/88.62 ms** and **108.23/172.49 ms**. These
+include polling, JSON/native observation and event pacing, not isolated frame work
+or physical presentation. RSS/HWM and all raw samples are retained. No 16.7 ms /
+60 Hz pass or hardware-performance claim is made. This complements the independent
+[native rebuild/snapshot baseline](MAP_EDITOR_PERFORMANCE.md), whose researched
+XTest feasibility is now established by this live-server run.
+
+### Open the actual Map editor
+
+1. Use the pinned editor and the built addon containing
+   `addons/tbloader/bin/libtbloader.linux.template_debug.x86_64.so`. For another
+   project, copy the complete `addons/tbloader` directory, including its
+   `.gdextension` and debug library; enable **TBLoader** in Project → Project
+   Settings → Plugins and restart if Godot requests it.
+2. Click **Map** in the top main-screen row next to 2D/3D/Script (toward the right
+   after Asset Store on this 4.8 pin). This is the authoring workspace; the spatial
+   Build Meshes/Map Materials controls are separate.
+3. Use **New**, drag an empty grid to create a cuboid, or **Open…** and select a
+   `.map` in the file list. On this engine pin, typing a filename alone does not
+   enable Open; click the file row or double-click it. Choose **Discard** if an
+   empty untitled map prompts before opening. **Frame** fits the camera selection.
+4. To bake into a scene, select the intended `TBLoader`, click **Bind selected
+   loader**, and work on its map. For a standalone Save As, **Update loader path**
+   is explicit. Save the map, **Bake saved map**, then save the Godot scene. For
+   scene-save-triggered deferred baking, save the scene again to serialize output.
+
+Launch the retained acceptance project without activating its test observer:
+
+```bash
+RUN=/mnt/data/code/godot-tbloader/tests/map_editor/artifacts/window-input-p_80a_gv
+DISPLAY=:0 TB_TEST_SUITE= \
+XDG_CONFIG_HOME="$RUN/xdg_config_home" XDG_DATA_HOME="$RUN/xdg_data_home" \
+XDG_CACHE_HOME="$RUN/xdg_cache_home" \
+/mnt/data/code/godot/bin/godot.linuxbsd.editor.x86_64 \
+  --path "$RUN/project" --editor --display-driver x11 \
+  --rendering-method gl_compatibility --single-window --audio-driver Dummy
+```
+
+Click Map → Open… → `window-authored.map` → Open → Frame. The retained project
+also includes `blockout-32.map`, `blockout-256.map` and their bounds manifests.
+The checker cuboid and worldspawn `message` value are real saved `.map` data.
+
 ## Native/material integration
 
 The checked native API landed in `83e844a`. The host uses `resolve_material(token)`
@@ -226,6 +309,11 @@ previous output. The journey supplies `fixtures/info_player_start.tscn` delibera
 - Loader texture-root/template/property changes invalidate preview resolution.
   Baked-current status still compares canonical document content, not every external
   resource or loader option. Broader baked-output dependency tracking remains open.
-- Blockout-scale full-document snapshots/rebuilds; no large-map performance claim.
-- Release/other Godot versions/other platforms, full window-system input acceptance,
-  and representative-map responsiveness/memory measurements remain Phase 6 work.
+- Blockout-scale full-document snapshots/rebuilds. Native 32/256/512 measurements
+  and displayed 32/256 gesture/frame/memory observations are available; a controlled
+  continuous-input 60 Hz responsiveness gate remains open, with no large-map claim.
+- Release/other Godot versions/other platforms and separate native-window dialogs
+  remain unverified. The exact genuine XTest cases above pass; OS-input coverage of
+  every component/clipper/bake/lifecycle case remains broader follow-up work.
+- The pinned FileDialog requires selecting an Open-file list row. General
+  exit-failure UX, baked-output dependency tracking and P2 remain incomplete.

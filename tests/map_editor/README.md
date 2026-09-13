@@ -1,4 +1,4 @@
-# Map editor document and baseline harness
+# Map editor acceptance harnesses
 
 Run from the repository root with Python **3.11+**, SCons and a C++ compiler.
 The engine is pinned in `engine_version.txt`; a different version is a failure.
@@ -11,6 +11,8 @@ python tests/map_editor/run_tests.py --godot "$GODOT_BIN" --suite editor
 python -m unittest discover -s tests/map_editor -p test_harness.py -v
 # Existing local X11/Xwayland display; no installation or system changes needed:
 DISPLAY=:0 python tests/map_editor/run_tests.py --godot "$GODOT_BIN" --suite ui
+# Genuine OS keyboard/mouse input, retained project and fresh displayed reopen:
+DISPLAY=:0 python tests/map_editor/window_input_runner.py --godot "$GODOT_BIN" --samples 31 --timeout 180
 ```
 
 `document` checks the real **TBMapDocument** Result API: registration, new/load/import/
@@ -29,11 +31,21 @@ addon disable/re-enable with released controls.
 `ui` runs the editor acceptance with a display, adding rendered intermediate
 face/edge/vertex/split captures and a main-screen screenshot. It requires a display
 and never falls back to headless. Use `ui_journey_runner.py` with the same arguments
-to retain the project and launch a fresh-process reopen/rebake gate. Tests use real
-in-engine handlers, not window-system mouse injection; full Phase 6 manual UX and
-representative-map performance acceptance remain open.
+to retain the project and launch a fresh-process reopen/rebake gate. These tests use
+real in-engine handlers. The separate **`window_input_runner.py`** suite uses genuine
+X11 XTest keyboard/mouse events and a read-only observer, including native document
+assertions, real focus/capture cancellation, file pickers and a fresh displayed
+process. Its 32/256-brush gesture/frame/memory measurements complement the native
+baseline; a controlled 60 Hz responsiveness gate remains open.
 The runner selects X11 when `DISPLAY` is set, otherwise Wayland.
 Here X11 `:0` works; Wayland `wayland-1` produces engine GLES3 errors/crash.
+
+See [window-input protocol, results and timing limitations](window_input.md),
+[native performance baseline](../../MAP_EDITOR_PERFORMANCE.md), and
+[opening the actual Map tab / retained demo](../../MAP_EDITOR_UI_IMPLEMENTATION.md#open-the-actual-map-editor).
+P0/P1 functional implementation is delivered on the pinned Linux debug addon;
+P2, general three-point clipping, and the explicitly listed lifecycle/platform
+limitations remain open. This is no longer a Phase 0-only smoke harness.
 
 ## Isolation and failure protocol
 
