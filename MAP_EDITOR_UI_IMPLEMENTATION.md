@@ -317,3 +317,19 @@ previous output. The journey supplies `fixtures/info_player_start.tscn` delibera
   every component/clipper/bake/lifecycle case remains broader follow-up work.
 - The pinned FileDialog requires selecting an Open-file list row. General
   exit-failure UX, baked-output dependency tracking and P2 remain incomplete.
+
+## Final coordinator verification — 2026-09-13
+
+The coordinator independently verified the combined tree after `032ab4a` using
+the pinned engine above. All commands exited zero:
+
+| Gate | Result | Evidence |
+|---|---|---|
+| `timeout 900s scons platform=linux target=template_debug arch=x86_64 -j2` | Passed; up-to-date | `/tmp/opencode/tbloader-final-build.log` |
+| `python tests/map_editor/run_tests.py --godot /mnt/data/code/godot/bin/godot.linuxbsd.editor.x86_64 --suite document --timeout 120` | **10,529 checks**, zero failures | `tests/map_editor/artifacts/document-9zwws_8t/`; `/tmp/opencode/tbloader-final-document.log` |
+| `python tests/map_editor/run_tests.py --godot /mnt/data/code/godot/bin/godot.linuxbsd.editor.x86_64 --suite editor --timeout 120` | **495 checks**, zero failures | `tests/map_editor/artifacts/editor-vd4c131u/`; `/tmp/opencode/tbloader-final-editor.log` |
+
+The coordinator also visually inspected the retained Phase 6
+`window-input-p_80a_gv/project/window-captures/window-textured.png` under
+`tests/map_editor/artifacts/` and confirmed the quad layout. The recorded Phase 6
+functional checks pass; the controlled 60 Hz optimization budget and P2 remain open.
