@@ -8,6 +8,7 @@ var materials_panel: Control = null
 var materials_tree: Tree = null
 var materials_button: Button = null
 var materials_count_label: Label = null
+var map_editor: Control = null
 
 func _enter_tree():
 	map_control = create_map_control()
@@ -16,8 +17,23 @@ func _enter_tree():
 
 	materials_panel = create_materials_panel()
 	add_control_to_bottom_panel(materials_panel, "Map Materials")
+	map_editor = preload("res://addons/tbloader/src/editor/map_editor.gd").new()
+	map_editor.plugin = self
+	get_editor_interface().get_editor_main_screen().add_child(map_editor)
+	map_editor.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	map_editor.hide()
+	get_editor_interface().get_selection().selection_changed.connect(spatial_selection_changed)
+	spatial_selection_changed()
 
 func _exit_tree():
+	get_editor_interface().get_selection().selection_changed.disconnect(spatial_selection_changed)
+	# Pinned 4.8's legacy main-screen adapter detaches its generated EditorDock
+	# on plugin disable without freeing it. Dispose only that detached wrapper.
+	var wrapper = get_meta("_dock", null)
+	if is_instance_valid(wrapper) and not wrapper.is_inside_tree():
+		wrapper.queue_free()
+	map_editor.queue_free()
+	map_editor = null
 	remove_control_from_bottom_panel(materials_panel)
 	materials_panel.queue_free()
 	materials_panel = null
@@ -30,7 +46,32 @@ func _handles(object):
 	return object is TBLoader
 
 func _make_visible(visible: bool):
-	map_control.set_visible(visible)
+	if map_editor != null:
+		map_editor.set_visible(visible)
+
+func _has_main_screen() -> bool:
+	return true
+
+func _get_plugin_name() -> String:
+	return "Map"
+
+func _get_plugin_icon() -> Texture2D:
+	return get_editor_interface().get_base_control().get_theme_icon("GridMap", "EditorIcons")
+
+func _get_unsaved_status(_for_scene: String) -> String:
+	if map_editor != null and map_editor.session.document.is_dirty():
+		return "The Map document has unsaved changes. Save untitled maps with Map → Save As before exiting."
+	return ""
+
+func _save_external_data() -> void:
+	if map_editor != null:
+		map_editor.save_all()
+
+func spatial_selection_changed() -> void:
+	var nodes = get_editor_interface().get_selection().get_selected_nodes()
+	var loader = nodes[0] if nodes.size() == 1 and nodes[0] is TBLoader else null
+	_edit(loader)
+	map_control.visible = loader != null
 
 func _edit(object):
 	editing_loader = weakref(object)
@@ -50,13 +91,30 @@ func create_map_control() -> Control:
 	var ret = HBoxContainer.new()
 	ret.add_child(button_build_meshes)
 	ret.add_child(materials_button)
+	var open_button = Button.new()
+	open_button.text = "Open in Map Editor"
+	open_button.pressed.connect(func():
+		get_editor_interface().set_main_screen_editor("Map")
+		map_editor.bind_selected())
+	ret.add_child(open_button)
 	return ret
 
 func build_meshes():
 	var loader = editing_loader.get_ref()
 	if loader == null:
 		return
-	loader.build_meshes()
+	var root = get_editor_interface().get_edited_scene_root()
+	if root == null or (loader != root and not root.is_ancestor_of(loader)):
+		return
+	if not loader.has_method("build_meshes_checked"):
+		map_editor.set_status("Checked bake API unavailable; build deferred.")
+		return
+	if loader == map_editor.session.loader.get_ref():
+		map_editor.bake()
+		return
+	var result: Dictionary = loader.call("build_meshes_checked")
+	if map_editor.session.report(result):
+		get_editor_interface().mark_scene_as_unsaved()
 	refresh_materials()
 
 func create_materials_panel() -> Control:
