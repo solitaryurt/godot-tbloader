@@ -26,6 +26,8 @@ func _enter_tree():
 	spatial_selection_changed()
 
 func _exit_tree():
+	map_editor.store_recovery()
+	map_editor.shutdown()
 	get_editor_interface().get_selection().selection_changed.disconnect(spatial_selection_changed)
 	# Pinned 4.8's legacy main-screen adapter detaches its generated EditorDock
 	# on plugin disable without freeing it. Dispose only that detached wrapper.
@@ -65,7 +67,7 @@ func _get_unsaved_status(_for_scene: String) -> String:
 
 func _save_external_data() -> void:
 	if map_editor != null:
-		map_editor.save_all()
+		map_editor.save_all(true)
 
 func spatial_selection_changed() -> void:
 	var nodes = get_editor_interface().get_selection().get_selected_nodes()

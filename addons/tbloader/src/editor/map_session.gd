@@ -17,8 +17,10 @@ var scene: WeakRef = weakref(null)
 var baked_text = ""
 var grid = 16.0
 var texture = "common/caulk"
+var texture_root = "res://textures"
+var recovery_source = ""
 var manager: EditorUndoRedoManager
-var save_enabled = true # Explicit Discard suppresses Save All until history revives it.
+var save_enabled = true # Successful Discard replacement suppresses Save All until resume/edit/undo.
 var was_bound = false
 
 func capture() -> Dictionary:
@@ -64,6 +66,7 @@ func transact(label: String, operation: Callable) -> bool:
 		changed.emit()
 		return false
 	var token = Action.new()
+	save_enabled = true
 	token.session = self
 	token.before = before
 	token.after = after

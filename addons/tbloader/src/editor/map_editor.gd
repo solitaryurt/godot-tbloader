@@ -39,7 +39,15 @@ var texture_sizes: Dictionary = {}
 var rebuild_on_save: CheckBox
 var texture_root: LineEdit
 var session_picker: OptionButton
-var sessions: Array[WeakRef] = []
+var sessions: Array[RefCounted] = [] # Documents outlive expirable history payloads.
+var discard_on_replace: RefCounted
+var history_total_budget = 128 * 1024 * 1024
+var history_session_budget = 64 * 1024 * 1024
+var history_action_budget = 128
+var resolver_config: Array = []
+var shutting_down = false
+const RECOVERY_PATH = "user://tbloader-map-recovery.json"
+const RECOVERY_META = "tbloader_map_recovery"
 var scan_delay = -1.0
 
 func _ready() -> void:
@@ -59,7 +67,7 @@ func _ready() -> void:
 	rebuild_on_save.button_pressed = true
 	files.add_child(rebuild_on_save)
 	session_picker = OptionButton.new()
-	session_picker.tooltip_text = "Sessions retained by Map undo history"
+	session_picker.tooltip_text = "Open and unresolved Map documents"
 	session_picker.item_selected.connect(func(index):
 		var origin = session_picker.get_item_metadata(index).get_ref()
 		if origin != null:
@@ -168,6 +176,7 @@ func _ready() -> void:
 	set_session(Session.new())
 	configure_browser(texture_root.text)
 	set_tool("Brush")
+	restore_recovery()
 	visibility_changed.connect(func():
 		if not is_visible_in_tree():
 			cancel_interaction())
@@ -182,15 +191,17 @@ func button(parent: Node, text: String, callback: Callable) -> Button:
 func set_session(value: RefCounted) -> void:
 	cancel_interaction()
 	session = value
+	session.save_enabled = true
 	session.manager = plugin.get_undo_redo()
 	if not session.changed.is_connected(refresh):
 		session.changed.connect(refresh)
 		session.message.connect(set_status)
 		session.action_recorded.connect(retain_action)
-		sessions.append(weakref(session))
+		sessions.append(session)
 	graph_a.clip_points.clear()
 	graph_b.clip_points.clear()
 	texture_field.text = session.texture
+	sync_resolver()
 	refresh()
 
 func retain_action(token: RefCounted) -> void:
@@ -206,7 +217,7 @@ func retain_action(token: RefCounted) -> void:
 			count += 1
 	for item in tokens:
 		var same: bool = item.session == token.session
-		if total > 128 * 1024 * 1024 or (same and (local > 64 * 1024 * 1024 or count > 128)):
+		if total > history_total_budget or (same and (local > history_session_budget or count > history_action_budget)):
 			total -= item.bytes
 			if same:
 				local -= item.bytes
@@ -229,20 +240,21 @@ func refresh_status() -> void:
 	if session == null or status == null:
 		return
 	var path: String = session.document.get_path()
+	var title = path if path else "Untitled.map"
+	if not session.recovery_source.is_empty():
+		title = "Recovered %s (Save As)" % session.recovery_source
 	var baked = "never baked" if session.baked_text.is_empty() else ("baked current" if session.baked_text == session.document.export_text().value else "bake stale")
-	status.text = "%s%s • %s • grid %.3f • %s • %s • %d selected • %d hidden" % [path if path else "Untitled.map", " * UNSAVED" if session.document.is_dirty() else " • saved", baked, session.grid, tool, ["Side", "Front", "Top"][active_graph.orientation], session.selected.size() + session.points.size(), session.hidden.size()]
+	status.text = "%s%s • %s • grid %.3f • %s • %s • %d selected • %d hidden" % [title, " * UNSAVED" if session.document.is_dirty() else " • saved", baked, session.grid, tool, ["Side", "Front", "Top"][active_graph.orientation], session.selected.size() + session.points.size(), session.hidden.size()]
 	var loader = session.loader.get_ref()
 	binding_label.text = "Bound: %s — %s" % [loader.name, loader.map_resource] if is_instance_valid(loader) else "Standalone document • Select a TBLoader, then explicitly Bind"
 	session_picker.clear()
-	sessions = sessions.filter(func(reference): return reference.get_ref() != null)
-	for reference in sessions:
-		var origin = reference.get_ref()
-		if origin == null:
-			continue
+	for origin in sessions:
 		var filename: String = origin.document.get_path().get_file()
+		if not origin.recovery_source.is_empty():
+			filename = "Recovered " + origin.recovery_source.get_file()
 		session_picker.add_item((filename if filename else "Untitled") + (" *" if origin.document.is_dirty() else ""))
 		var index = session_picker.item_count - 1
-		session_picker.set_item_metadata(index, reference)
+		session_picker.set_item_metadata(index, weakref(origin))
 		if origin == session:
 			session_picker.select(index)
 
@@ -392,6 +404,27 @@ func make_prism(sides: int) -> void:
 		return session.success())
 
 func configure_browser(root: String) -> void:
+	var loader = session.loader.get_ref()
+	if is_instance_valid(loader) and root != loader.texture_path:
+		set_status("Bound materials use the loader's Texture Path; edit it in the scene Inspector.")
+		root = loader.texture_path
+	else:
+		session.texture_root = root
+	sync_resolver(true)
+
+func sync_resolver(force = false) -> void:
+	var loader = session.loader.get_ref()
+	var root: String = loader.texture_path if is_instance_valid(loader) else session.texture_root
+	var config: Array = [root]
+	if is_instance_valid(loader):
+		config.append_array([loader.get_instance_id(), loader.texture_material_template, loader.texture_material_texture_path])
+	if not force and config == resolver_config:
+		return
+	resolver_config = config
+	if is_instance_valid(loader):
+		var template: Material = loader.texture_material_template
+		if template != null and not template.changed.is_connected(refresh_materials):
+			template.changed.connect(refresh_materials)
 	texture_root.text = root
 	var probe = ClassDB.instantiate("TBLoader")
 	var direct: bool = probe.has_method("resolve_material")
@@ -399,44 +432,39 @@ func configure_browser(root: String) -> void:
 	browser.configure(EditorInterface.get_resource_filesystem(), root, null, direct)
 	refresh_materials()
 
-func material_selected(_resource: Resource, path: String, token: String, mapping: Dictionary) -> void:
-	if not mapping.resolved:
-		# Native exact project tokens cover resources outside the legacy root.
-		var resolver = ClassDB.instantiate("TBLoader")
-		var result: Dictionary = resolver.call("resolve_material", path) if resolver.has_method("resolve_material") else {}
+func resolve_token(token: String) -> Dictionary:
+	var resolver = session.loader.get_ref()
+	var temporary = not is_instance_valid(resolver)
+	if temporary:
+		resolver = ClassDB.instantiate("TBLoader")
+		resolver.texture_path = session.texture_root
+	var result: Dictionary = resolver.call("resolve_material", token) if resolver.has_method("resolve_material") else {}
+	if temporary:
 		resolver.free()
-		if not result.get("resolved", false):
-			set_status("%s: %s" % [path, mapping.reason])
-			return
+	return result
+
+func material_selected(_resource: Resource, path: String, token: String, _mapping: Dictionary) -> void:
+	sync_resolver()
+	var result = resolve_token(token)
+	if not result.get("resolved", false) or result.get("resource_path", "") != path:
 		token = path
+		result = resolve_token(token)
+	if not result.get("resolved", false) or result.get("resource_path", "") != path:
+		set_status("Cannot resolve selected resource: " + path)
+		return
 	texture_field.text = token
 	session.texture = token
 	set_status("%s → %s • Assign applies to the selection" % [path, token])
 
 func preview_material(token: String) -> Material:
+	sync_resolver()
 	if material_cache.has(token):
 		return material_cache[token]
 	var material: Material
-	var resolver = session.loader.get_ref()
-	var temporary = not is_instance_valid(resolver)
-	if temporary:
-		resolver = ClassDB.instantiate("TBLoader")
-		resolver.texture_path = texture_root.text
-	if resolver.has_method("resolve_material"):
-		var resolved: Dictionary = resolver.call("resolve_material", token)
-		texture_sizes[token] = resolved.get("texture_size", Vector2i.ONE)
-		if resolved.get("material") is Material:
-			material = resolved.material.duplicate()
-	if temporary:
-		resolver.free()
-	var mappings: Dictionary = browser.get_shader_mappings()
-	if material == null and mappings.has(token):
-		var resource = load(mappings[token])
-		if resource is Material:
-			material = resource.duplicate()
-		elif resource is Texture2D:
-			material = StandardMaterial3D.new()
-			material.albedo_texture = resource
+	var resolved = resolve_token(token)
+	texture_sizes[token] = resolved.get("texture_size", Vector2i.ONE)
+	if resolved.get("material") is Material:
+		material = resolved.material.duplicate()
 	if material == null:
 		material = StandardMaterial3D.new()
 		material.albedo_color = Color("8ba4b6")
@@ -555,14 +583,14 @@ func build_dialogs() -> void:
 	file_dialog.size = Vector2i(800, 550)
 	add_child(file_dialog)
 	file_dialog.file_selected.connect(file_selected)
-	file_dialog.canceled.connect(func(): pending = Callable(); save_then_pending = false)
+	file_dialog.canceled.connect(func(): pending = Callable(); save_then_pending = false; discard_on_replace = null)
 	dirty_dialog = ConfirmationDialog.new()
 	dirty_dialog.title = "Unsaved map"
 	dirty_dialog.dialog_text = "Save changes to the current .map before continuing?"
 	dirty_dialog.ok_button_text = "Save"
 	dirty_dialog.add_button("Discard", false, "discard")
 	dirty_dialog.confirmed.connect(func(): save_then_pending = true; file_command("save"))
-	dirty_dialog.custom_action.connect(func(_action): session.save_enabled = false; dirty_dialog.hide(); run_pending())
+	dirty_dialog.custom_action.connect(func(_action): discard_on_replace = session; dirty_dialog.hide(); run_pending())
 	dirty_dialog.canceled.connect(func(): pending = Callable())
 	add_child(dirty_dialog)
 	inspector = Window.new()
@@ -684,6 +712,7 @@ func delete_entities(delete_brushes: bool) -> void:
 
 func request_replace(callback: Callable) -> void:
 	cancel_interaction()
+	discard_on_replace = null
 	pending = callback
 	if session.document.is_dirty():
 		dirty_dialog.popup_centered()
@@ -701,7 +730,7 @@ func file_command(command: String) -> void:
 	cancel_interaction()
 	match command:
 		"new":
-			request_replace(func(): set_session(Session.new()); detach())
+			request_replace(func(): replace_session(Session.new()); detach())
 		"open":
 			request_replace(func(): show_file_dialog("open"))
 		"save":
@@ -716,7 +745,12 @@ func show_file_dialog(operation: String) -> void:
 	dialog_operation = operation
 	file_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE if operation == "open" else FileDialog.FILE_MODE_SAVE_FILE
 	file_dialog.current_dir = ProjectSettings.globalize_path("res://")
-	file_dialog.popup_centered()
+	if operation == "save" and not session.recovery_source.is_empty():
+		file_dialog.current_file = session.recovery_source.get_file()
+	if DisplayServer.get_name() == "headless":
+		file_dialog.popup(Rect2i(Vector2i.ZERO, file_dialog.size))
+	else:
+		file_dialog.popup_centered()
 
 func file_selected(path: String) -> void:
 	if dialog_operation == "open":
@@ -728,24 +762,42 @@ func open_path(path: String) -> bool:
 	var candidate = Session.new()
 	var result: Dictionary = candidate.document.load_map(path)
 	if not session.report(result):
+		discard_on_replace = null
 		return false
-	set_session(candidate)
+	replace_session(candidate)
 	refresh_materials()
 	set_status("Opened %s" % path)
 	return true
 
-func save_path(path: String) -> bool:
+func replace_session(candidate: RefCounted) -> void:
+	if discard_on_replace != null and discard_on_replace == session:
+		discard_on_replace.save_enabled = false
+	discard_on_replace = null
+	set_session(candidate)
+
+func save_path(path: String, defer_bake = false) -> bool:
 	var result: Dictionary = session.document.save_map(path)
 	if not session.report(result):
 		set_status(notice.text + " • Save As to another path or reopen the external version; current edits are retained.")
 		return false
+	session.recovery_source = ""
 	set_status("Saved %s" % session.document.get_path())
 	refresh_status()
 	# Coalesce Save All notifications and avoid reentering a texture import.
 	scan_delay = 0.5
 	if rebuild_on_save.button_pressed and valid_binding() and same_path(session.loader.get_ref().map_resource, session.document.get_path()):
-		bake()
+		if defer_bake:
+			bake_after_external_save.call_deferred(session)
+		else:
+			bake()
 	return true
+
+func bake_after_external_save(origin: RefCounted) -> void:
+	# EditorNode serializes before _save_external_data, then clears scene dirty.
+	# Run after that entire stack and require another scene save for this bake.
+	if not shutting_down and is_inside_tree() and valid_binding(origin):
+		EditorInterface.mark_scene_as_unsaved()
+		bake_origin(origin)
 
 func bind_selected() -> void:
 	var loader = plugin.editing_loader.get_ref()
@@ -761,7 +813,7 @@ func bind_selected() -> void:
 			set_status("Binding cancelled: target loader or scene changed.")
 			return
 		if node.map_resource.is_empty():
-			set_session(Session.new())
+			replace_session(Session.new())
 		elif not open_path(node.map_resource):
 			return
 		session.loader = target
@@ -775,12 +827,15 @@ func detach() -> void:
 	session.scene = weakref(null)
 	session.was_bound = false
 	session.baked_text = ""
+	sync_resolver(true)
 	refresh_status()
 
-func valid_binding() -> bool:
-	var loader = session.loader.get_ref()
+func valid_binding(origin: RefCounted = null) -> bool:
+	if origin == null:
+		origin = session
+	var loader = origin.loader.get_ref()
 	var root = EditorInterface.get_edited_scene_root()
-	return is_instance_valid(loader) and root != null and session.scene.get_ref() == root and (root == loader or root.is_ancestor_of(loader))
+	return is_instance_valid(loader) and root != null and origin.scene.get_ref() == root and (root == loader or root.is_ancestor_of(loader))
 
 func same_path(a: String, b: String) -> bool:
 	return not a.is_empty() and not b.is_empty() and ProjectSettings.globalize_path(a).simplify_path() == ProjectSettings.globalize_path(b).simplify_path()
@@ -802,24 +857,27 @@ func update_loader_path() -> void:
 	refresh_status()
 
 func bake() -> bool:
-	if not valid_binding():
+	return bake_origin(session)
+
+func bake_origin(origin: RefCounted) -> bool:
+	if not valid_binding(origin):
 		set_status("Bake requires the explicitly bound loader in the current scene.")
 		return false
-	var loader = session.loader.get_ref()
-	if session.document.is_dirty() or not same_path(loader.map_resource, session.document.get_path()):
+	var loader = origin.loader.get_ref()
+	if origin.document.is_dirty() or not same_path(loader.map_resource, origin.document.get_path()):
 		set_status("Save first; use Update loader path explicitly if Save As changed the filename.")
 		return false
 	if not loader.has_method("build_meshes_checked"):
 		set_status("Map saved. Checked bake API unavailable in this build; bake deferred.")
 		return false
 	var disk = ClassDB.instantiate("TBMapDocument")
-	var loaded: Dictionary = disk.load_map(session.document.get_path())
+	var loaded: Dictionary = disk.load_map(origin.document.get_path())
 	if not session.report(loaded):
 		return false
-	if disk.export_text().value != session.document.export_text().value:
+	if disk.export_text().value != origin.document.export_text().value:
 		set_status("External change: saved file no longer matches this session; bake cancelled.")
 		return false
-	if not commit_bake(loader, session):
+	if not commit_bake(loader, origin):
 		return false
 	refresh_status()
 	set_status("Map saved and baked successfully; save the Godot scene to persist generated nodes.")
@@ -868,21 +926,24 @@ func commit_bake(loader: Node, origin: RefCounted = null) -> bool:
 	set_status("Selected loader baked successfully; scene marked unsaved.")
 	return true
 
-func save_all() -> void:
+func save_all(defer_bake = false) -> void:
 	# Retained background sessions can become dirty via global undo. Save those
 	# synchronously too; never redirect a save or bake through the selected loader.
 	var untitled: RefCounted
-	for reference in sessions:
-		var origin = reference.get_ref()
+	for origin in sessions:
 		if origin == null or not origin.save_enabled or not origin.document.is_dirty():
 			continue
 		var path: String = origin.document.get_path()
 		if path.is_empty():
 			untitled = origin
 		elif origin == session:
-			save_path(path)
+			save_path(path, defer_bake)
 		else:
-			session.report(origin.document.save_map(path))
+			if session.report(origin.document.save_map(path)) and rebuild_on_save.button_pressed and valid_binding(origin) and same_path(origin.loader.get_ref().map_resource, path):
+				if defer_bake:
+					bake_after_external_save.call_deferred(origin)
+				else:
+					bake_origin(origin)
 	if untitled != null:
 		set_session(untitled)
 		file_command("save")
@@ -890,8 +951,7 @@ func save_all() -> void:
 
 func unsaved_status() -> String:
 	var paths = PackedStringArray()
-	for reference in sessions:
-		var origin = reference.get_ref()
+	for origin in sessions:
 		if origin != null and origin.save_enabled and origin.document.is_dirty():
 			var path: String = origin.document.get_path()
 			paths.append(path if path else "Untitled (use Map → Save As before exiting)")
@@ -900,6 +960,8 @@ func unsaved_status() -> String:
 func _process(delta: float) -> void:
 	if session != null and session.was_bound and not valid_binding():
 		detach()
+	if session != null:
+		sync_resolver()
 	if scan_delay >= 0:
 		scan_delay = maxf(0, scan_delay - delta)
 		var filesystem = EditorInterface.get_resource_filesystem()
@@ -909,7 +971,60 @@ func _process(delta: float) -> void:
 
 func _exit_tree() -> void:
 	cancel_interaction()
+
+func shutdown() -> void:
+	# The editor adapter also reparents this control during registration. Only
+	# explicit plugin teardown disposes documents; tree exit alone is not teardown.
+	cancel_interaction()
+	shutting_down = true
 	for token in tokens:
 		token.retire()
 	tokens.clear()
 	material_cache.clear()
+	sessions.clear()
+	resolver_config.clear()
+	texture_sizes.clear()
+	session = null
+
+func store_recovery() -> void:
+	cancel_interaction()
+	var records: Array = []
+	for origin in sessions:
+		if origin.save_enabled and origin.document.is_dirty():
+			records.append({"text": origin.document.export_text().value,
+				"source": origin.recovery_source if not origin.recovery_source.is_empty() else origin.document.get_path(),
+				"root": origin.texture_root, "grid": origin.grid, "texture": origin.texture})
+	# Plain data fallback survives plugin disable even if recovery storage fails.
+	EditorInterface.get_base_control().set_meta(RECOVERY_META, records)
+	var file = FileAccess.open(RECOVERY_PATH + ".tmp", FileAccess.WRITE)
+	if file != null:
+		file.store_string(JSON.stringify(records))
+		file.flush()
+		var error = file.get_error()
+		file.close()
+		if error == OK and DirAccess.rename_absolute(RECOVERY_PATH + ".tmp", RECOVERY_PATH) == OK:
+			return
+	push_error("Map recovery could not be written to " + RECOVERY_PATH + "; copies retained in this editor process.")
+
+func restore_recovery() -> void:
+	var base = EditorInterface.get_base_control()
+	var records = base.get_meta(RECOVERY_META) if base.has_meta(RECOVERY_META) else null
+	if records == null and FileAccess.file_exists(RECOVERY_PATH):
+		records = JSON.parse_string(FileAccess.get_file_as_string(RECOVERY_PATH))
+	if not records is Array or records.is_empty():
+		return
+	# Recovery deliberately starts a new epoch. No snapshot IDs or scene targets
+	# are transplanted into a new native document; Save As establishes its baseline.
+	sessions.clear()
+	for record in records:
+		if not record is Dictionary or not record.get("text") is String:
+			continue
+		var recovered = Session.new()
+		if not recovered.document.import_text(record.text).ok:
+			continue
+		recovered.recovery_source = record.get("source", "")
+		recovered.texture_root = record.get("root", "res://textures")
+		recovered.grid = record.get("grid", 16.0)
+		recovered.texture = record.get("texture", "common/caulk")
+		set_session(recovered)
+	set_status("Recovered unsaved Map copies. Use Save As to choose destinations; original files were not modified.")

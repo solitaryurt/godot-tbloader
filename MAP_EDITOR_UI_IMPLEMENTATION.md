@@ -13,9 +13,10 @@
   sessions across Open/New, with 128 actions/64 MiB per session and 128 MiB total.
   Budgets count serialized snapshot envelopes (including identities/selection).
   Eviction releases payloads and reports expiration when a token is invoked.
-  A session picker exposes retained documents; background undo updates unsaved
-  reporting and Save All. Explicit Discard suppresses saving a retired document
-  until a history restore revives it.
+  A strong session registry owns documents independently of expirable snapshots;
+  the picker exposes retained documents and background undo updates unsaved
+  reporting and Save All. Discard retires saving only after successful replacement;
+  resuming, editing or restoring history reactivates the document.
 - Real indexed material browser reused without modification; shader assignment,
   classic UV controls, resolved texture dimensions and textured camera preview.
 - N inspector edits ordered keyvals on worldspawn/selected owners/points; point
@@ -48,7 +49,7 @@
 | File under `addons/tbloader/src/` | Responsibility |
 |---|---|
 | `plugin.gd` | Main-screen lifecycle, independent spatial toolbar and legacy materials, editor save hooks |
-| `editor/map_editor.gd` | Quad layout, shortcut router, dialogs, binding, materials/UV and entity inspector, history budget |
+| `editor/map_editor.gd` | Quad layout, shortcut router, dialogs, binding, materials/UV and entity inspector, history budget, document ownership and recovery |
 | `editor/map_session.gd` | Native document, selection/hidden/workzone, transactions and snapshot envelopes |
 | `editor/map_action.gd` | Retainable/expirable originating-session history token |
 | `editor/bake_action.gd` | Scene-history packed child snapshots, weak loader/scene targets, ownership restoration |
@@ -145,6 +146,52 @@ filesystem scans. Saves now debounce/coalesce scanning and wait until filesystem
 scan/import is idle. The screenshot gate waits for import completion and forces
 one rendered frame instead of waiting indefinitely for an idle redraw signal.
 
+### Independent-review regression fixes — 2026-09-13
+
+All six confirmed findings are fixed in the editor layer. No native rebuild was
+needed; the strict harness records the existing library hash in each result.
+
+| Finding | Fix and regression evidence |
+|---|---|
+| Scene save serializes before external-save bake | External-hook saves defer baking until after `EditorNode::_save_scene` clears its saved version. The deferred operation retains its originating session and explicitly marks the scene unsaved, including after a session switch. The test calls **`EditorInterface.save_scene_as`**, checks `get_unsaved_scenes`, saves again, then compares packed mesh vertices/normals/UVs/material paths without rebaking. A fresh process repeats the comparison **before** any rebake. |
+| Discard prematurely excludes active edits | Retirement occurs only after a valid replacement is installed. Dirty → Open → Discard → picker cancel / invalid path → further edit → Save All verifies exact saved text and unsaved reporting. Successful replacement, picker resume and transaction reactivation are also checked. |
+| Budget eviction destroys dirty background document | Strong registry ownership survives token retirement. A real global undo dirties a background session; the test drops incidental strong references and invokes actual total-budget enforcement, verifies all payloads expired, then saves exact retained content. Controlled per-session action and byte limits exercise those enforcement branches too; production defaults remain 128 actions / 64 MiB per session and 128 MiB total snapshots. |
+| Plugin disable loses unresolved documents | Before teardown, unresolved enabled sessions are atomically checkpointed as plain text records at **`user://tbloader-map-recovery.json`**, with a plain-data editor-memory fallback on I/O failure. Enable restores dirty, detached Save As copies, preserving source-path hints but never automatically overwriting originals. Actual disable/re-enable tests cover named and untitled geometry, UVs, entities and edits; canonical-file preservation; released mouse capture; freed original controls/sessions/native documents; and fresh-process disk recovery. New/load/Save As baselines, undo-to-saved content, old-snapshot rejection and unknown-ID rejection are verified. |
+| Resolver caches cross session roots | Effective loader/root/template/texture-property configuration synchronizes browser/root UI and invalidates preview material and size caches on session switch, Inspector changes and detach. Template changes invalidate materials. Browser selections must resolve through the actual native resolver to the selected resource, falling back to exact project tokens when relative tokens collide. A→B→A tests use different colors and 64×32 / 16×128 dimensions with the same shader name, compare camera/bake vertex-normal-UV samples and actual material resources, and check root disagreement and detach. |
+| Window focus loss commits a preview | Both graph panes cancel application/window focus notifications and reject internal or unfocused releases before gesture completion. Tests start moved drags in both panes, inject release-before-notification ordering, and dispatch viewport input followed by native propagated window notifications; content, native revision and real history version stay unchanged. |
+
+Pinned-engine ordering inspected: `editor/editor_node.cpp:2527–2581` (pack/write,
+external save, then saved version); `scene/main/window.cpp:906–912` (clear window
+focus before notification propagation); `scene/main/viewport.cpp:764–767,2767–2787`
+(drop mouse focus and synthesize releases). The pin tags those releases as internal;
+`Control::_call_gui_input` filters internal events from its GDScript virtual. Tests
+also inject a delivered internal release before notification to cover that ordering
+explicitly. Window focus state protects delivered ordinary releases before Control
+focus is cleared. These are real editor/viewport plus injected notification tests,
+not a claim of full OS mouse-device automation.
+
+| Final gate | Result | Artifact beneath `tests/map_editor/artifacts/` |
+|---|---|---|
+| Headless real editor | **495 checks**, zero failures | `editor-nog38j4t/` |
+| X11 `DISPLAY=:0` displayed journey | **506 checks**, zero failures | `journey-gqks0dzm/ui-wsdkqq1r/` |
+| Fresh-process reopen and recovery | **11 checks**, zero failures | Same journey, `reopen.*` |
+
+Commands are the editor and UI journey commands above with `--timeout 90`.
+Concise logs: `/tmp/opencode/tbloader-review-{editor,journey}.log`; full import/runtime
+stdout, stderr, commands and hashes are retained in the artifact directories.
+Native source/binary identity verification: `/tmp/opencode/tbloader-review-native-identity.log`.
+The final `editor-smoke.png` was visually inspected. Intermediate failed runs caught
+an editor-adapter reparent lifecycle issue (disposal now occurs only on explicit
+plugin shutdown), a headless picker positioning issue, and a compressed-image pixel
+assertion issue; all are corrected in the final gates. No diagnostic allowlists.
+
+Recovery deliberately begins a new native epoch and does not restore history,
+selection IDs, hidden state or scene binding. Bare native IDs are document-local
+and can numerically coincide across documents; only matching-epoch snapshots may
+restore identity. The registry retains open documents for the plugin lifetime;
+snapshot budgets do not cap the current document content. Recovery checkpoints
+on orderly teardown, not continuously on every edit.
+
 ## Native/material integration
 
 The checked native API landed in `83e844a`. The host uses `resolve_material(token)`
@@ -158,6 +205,9 @@ brush wire outline; BaseMaterial previews also use vertex tint.
 Save As never rewrites a loader path automatically. Use **Update loader path** to
 commit that scene change. Bake on save defaults on but runs only for a clean,
 successfully saved document with the same path and valid current-scene binding.
+Map-button saves bake synchronously. An enclosing Godot scene save uses the external
+hook, so its bake is deferred and leaves the scene **unsaved**; save the scene again
+to serialize the new generated output.
 Missing point/entity prefab resources return a visible bake failure while preserving
 previous output. The journey supplies `fixtures/info_player_start.tscn` deliberately.
 
@@ -173,10 +223,9 @@ previous output. The journey supplies `fixtures/info_player_start.tscn` delibera
   Godot's void `_save_external_data` hook cannot veto editor shutdown after an I/O
   failure or asynchronously finish an untitled Save As. The unsaved-status prompt
   explicitly asks users to Save As before exit. Full exit-failure UX remains open.
-- After changing loader texture/template configuration in the scene Inspector,
-  rebind/refresh materials to invalidate preview resolution. Baked-current status
-  currently compares canonical document content, not every external resource or
-  loader option. Broader resource/configuration invalidation remains a follow-up.
+- Loader texture-root/template/property changes invalidate preview resolution.
+  Baked-current status still compares canonical document content, not every external
+  resource or loader option. Broader baked-output dependency tracking remains open.
 - Blockout-scale full-document snapshots/rebuilds; no large-map performance claim.
 - Release/other Godot versions/other platforms, full window-system input acceptance,
   and representative-map responsiveness/memory measurements remain Phase 6 work.

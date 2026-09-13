@@ -27,6 +27,10 @@ func _ready() -> void:
 	focus_exited.connect(cancel)
 	focus_entered.connect(func(): host.active_graph = self; host.refresh_status(); queue_redraw())
 
+func _notification(what: int) -> void:
+	if what in [NOTIFICATION_APPLICATION_FOCUS_OUT, NOTIFICATION_WM_WINDOW_FOCUS_OUT]:
+		cancel()
+
 func axes() -> Vector2i:
 	return Vector2i(1 if orientation == 0 else 0, 1 if orientation == 2 else 2)
 
@@ -154,6 +158,12 @@ func _gui_input(event: InputEvent) -> void:
 			accept_event()
 		return
 	if event is InputEventMouseButton:
+		# Window clears `focused` before Viewport drops mouse focus and sends
+		# synthetic releases, BEFORE this Control receives FOCUS_OUT. Do not commit.
+		# Viewport::_drop_mouse_focus tags these with DEVICE_ID_INTERNAL (-1).
+		if not event.pressed and (event.device == -1 or (DisplayServer.get_name() != "headless" and not get_window().has_focus())):
+			cancel()
+			return
 		if event.pressed:
 			grab_focus()
 			host.active_graph = self

@@ -81,24 +81,24 @@ def sha256(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def write_checker(path):
-    """Deterministic asymmetric 64x32 RGB PNG, requiring no imaging dependency."""
+def write_checker(path, width=64, height=32, tint=None):
+    """Deterministic RGB fixture (asymmetric 64x32 by default), no imaging dependency."""
     def chunk(kind, payload):
         data = kind + payload
         return struct.pack(">I", len(payload)) + data + struct.pack(">I", zlib.crc32(data))
 
     pixels = bytearray()
-    for y in range(32):
+    for y in range(height):
         pixels.append(0)  # PNG filter: none.
-        for x in range(64):
+        for x in range(width):
             color = (240, 240, 240) if (x // 8 + y // 8) % 2 else (32, 64, 128)
             if x < 8 and y < 8:
                 color = (255, 32, 16)  # Unique top-left orientation marker.
-            pixels.extend(color)
+            pixels.extend(tint or color)
     path.parent.mkdir(parents=True)
     path.write_bytes(
         b"\x89PNG\r\n\x1a\n"
-        + chunk(b"IHDR", struct.pack(">IIBBBBB", 64, 32, 8, 2, 0, 0, 0))
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
         + chunk(b"IDAT", zlib.compress(bytes(pixels))) + chunk(b"IEND", b"")
     )
 
@@ -110,6 +110,7 @@ def stage(project):
         shutil.copy2(HERE / name, project)
     shutil.copytree(HERE / "fixtures", project / "fixtures")
     write_checker(project / "textures/baseline/checker.png")
+    write_checker(project / "textures-other/baseline/checker.png", 16, 128, (20, 220, 60))
     addon = project / "addons" / "tbloader"
     shutil.copytree(
         ROOT / "addons" / "tbloader", addon,

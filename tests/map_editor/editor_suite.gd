@@ -396,6 +396,7 @@ func run() -> void:
 	await binding_journey(plugin)
 	precision_journey()
 	await phase5_journey()
+	await review_regressions(plugin)
 	if suite == "ui":
 		print("TB_UI_STAGE: capturing rendered quad")
 		checks.check(DisplayServer.get_name() != "headless", "display-backed journey")
@@ -418,6 +419,7 @@ func run() -> void:
 		checks.check(image.save_png("res://editor-smoke.png") == OK, "Map journey screenshot saved")
 	# Disposable project's history may be cleared only by this harness.
 	manager.clear_history(EditorUndoRedoManager.GLOBAL_HISTORY, false)
+	var recovery = prepare_recovery_regression()
 	var old_ui = weakref(ui)
 	var old_panel = weakref(plugin.materials_panel)
 	var old_toolbar = weakref(plugin.map_control)
@@ -430,6 +432,8 @@ func run() -> void:
 	await get_tree().process_frame
 	plugin = find_tb_plugin(get_tree().root)
 	checks.check(plugin != null and plugin.map_editor.is_inside_tree(), "re-enable creates one fresh Map screen")
+	ui = plugin.map_editor
+	verify_recovery_regression(recovery)
 	checks.finish(get_tree(), suite)
 
 func binding_journey(plugin: EditorPlugin) -> void:
@@ -511,7 +515,31 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	checks.check(scene_history.undo() and loader.map_resource == "res://journey-copy.map", "loader path scene undo")
 	checks.check(scene_history.redo() and loader.map_resource == "res://journey-bound.map", "loader path scene redo")
 	checks.check(ui.bake(), "bake after explicit path update")
+	# Reproduce the enclosing scene-save order, not just the plugin hook.
+	ui.rebuild_on_save.button_pressed = true
+	ui.session.select(PackedInt64Array([ui.session.document.get_draw_data()[0].id]))
+	ui.clone_selection(0)
+	var old_signature = mesh_signature(loader)
 	EditorInterface.save_scene_as("res://journey-scene.tscn", false)
+	checks.check(not ui.session.document.is_dirty() and mesh_signature(loader) == old_signature, "external save writes map but defers bake beyond enclosing scene save")
+	var saving_origin = ui.session
+	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
+	ui.session.save_enabled = false
+	for frame in 3:
+		await get_tree().process_frame
+	checks.check(mesh_signature(loader) != old_signature and EditorInterface.get_unsaved_scenes().has("res://journey-scene.tscn"), "post-save bake changes output and explicitly leaves actual editor scene dirty")
+	checks.check(ui.session != saving_origin and saving_origin.baked_text == saving_origin.document.export_text().value, "deferred bake retains origin across active session switch")
+	ui.set_session(saving_origin)
+	EditorInterface.save_scene_as("res://journey-scene.tscn", false)
+	checks.check(not EditorInterface.get_unsaved_scenes().has("res://journey-scene.tscn"), "second enclosing scene save serializes bake and clears dirty")
+	var disk_scene: PackedScene = ResourceLoader.load("res://journey-scene.tscn", "PackedScene", ResourceLoader.CACHE_MODE_IGNORE)
+	var disk_root = disk_scene.instantiate()
+	checks.check(mesh_signature(disk_root.get_node("BoundLoader")) == mesh_signature(loader), "saved scene reopen without rebake has exact mesh UV/material content")
+	var evidence = FileAccess.open("res://expected-bake.bin", FileAccess.WRITE)
+	evidence.store_var(mesh_signature(loader))
+	evidence.close()
+	disk_root.free()
+	ui.rebuild_on_save.button_pressed = false
 	checks.check(FileAccess.file_exists("res://journey-scene.tscn"), "baked Godot scene saved without headless thumbnail")
 	# A deleted binding and scene change retain canonical document and global history.
 	var kept_session = ui.session
@@ -550,10 +578,264 @@ func reopen_journey(plugin: EditorPlugin) -> void:
 	var loader = root.get_node("BoundLoader")
 	checks.check(not loader.find_children("*", "MeshInstance3D", true, false).is_empty(), "fresh scene restores baked meshes")
 	checks.check(not loader.find_children("*", "CollisionShape3D", true, false).is_empty(), "fresh scene restores baked collision")
+	var evidence = FileAccess.open("res://expected-bake.bin", FileAccess.READ)
+	checks.check(mesh_signature(loader) == evidence.get_var(), "fresh-process serialized bake equals final authoring output BEFORE any rebake")
+	evidence.close()
 	plugin._edit(loader)
 	ui.bind_selected()
 	checks.check(ui.valid_binding() and ui.bake(), "fresh process binds and checked-rebakes saved file")
 	checks.check(ui.session.baked_text == text(), "fresh process baked source equals map")
+	var recovery_evidence = FileAccess.open("res://expected-recovery.bin", FileAccess.READ)
+	var expected: Array = recovery_evidence.get_var()
+	recovery_evidence.close()
+	for value in expected:
+		checks.check(ui.sessions.any(func(origin): return origin.document.export_text().value == value and origin.document.is_dirty()), "fresh process restores unresolved recovery content")
+
+func mesh_signature(loader: Node) -> Array:
+	var result: Array = []
+	for instance in loader.find_children("*", "MeshInstance3D", true, false):
+		if instance.mesh == null:
+			continue
+		for surface in instance.mesh.get_surface_count():
+			var arrays: Array = instance.mesh.surface_get_arrays(surface)
+			var material = instance.mesh.surface_get_material(surface)
+			var path = ""
+			if material is BaseMaterial3D and material.albedo_texture != null:
+				path = material.albedo_texture.resource_path
+			result.append([instance.transform, arrays[Mesh.ARRAY_VERTEX], arrays[Mesh.ARRAY_NORMAL], arrays[Mesh.ARRAY_TEX_UV], arrays[Mesh.ARRAY_INDEX], path])
+	return result
+
+func review_edit(label: String) -> void:
+	var id: int = ui.session.entity_targets()[0]
+	ui.session.transact("Review regression " + label, func(): return ui.session.document.set_entity_property(id, "review", label))
+
+func review_regressions(plugin: EditorPlugin) -> void:
+	print("TB_UI_STAGE: independent-review lifecycle regressions")
+	var original = ui.session
+	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
+	checks.check(ui.save_path("res://discard-regression.map"), "discard regression establishes named baseline")
+	for outcome in ["cancel", "invalid"]:
+		review_edit("before " + outcome)
+		var current = ui.session
+		ui.file_command("open")
+		ui.dirty_dialog.custom_action.emit("discard")
+		checks.check(ui.file_dialog.visible and current.save_enabled, "Discard waits for successful Open replacement " + outcome)
+		if outcome == "cancel":
+			ui.file_dialog.canceled.emit()
+		else:
+			ui.file_selected("res://missing-review.map")
+		ui.file_dialog.hide()
+		review_edit("after " + outcome)
+		checks.check(ui.session == current and current.save_enabled and ui.unsaved_status().contains("discard-regression.map"), "cancelled/invalid replacement keeps subsequent edits in unsaved reporting " + outcome)
+		ui.save_all()
+		checks.check(not current.document.is_dirty() and FileAccess.get_file_as_string("res://discard-regression.map") == text(), "Save All saves resumed edits " + outcome)
+	review_edit("successful discard")
+	var retired = ui.session
+	ui.file_command("open")
+	ui.dirty_dialog.custom_action.emit("discard")
+	ui.file_selected("res://discard-regression.map")
+	ui.file_dialog.hide()
+	checks.check(not retired.save_enabled and ui.session != retired, "successful replacement alone retires discarded session")
+	ui.set_session(retired)
+	checks.check(retired.save_enabled and not ui.unsaved_status().is_empty(), "session picker resume reactivates discarded document")
+	retired.save_enabled = false
+	review_edit("edit reactivates")
+	checks.check(retired.save_enabled, "successful transaction reactivates discarded session")
+	ui.save_all()
+	# No incidental strong reference remains to the background document/token.
+	var background = make_budget_background()
+	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
+	checks.check(history.undo(), "actual global history makes background document dirty")
+	var expected: String = background.get_ref().document.export_text().value
+	ui.history_total_budget = 1
+	review_edit("evict all payloads")
+	ui.history_total_budget = 128 * 1024 * 1024
+	checks.check(ui.tokens.is_empty() and background.get_ref() != null, "real total-budget enforcement expires every token but retains background document")
+	checks.check(background.get_ref().document.is_dirty() and background.get_ref().document.export_text().value == expected, "eviction preserves exact current background undo content")
+	ui.session.save_enabled = false
+	ui.save_all()
+	checks.check(FileAccess.get_file_as_string("res://budget-regression.map") == expected and not background.get_ref().document.is_dirty(), "evicted background document remains Save All eligible")
+	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
+	ui.history_action_budget = 2
+	for n in 3:
+		review_edit("action budget %d" % n)
+	checks.check(ui.tokens.size() == 2, "controlled per-session action budget actually enforces eviction")
+	ui.history_action_budget = 128
+	ui.history_session_budget = 1
+	review_edit("byte budget")
+	checks.check(ui.tokens.is_empty() and ui.session.document.is_dirty(), "controlled per-session byte budget retains dirty document without snapshots")
+	ui.history_session_budget = 64 * 1024 * 1024
+	ui.session.save_enabled = false
+	ui.set_session(original)
+	await focus_regression()
+	await resolver_regression(plugin)
+	ui.set_session(original)
+	ui.graph_a.grab_focus()
+
+func make_budget_background() -> WeakRef:
+	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
+	review_edit("budget before")
+	review_edit("budget saved")
+	ui.save_path("res://budget-regression.map")
+	return weakref(ui.session)
+
+func focus_regression() -> void:
+	ui.set_tool("Brush")
+	ui.session.select(PackedInt64Array([ui.session.document.get_draw_data()[0].id]))
+	for graph in [ui.graph_a, ui.graph_b]:
+		var bounds: Dictionary = ui.session.brush(ui.session.selected[0])
+		var center: Vector3 = (bounds.aabb_min + bounds.aabb_max) * 0.5
+		graph.origin = center
+		graph.zoom = 1
+		for notification in [Node.NOTIFICATION_WM_WINDOW_FOCUS_OUT, Node.NOTIFICATION_APPLICATION_FOCUS_OUT]:
+			var before = text()
+			var revision: int = ui.session.document.get_revision()
+			var version = history.get_version()
+			mouse(graph, graph.project(center), true)
+			motion(graph, graph.project(center) + Vector2(32, 0))
+			checks.check(graph.gesture == "move" and graph.delta != Vector3.ZERO, "focus regression starts moved preview in pane %s" % graph.orientation)
+			# Exact pinned Viewport::_drop_mouse_focus event precedes Control notification.
+			var synthetic = InputEventMouseButton.new()
+			synthetic.device = -1
+			synthetic.position = graph.project(center) + Vector2(32, 0)
+			synthetic.button_index = MOUSE_BUTTON_LEFT
+			graph._gui_input(synthetic)
+			checks.check(graph.gesture == "" and text() == before, "synthetic release cancels BEFORE focus notification in pane %s" % graph.orientation)
+			graph.notification(notification)
+			mouse(graph, synthetic.position, false)
+			checks.check(text() == before and ui.session.document.get_revision() == revision and history.get_version() == version, "window/application focus cancellation has no doc/revision/history mutation in pane %s" % graph.orientation)
+		# Invoke actual native Viewport notification with mouse_focus acquired via input.
+		var press = InputEventMouseButton.new()
+		press.position = graph.global_position + graph.project(center)
+		press.button_index = MOUSE_BUTTON_LEFT
+		press.pressed = true
+		get_viewport().push_input(press)
+		motion(graph, graph.project(center) + Vector2(32, 0))
+		var before = text()
+		var version = history.get_version()
+		checks.check(graph.gesture == "move" and graph.delta != Vector3.ZERO, "viewport dispatch acquired moved graph gesture")
+		get_viewport().propagate_notification(Node.NOTIFICATION_WM_WINDOW_FOCUS_OUT)
+		checks.check(graph.gesture == "" and text() == before and history.get_version() == version, "native viewport release then propagated window focus-out cancels without committing")
+		await get_tree().process_frame
+
+func resolver_regression(plugin: EditorPlugin) -> void:
+	var root = EditorInterface.get_edited_scene_root()
+	var origins: Array = []
+	for folder in ["res://textures", "res://textures-other"]:
+		var loader = ClassDB.instantiate("TBLoader")
+		loader.texture_path = folder
+		root.add_child(loader)
+		loader.owner = root
+		var origin = load("res://addons/tbloader/src/editor/map_session.gd").new()
+		origin.document.create_cuboid(Vector3.ZERO, Vector3(64, 64, 64), "baseline/checker")
+		origin.loader = weakref(loader)
+		origin.scene = weakref(root)
+		origin.was_bound = true
+		ui.set_session(origin)
+		ui.save_path("res://resolver-%d.map" % origins.size())
+		loader.map_resource = origin.document.get_path()
+		origins.append(origin)
+	var signatures: Array = []
+	for index in [0, 1, 0]:
+		ui.set_session(origins[index])
+		var loader = ui.session.loader.get_ref()
+		while ui.browser.is_refreshing():
+			await get_tree().process_frame
+		var native: Dictionary = loader.resolve_material("baseline/checker")
+		var preview: Material = ui.preview_material("baseline/checker")
+		var size_value = Vector2i(64, 32) if index == 0 else Vector2i(16, 128)
+		checks.check(ui.texture_root.text == loader.texture_path and ui.browser._texture_root == loader.texture_path, "session switch synchronizes root field and browser %d" % index)
+		checks.check(ui.session.document.get_preview_data()[0].texture_size == size_value and preview.albedo_texture == native.texture, "A-B-A preview uses exact native texture and dimensions %d" % index)
+		var image = preview.albedo_texture.get_image()
+		if image.is_compressed():
+			image.decompress()
+		var pixel = image.get_pixel(0, 0)
+		checks.check(pixel.r > 0.9 if index == 0 else pixel.g > 0.8, "A-B-A preview texture color %d" % index)
+		checks.check(ui.bake(), "resolver parity checked bake %d" % index)
+		var signature = mesh_signature(loader)
+		checks.check(signature[0][5] == native.resource_path, "baked material resolves same resource as preview %d" % index)
+		checks.check(mesh_vertex_samples(loader) == mesh_vertex_samples(ui.camera_view.geometry), "camera/bake vertex-normal-UV parity for resolver %d" % index)
+		signatures.append(signature)
+	checks.check(signatures[0] == signatures[2] and signatures[0] != signatures[1], "A-B-A baked mesh UV/material parity restored")
+	ui.configure_browser("res://textures-other")
+	checks.check(ui.texture_root.text == "res://textures", "bound root UI rejects resolver disagreement")
+	ui.material_selected(load("res://textures-other/baseline/checker.png"), "res://textures-other/baseline/checker.png", "baseline/checker", {"resolved": true})
+	checks.check(ui.texture_field.text == "res://textures-other/baseline/checker.png" and ui.resolve_token(ui.texture_field.text).resource_path == "res://textures-other/baseline/checker.png", "browser stale/colliding relative token falls back to exact selected native resource")
+	ui.session.loader.get_ref().texture_path = "res://textures-other"
+	ui._process(0)
+	checks.check(ui.texture_root.text == "res://textures-other" and ui.preview_material("baseline/checker").albedo_texture.get_size() == Vector2(16, 128), "Inspector root change invalidates preview config")
+	var detached_loader = ui.session.loader.get_ref()
+	ui.detach()
+	checks.check(ui.texture_root.text == "res://textures" and ui.preview_material("baseline/checker").albedo_texture.get_size() == Vector2(64, 32), "detach returns to standalone resolver and invalidates caches")
+	for origin in origins:
+		var loader = origin.loader.get_ref()
+		if loader != null:
+			loader.queue_free()
+	detached_loader.queue_free()
+	plugin._edit(null)
+
+func mesh_vertex_samples(root: Node) -> Array:
+	var samples: Dictionary = {}
+	for instance in root.find_children("*", "MeshInstance3D", true, false):
+		for surface in instance.mesh.get_surface_count():
+			var arrays: Array = instance.mesh.surface_get_arrays(surface)
+			for i in arrays[Mesh.ARRAY_VERTEX].size():
+				var position: Vector3 = instance.global_transform * arrays[Mesh.ARRAY_VERTEX][i]
+				var normal: Vector3 = instance.global_basis * arrays[Mesh.ARRAY_NORMAL][i]
+				var uv: Vector2 = arrays[Mesh.ARRAY_TEX_UV][i]
+				samples[str([position.snapped(Vector3.ONE * 0.0001), normal.snapped(Vector3.ONE * 0.0001), uv.snapped(Vector2.ONE * 0.0001)])] = true
+	var result = samples.keys()
+	result.sort()
+	return result
+
+func prepare_recovery_regression() -> Dictionary:
+	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
+	ui.session.document.import_text(FileAccess.get_file_as_string("res://journey-bound.map"))
+	review_edit("named saved baseline")
+	ui.save_path("res://recovery-named.map")
+	var canonical = text()
+	review_edit("named UNSAVED exact content")
+	var named = text()
+	var named_ref = weakref(ui.session)
+	var named_document = weakref(ui.session.document)
+	var old_snapshot: Dictionary = ui.session.document.snapshot().value
+	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
+	ui.session.document.import_text(canonical)
+	review_edit("untitled UNSAVED exact content")
+	var untitled = text()
+	var untitled_ref = weakref(ui.session)
+	ui.camera_view.start_fly()
+	return {"named": named, "untitled": untitled, "canonical": canonical, "named_ref": named_ref, "document_ref": named_document, "untitled_ref": untitled_ref, "old_snapshot": old_snapshot}
+
+func verify_recovery_regression(expected: Dictionary) -> void:
+	checks.check(Input.mouse_mode == Input.MOUSE_MODE_VISIBLE, "disable releases captured mouse")
+	checks.check(expected.named_ref.get_ref() == null and expected.untitled_ref.get_ref() == null and expected.document_ref.get_ref() == null, "disable releases original sessions and native documents even with expired history handles")
+	checks.check(FileAccess.get_file_as_string("res://recovery-named.map") == expected.canonical, "disable/re-enable never overwrites named canonical file")
+	for value in [expected.named, expected.untitled]:
+		var matches = ui.sessions.filter(func(origin): return origin.document.export_text().value == value)
+		checks.check(matches.size() == 1, "re-enable restores exact unresolved named/untitled content once")
+		if matches.is_empty():
+			continue
+		var origin = matches[0]
+		ui.set_session(origin)
+		checks.check(origin.document.is_dirty() and origin.document.get_path().is_empty() and origin.save_enabled, "recovery is a dirty Save As copy with no canonical overwrite target")
+		checks.check(origin.loader.get_ref() == null and origin.selected.is_empty() and origin.components.is_empty(), "recovery has no stale scene resources or native selection IDs")
+		checks.check(not origin.document.restore_snapshot(expected.old_snapshot).ok, "recovery new epoch rejects old snapshot identities")
+		# Bare IDs are document-local and may numerically coincide in a new epoch.
+		# Recovery carries none across; truly unissued IDs must still reject.
+		checks.check(not origin.document.set_entity_property(9223372036854775807, "stale", "bad").ok and text() == value, "recovery rejects unknown entity identity without mutating content")
+	var evidence = FileAccess.open("res://expected-recovery.bin", FileAccess.WRITE)
+	evidence.store_var([expected.named, expected.untitled])
+	evidence.close()
+	# Exercise Save As on the actual restored untitled session, not a surrogate.
+	checks.check(ui.save_path("res://recovered-copy.map") and not ui.session.document.is_dirty(), "recovery Save As establishes clean native baseline")
+	review_edit("after recovery save")
+	checks.check(ui.session.document.is_dirty() and history.undo() and not ui.session.document.is_dirty(), "recovered Save As undo returns to actual clean baseline")
+	checks.check(history.redo() and ui.save_path("res://recovered-copy.map") and history.undo(), "recovered session supports save at a new history baseline then undo")
+	checks.check(ui.session.document.is_dirty() and text() == expected.untitled, "background recovery checkpoint retains original untitled content after undo past new saved baseline")
+	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
+	checks.check(ui.session.document.is_dirty(), "New has no saved baseline")
+	checks.check(ui.open_path("res://recovered-copy.map") and not ui.session.document.is_dirty(), "load establishes native saved baseline after recovery")
 
 func precision_journey() -> void:
 	print("TB_UI_STAGE: focused-pane, rigid/off-grid and hidden-target regressions")
