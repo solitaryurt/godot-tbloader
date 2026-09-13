@@ -104,4 +104,9 @@ public:
 
 	void clear();
 	void build_meshes();
+	Dictionary build_meshes_checked();
+	Dictionary resolve_material(const String& token);
+
+private:
+	bool m_building = false;
 };

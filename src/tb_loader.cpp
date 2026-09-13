@@ -4,6 +4,8 @@
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include <builder.h>
+#include <cmath>
+#include <vector>
 
 void TBLoader::_bind_methods()
 {
@@ -52,6 +54,8 @@ void TBLoader::_bind_methods()
 
 	ClassDB::bind_method(D_METHOD("clear"), &TBLoader::clear);
 	ClassDB::bind_method(D_METHOD("build_meshes"), &TBLoader::build_meshes);
+	ClassDB::bind_method(D_METHOD("build_meshes_checked"), &TBLoader::build_meshes_checked);
+	ClassDB::bind_method(D_METHOD("resolve_material", "token"), &TBLoader::resolve_material);
 
 	ADD_GROUP("Map", "map_");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "map_resource", PROPERTY_HINT_FILE, "*.map"), "set_map", "get_map");
@@ -325,9 +329,74 @@ void TBLoader::clear()
 
 void TBLoader::build_meshes()
 {
-	clear();
+	Dictionary result = build_meshes_checked();
+	if (!bool(result["ok"])) {
+		Dictionary error = result["error"];
+		UtilityFunctions::printerr("Map bake failed: ", error["message"], " (", error["path"], ":", error["line"], ":", error["column"], ")");
+	}
+}
 
-	Builder builder(this);
-	builder.load_map(m_map_path);
-	builder.build_map();
+namespace {
+Dictionary bake_failure(const StringName& code, const String& message, const String& path)
+{
+	Dictionary error;
+	error["code"] = code; error["message"] = message; error["operation"] = StringName("build_meshes_checked"); error["path"] = path;
+	error["line"] = 0; error["column"] = 0; error["entity_id"] = int64_t(0); error["brush_id"] = int64_t(0); error["face"] = -1;
+	Dictionary result;
+	result["ok"] = false; result["changed"] = false; result["value"] = Variant(); result["error"] = error;
+	return result;
+}
+void collect_generated_owners(Node* node, Node* owner, std::vector<Node*>& nodes)
+{
+	if (node->get_owner() == owner) nodes.push_back(node);
+	for (int i = 0; i < node->get_child_count(); ++i) collect_generated_owners(node->get_child(i), owner, nodes);
+}
+}
+
+Dictionary TBLoader::build_meshes_checked()
+{
+	if (m_building) return bake_failure("BUSY", "A map bake is already in progress", m_map_path);
+	if (m_inverse_scale <= 0 || (m_lighting_unwrap_uv2 && (!std::isfinite(m_lighting_unwrap_texel_size) || m_lighting_unwrap_texel_size <= 0))) {
+		return bake_failure("INVALID_ARGUMENT", "Inverse scale and lightmap texel size must be positive and finite", m_map_path);
+	}
+	m_building = true;
+	auto staging = memnew(Node3D());
+	Builder builder(this, staging);
+	Dictionary result = builder.load_map(m_map_path);
+	if (!bool(result["ok"])) {
+		Dictionary error = result["error"];
+		error["operation"] = StringName("build_meshes_checked");
+	} else if (!builder.m_error.is_empty()) {
+		result = bake_failure("RESOURCE_LOAD_FAILED", builder.m_error, m_map_path);
+	} else if (!builder.build_map()) {
+		result = bake_failure("GENERATION_FAILED", builder.m_error, m_map_path);
+	} else {
+		// Only generated ownership changes. Owners internal to instantiated scenes
+		// remain internal; the staging owner is replaced by the edited scene owner.
+		std::vector<Node*> generated;
+		collect_generated_owners(staging, staging, generated);
+		Node* scene_owner = get_owner() ? get_owner() : this;
+		int count = staging->get_child_count();
+		bool changed = get_child_count() > 0 || count > 0;
+		for (Node* node : generated) node->set_owner(nullptr);
+		clear();
+		while (staging->get_child_count() > 0) {
+			Node* child = staging->get_child(0);
+			staging->remove_child(child);
+			add_child(child);
+		}
+		for (Node* node : generated) node->set_owner(scene_owner);
+		Dictionary value;
+		value["path"] = m_map_path;
+		value["child_count"] = count;
+		result["ok"] = true; result["changed"] = changed; result["value"] = value; result["error"] = Dictionary();
+	}
+	memdelete(staging);
+	m_building = false;
+	return result;
+}
+
+Dictionary TBLoader::resolve_material(const String& token)
+{
+	return Builder(this).resolve_material(token);
 }

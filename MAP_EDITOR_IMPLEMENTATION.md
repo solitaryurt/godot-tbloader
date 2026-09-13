@@ -75,12 +75,88 @@ when `DISPLAY` is set, making the documented UI command deterministic even when
   with compatibility rendering works without system modifications. Wayland
   `wayland-1` reached NVIDIA RTX 3090 OpenGL then emitted GLES3 allocation/shader
   errors and crashed (see `ui-vx00cpkh`). Use X11 for future display acceptance.
-- No memory-checker run or performance claim yet. Current bake has no structured
-  success result and clears children before parse. Empty-worldspawn bake may
-  dereference a null generated container (`Builder::build_entity`); do not use
-  current bake as the validation API. Fix/verify at the appropriate later gate.
+- Historical Phase 0 bake findings (destructive pre-parse clear and empty-worldspawn
+  crash) are resolved by Phase 1 and the native bake integration gate below.
+  No bake memory-checker run or performance claim yet.
 - This session had no subagent tool; implementation/integration review performed
   directly. Independent delegated review remains for the next integration point.
+
+## Native bake/material integration handoff
+
+`TBLoader.build_meshes_checked()` and `TBLoader.resolve_material(token)` are now
+bound native APIs. Browser hosts may enable `direct_material_lookup = true`.
+
+### Checked bake Result
+
+The four-key Result is `{ok: bool, changed: bool, value: Variant, error: Dictionary}`.
+
+- Success: `error = {}`, `value = {path: String, child_count: int}`. The count is
+  the number of top-level generated children. `changed` reports output replacement;
+  empty-to-empty succeeds with `changed = false`.
+- Failure: `ok = false`, `changed = false`, `value = null`. Error keys are
+  `code`, `message`, `operation`, `path`, `line`, `column`, `entity_id`, `brush_id`,
+  `face`; `operation` is always `&"build_meshes_checked"`. Document/parser errors
+  retain their code and 1-based parse locations. Other codes include
+  `INVALID_ARGUMENT`, `RESOURCE_LOAD_FAILED`, `GENERATION_FAILED`, and `BUSY`.
+  Unavailable entity/brush handles are `0`, face `-1`, and unavailable locations `0`.
+- This API bakes the file at `map_resource`; it does not save a document. Report a
+  successful `save_map()` independently from a subsequent failed bake. A failed
+  bake leaves both the saved file and the previous successful scene output intact.
+- `TBMapDocument` validates the complete file before scene generation. Builder
+  consumes the validated canonical snapshot, not a second disk read. Meshes and
+  collision are generated under a detached staging parent, with finite attribute,
+  triangle-index, mesh/collider creation, entity/resource and UV2 error checks.
+  Only success invokes the existing all-children replacement contract.
+- Generated nodes are owned by the loader's scene owner (or the loader itself
+  when it is a scene root). Ownership internal to instantiated entity scenes is
+  preserved. Empty output is valid. `build_meshes()` remains a void compatibility
+  wrapper, invoking the checked API and printing a diagnostic on failure.
+
+### Resource tokens and preview parity
+
+- Prefer the exact extension-bearing project path, e.g.
+  `res://art/wall.png`, `res://materials/wall.tres`, or `res://materials/wall.res`.
+  Exact tokens load the selected `Texture2D` or `Material` without texture-root
+  prefixing, extension guessing, or companion-material shadowing. Imported
+  Texture2D formats and native Texture2D resources can use this path.
+- Pass the raw token to document setters. The document writer quotes/escapes it
+  in `.map` text, including spaces and Unicode. Handwritten `res://` tokens must
+  be quoted because the map lexer recognizes `//` comments.
+- Legacy root-relative extensionless tokens retain ordered texture lookup
+  `png, dds, tga, jpg, jpeg, bmp, webp, exr, hdr` and `.material` before `.tres`
+  override precedence. Root-relative extension-bearing `.material`, `.tres`, and
+  `.res` tokens now perform exact Material lookup. Missing extensionless legacy
+  shaders retain untextured fallback; unresolved explicit resources fail baking.
+- `resolve_material(token)` returns `{resolved, resource_path, material, texture,
+  texture_size}`. Material selections retain the loaded Material itself. Texture
+  selections use a duplicate of the configured material template or a generated
+  StandardMaterial3D. The template and loaded Material are not mutated.
+- Preview hosts should cache this result, use `material` on preview surfaces, and
+  pass `{token: texture_size}` into `TBMapDocument.set_texture_sizes()`. Legacy
+  companion textures supply dimensions first; otherwise BaseMaterial3D albedo
+  textures supply dimensions. Materials without a discoverable albedo texture
+  (including arbitrary ShaderMaterials) use `Vector2i(1, 1)` consistently in both
+  preview and bake. Shader-specific sampler inference is not implemented.
+
+### Verification
+
+- Latest bounded native build: `timeout 180s scons platform=linux
+  target=template_debug arch=x86_64 -j2`, exit 0. Log:
+  `/tmp/opencode/tbloader-bake-build.log`.
+- Actual native `document_suite.gd`: **2,307 checks, zero failures**, completion
+  marker `TB_TEST_COMPLETE:document:PASS`; latest runtime log:
+  `/tmp/opencode/tbloader-bake-runtime.log`. Exercises exact previous-node/resource
+  retention after failed validation/load/generation, saved-versus-bake state,
+  successful replacement and empty output, scene packing and nested entity owners,
+  project-wide PNG/native Texture2D, `.tres`/binary `.res` Material identity,
+  extension/override precedence, spaced Unicode paths, and preview/bake UV parity.
+- The combined `run_tests.py --suite document` gate most recently stopped during
+  concurrent UI import (`document-13hjoqag`) with `Plugin is not attached to
+  debugger` (`editor_debugger_plugin.cpp:102`). Earlier UI formatting errors were
+  fixed by the UI agent. The runtime suite above was run directly in isolated
+  imported project `document-2gmxcqvg` with its original XDG directories and latest
+  copied native library. UI/editor acceptance remains the UI integration agent's
+  gate; native code and document tests are independent.
 
 ## Native ownership and identity
 

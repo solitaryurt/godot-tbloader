@@ -15,15 +15,19 @@
 #include <godot_cpp/templates/vmap.hpp>
 
 #include <tb_loader.h>
+#include <map_document.h>
 
 #include <map>
 #include <string>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 
-Builder::Builder(TBLoader* loader)
+Builder::Builder(TBLoader* loader, Node3D* parent)
 {
 	m_loader = loader;
+	m_parent = parent ? parent : loader;
+	m_owner = parent ? parent : (loader->get_owner() ? loader->get_owner() : loader);
 	m_map = std::make_shared<LMMapData>();
 }
 
@@ -31,31 +35,30 @@ Builder::~Builder()
 {
 }
 
-void Builder::load_map(const String& path)
+Dictionary Builder::load_map(const String& path)
 {
-	UtilityFunctions::print("Building map ", path);
-
-	if (!FileAccess::file_exists(path)) {
-		UtilityFunctions::printerr("Map file does not exist!");
-		return;
-	}
-
-	// Parse the map from the file
-	Ref<FileAccess> f = FileAccess::open(path, FileAccess::ModeFlags::READ);
+	// Validate geometry as well as syntax before creating any scene output. Parse
+	// the validated snapshot, never reopen a file that could have changed meanwhile.
+	Ref<TBMapDocument> document = memnew(TBMapDocument());
+	Dictionary result = document->load_map(path);
+	if (!bool(result["ok"])) return result;
+	String text = document->export_text()["value"];
+	auto bytes = text.utf8();
 	LMMapParser parser(m_map);
-	if (!parser.load_from_godot_file(f)) {
-		UtilityFunctions::printerr("Map parse failed at ", parser.error.line, ":", parser.error.column, ": ", String(parser.error.message.c_str()));
-		return;
+	if (!parser.load_from_text(std::string(bytes.get_data(), bytes.length()))) {
+		m_error = String::utf8(parser.error.message.c_str());
+		return result;
 	}
 
 	load_and_cache_map_textures();
+	if (!m_error.is_empty()) return result;
 
 	// We have to manually set the size of textures
 	for (int i = 0; i < m_map->texture_count; i++) {
 		auto& tex = m_map->textures[i];
 
 		auto res_texture = texture_from_name(tex.name);
-		if (res_texture != nullptr) {
+		if (res_texture != nullptr && res_texture->get_width() > 0 && res_texture->get_height() > 0) {
 			tex.width = res_texture->get_width();
 			tex.height = res_texture->get_height();
 		} else {
@@ -68,23 +71,27 @@ void Builder::load_map(const String& path)
 	// Run geometry generator (this also generates UV's, so we do this last)
 	LMGeoGenerator geogen(m_map);
 	geogen.run();
+	return result;
 }
 
-void Builder::build_map()
+bool Builder::build_map()
 {
+	if (!m_error.is_empty()) return false;
 	std::map<String, int> entity_class_count;
 	for (int i = 0; i < m_map->entity_count; i++) {
 		auto& ent = m_map->entities[i];
 		build_entity(i, ent, ent.get_property("classname"), entity_class_count);
+		if (!m_error.is_empty()) return false;
 	}
+	return true;
 }
 
 Node* Builder::build_worldspawn(int idx, LMEntity& ent, bool collision)
 {
 	// Create node for this entity
 	auto container_node = memnew(Node3D());
-	m_loader->add_child(container_node);
-	container_node->set_owner(m_loader->get_owner());
+	m_parent->add_child(container_node);
+	container_node->set_owner(m_owner);
 
 	// Decide generated collision type
 	ColliderType collider = ColliderType::None;
@@ -99,7 +106,8 @@ Node* Builder::build_worldspawn(int idx, LMEntity& ent, bool collision)
 
 	// Delete container if we added nothing to it
 	if (container_node->get_child_count() == 0) {
-		container_node->queue_free();
+		m_parent->remove_child(container_node);
+		memdelete(container_node);
 		return nullptr;
 	}
 
@@ -150,19 +158,20 @@ Node* Builder::build_entity(int idx, LMEntity& ent, const String& classname, std
 			} else if (classname == "trigger_location") {
 				auto location = ent.get_property("message");
 				if (strlen(location) == 0) {
-					UtilityFunctions::printerr("Trigger location entity has no message property!");
+					m_error = "Trigger location entity has no message property";
 					return nullptr;
 				} else {
 					UtilityFunctions::prints("Trigger location entity with message: ", location);
 				}
 				newEntityNode = build_entity_area(idx, ent);
-				newEntityNode->set_name("location_" + String(location));
-				newEntityNode = nullptr;
+				if (newEntityNode) newEntityNode->set_name("location_" + String(location));
+				return newEntityNode;
 			}
 
 			//TODO: More common entities
 		}
 
+		if (!m_error.is_empty()) return nullptr;
 		if (newEntityNode == nullptr) {
 			// Still no entity? We're building a custom one
 			newEntityNode = build_entity_custom(idx, ent, m_map->entity_geo[idx], classname, entity_class_count);
@@ -209,13 +218,17 @@ Node* Builder::build_entity_custom(int idx, LMEntity& ent, LMEntityGeometry& geo
 		if (resource_loader->exists(path, "PackedScene")) {
 			Ref<PackedScene> scene = resource_loader->load(path);
 			if (scene == nullptr) {
-				UtilityFunctions::printerr("Resource at path '", path, "' could not be loaded as a PackedScene by the resource loader!");
+				m_error = "Cannot load entity scene: " + path;
 				return nullptr;
 			}
 
 			auto instance = scene->instantiate();
-			m_loader->add_child(instance);
-			instance->set_owner(m_loader->get_owner());
+			if (!instance) {
+				m_error = "Cannot instantiate entity scene: " + path;
+				return nullptr;
+			}
+			m_parent->add_child(instance);
+			instance->set_owner(m_owner);
 
 			if (instance->is_class("Node3D")) {
 				set_entity_node_common((Node3D*)instance, ent);
@@ -280,12 +293,10 @@ Node* Builder::build_entity_custom(int idx, LMEntity& ent, LMEntityGeometry& geo
 			}
 
 			return instance;
-		} else {
-			UtilityFunctions::push_warning("Entity class not found: ", classname);
 		}
 	}
 
-	UtilityFunctions::printerr("Path to entity resource could not be resolved: ", classname);
+	m_error = "Path to entity resource could not be resolved: " + classname;
 	return nullptr;
 }
 
@@ -303,8 +314,8 @@ Node* Builder::build_entity_light(int idx, LMEntity& ent)
 	vec3 color = ent.get_property_vec3("light_color", { 255, 255, 255 });
 	light->set_color(Color(color.x / 255.0f, color.y / 255.0f, color.z / 255.0f));
 
-	m_loader->add_child(light);
-	light->set_owner(m_loader->get_owner());
+	m_parent->add_child(light);
+	light->set_owner(m_owner);
 
 	return light;
 }
@@ -325,8 +336,8 @@ Node* Builder::build_entity_area(int idx, LMEntity& ent)
 
 	// Create the area
 	auto area = memnew(Area3D());
-	m_loader->add_child(area);
-	area->set_owner(m_loader->get_owner());
+	m_parent->add_child(area);
+	area->set_owner(m_owner);
 	area->set_position(center);
 
 	for (int i = 0; i < surfs.surface_count; i++) {
@@ -359,11 +370,15 @@ Node* Builder::build_entity_sound(int idx, LMEntity& ent)
 			if (stream.is_valid()) {
 				player->set_stream(stream);
 			} else {
-				UtilityFunctions::printerr("Failed to load audio stream: ", sound_path);
+				m_error = "Failed to load audio stream: " + String::utf8(sound_path);
 			}
 		} else {
-			UtilityFunctions::printerr("Audio stream resource not found: ", sound_path);
+			m_error = "Audio stream resource not found: " + String::utf8(sound_path);
 		}
+	}
+	if (!m_error.is_empty()) {
+		memdelete(player);
+		return nullptr;
 	}
 
 	// Volume
@@ -401,8 +416,8 @@ Node* Builder::build_entity_sound(int idx, LMEntity& ent)
 	set_entity_node_common(player, ent);
 
 	// Add to scene tree
-	m_loader->add_child(player);
-	player->set_owner(m_loader->get_owner());
+	m_parent->add_child(player);
+	player->set_owner(m_owner);
 
 	return player;
 }
@@ -515,7 +530,7 @@ void Builder::add_collider_from_mesh(Node3D* node, Ref<ArrayMesh>& mesh, Collide
 	}
 
 	if (mesh_shape == nullptr) {
-		UtilityFunctions::printerr("Unable to create collider shape from mesh!");
+		m_error = "Unable to create collider shape from mesh";
 		return;
 	}
 
@@ -526,7 +541,7 @@ void Builder::add_collider_from_mesh(Node3D* node, Ref<ArrayMesh>& mesh, Collide
 		concave_shape->set_backface_collision_enabled(true); // useful for raycasting exit bullets
 	}
 	node->add_child(collision_shape, true);
-	collision_shape->set_owner(m_loader->get_owner());
+	collision_shape->set_owner(m_owner);
 
 	if (debug_color != nullptr) {
 		collision_shape->set("debug_color", *debug_color);
@@ -535,6 +550,10 @@ void Builder::add_collider_from_mesh(Node3D* node, Ref<ArrayMesh>& mesh, Collide
 
 void Builder::add_surface_to_mesh(Ref<ArrayMesh>& mesh, LMSurface& surf)
 {
+	if (surf.vertex_count < 3 || surf.index_count < 3 || surf.index_count % 3 != 0) {
+		m_error = "Generated surface has invalid triangle counts";
+		return;
+	}
 	PackedVector3Array vertices;
 	PackedFloat32Array tangents;
 	PackedVector3Array normals;
@@ -546,6 +565,12 @@ void Builder::add_surface_to_mesh(Ref<ArrayMesh>& mesh, LMSurface& surf)
 		auto& v = surf.vertices[k];
 
 		vertices.push_back(lm_transform(v.vertex));
+		if (!vertices[vertices.size() - 1].is_finite() || !std::isfinite(v.uv.u) || !std::isfinite(v.uv.v)
+				|| !std::isfinite(v.normal.x) || !std::isfinite(v.normal.y) || !std::isfinite(v.normal.z)
+				|| !std::isfinite(v.tangent.x) || !std::isfinite(v.tangent.y) || !std::isfinite(v.tangent.z) || !std::isfinite(v.tangent.w)) {
+			m_error = "Generated surface contains non-finite vertex attributes";
+			return;
+		}
 		tangents.push_back(v.tangent.y);
 		tangents.push_back(v.tangent.z);
 		tangents.push_back(v.tangent.x);
@@ -556,6 +581,10 @@ void Builder::add_surface_to_mesh(Ref<ArrayMesh>& mesh, LMSurface& surf)
 
 	// Add all indices
 	for (int k = 0; k < surf.index_count; k++) {
+		if (surf.indices[k] < 0 || surf.indices[k] >= surf.vertex_count) {
+			m_error = "Generated surface contains an invalid triangle index";
+			return;
+		}
 		indices.push_back(surf.indices[k]);
 	}
 
@@ -568,7 +597,9 @@ void Builder::add_surface_to_mesh(Ref<ArrayMesh>& mesh, LMSurface& surf)
 	arrays[Mesh::ARRAY_INDEX] = indices;
 
 	// Create mesh
+	int previous_count = mesh->get_surface_count();
 	mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
+	if (mesh->get_surface_count() != previous_count + 1) m_error = "Unable to create mesh surface";
 }
 
 bool check_texture(const std::string& texture_name, const std::string& substring) {
@@ -577,8 +608,9 @@ bool check_texture(const std::string& texture_name, const std::string& substring
     std::string substring_upper(substring);
 
     // Convert both to uppercase
-    std::transform(texture_name.begin(), texture_name.end(), texture_upper.begin(), ::toupper);
-    std::transform(substring.begin(), substring.end(), substring_upper.begin(), ::toupper);
+    auto uppercase = [](unsigned char c) { return std::toupper(c); };
+    std::transform(texture_name.begin(), texture_name.end(), texture_upper.begin(), uppercase);
+    std::transform(substring.begin(), substring.end(), substring_upper.begin(), uppercase);
 
     // Check if the uppercase substring is in the uppercase texture name
     return texture_upper.find(substring_upper) != std::string::npos;
@@ -600,7 +632,7 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 		mesh_instance->set_layer_mask(m_loader->get_skybox_layer_mask());
 	}
 
-	mesh_instance->set_owner(m_loader->get_owner());
+	mesh_instance->set_owner(m_owner);
 	mesh_instance->set_name(instance_name);
 
 	// Create mesh
@@ -646,11 +678,6 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 	// Give mesh to mesh instance
 	mesh_instance->set_mesh(mesh);
 
-	// Prepare material template
-	auto material_template = m_loader->get_material_template();
-	bool has_material_template = material_template.is_valid();
-	VMap<String, Ref<Material>> material_template_map;
-
 	for (int i = 0; i < m_map->texture_count; i++) {
 		LMTextureData tex = m_map->textures[i];
 
@@ -664,37 +691,6 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 
 		// Attempt to load material
 		material = material_from_name(tex.name);
-
-		if (material == nullptr) {
-			// Load texture
-			auto res_texture = texture_from_name(tex.name);
-
-			// Create material
-			if (res_texture != nullptr) {
-				Ref<Material> new_material;
-
-				if (has_material_template) {
-					// Duplicate and set texture for material template
-					// Only creates one copy per texture; materials are reused using a map
-					if (!material_template_map.has(tex.name)) {
-						auto material_template_copy = material_template->duplicate();
-						material_template_copy->set(m_loader->get_material_texture_path(), res_texture);
-						material_template_map.insert(tex.name, material_template_copy);
-					}
-					new_material = material_template_map[tex.name];
-				} else {
-					// Generate new material if no template supplied
-					Ref<StandardMaterial3D> new_standard_material = memnew(StandardMaterial3D());
-					new_standard_material->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, res_texture);
-					if (m_loader->m_filter_nearest) {
-						new_standard_material->set_texture_filter(BaseMaterial3D::TEXTURE_FILTER_NEAREST);
-					}
-					new_material = new_standard_material;
-				}
-
-				material = new_material;
-			}
-		}
 
 		// Gather surfaces for this texture
 		LMSurfaceGatherer surf_gather(m_map);
@@ -743,6 +739,7 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 
 			// Add surface to visual mesh
 			add_surface_to_mesh(mesh, surf);
+			if (!m_error.is_empty()) return mesh_instance;
 
 			// Give mesh material
 			if (material != nullptr) {
@@ -752,15 +749,23 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 	}
 
 	// Unwrap UV2's if needed
-	if (m_loader->m_lighting_unwrap_uv2) {
-		mesh->lightmap_unwrap(mesh_instance->get_global_transform(), m_loader->m_lighting_unwrap_texel_size);
+	if (m_loader->m_lighting_unwrap_uv2 && mesh->get_surface_count() > 0) {
+		Transform3D transform = mesh_instance->get_transform();
+		for (Node3D* ancestor = parent; ancestor && ancestor != m_parent; ancestor = Object::cast_to<Node3D>(ancestor->get_parent())) {
+			transform = ancestor->get_transform() * transform;
+		}
+		transform = (m_loader->is_inside_tree() ? m_loader->get_global_transform() : m_loader->get_transform()) * transform;
+		if (mesh->lightmap_unwrap(transform, m_loader->m_lighting_unwrap_texel_size) != OK) {
+			m_error = "Unable to unwrap mesh lightmap UVs";
+			return mesh_instance;
+		}
 		mesh_instance->set_gi_mode(GeometryInstance3D::GI_MODE_STATIC);
 	}
 
 	// Create collisions if needed
 	// iterate the map and add the surfaces to the appropriate mesh
 	for (auto& [key, collision_mesh] : collision_mesh_map) {
-		if (!m_loader->m_skip_empty_meshes || collision_mesh->get_surface_count() > 0) {
+		if (collision_mesh->get_surface_count() > 0) {
 			switch (coltype) {
 			case ColliderType::Mesh:
 				add_collider_from_mesh(parent, collision_mesh, colshape, nullptr);
@@ -787,7 +792,7 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 				}
 
 				parent->add_child(container, true);
-				container->set_owner(m_loader->get_owner());
+				container->set_owner(m_owner);
 				add_collider_from_mesh(container, collision_mesh, colshape, nullptr);
 				break;
 			}
@@ -807,46 +812,34 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 void Builder::load_and_cache_map_textures()
 {
 	m_loaded_map_textures.clear();
-
-	// Setup a texture extension list that both Trenchbroom and Godot support
-	constexpr int num_extensions = 9;
-	constexpr const char* supported_extensions[num_extensions] = { "png", "dds", "tga", "jpg", "jpeg", "bmp", "webp", "exr", "hdr" };
-
-	// Attempt to load and cache textures used by the map
-	auto resource_loader = ResourceLoader::get_singleton();
-	String tex_path;
-
+	m_loaded_map_materials.clear();
 	for (int tex_i = 0; tex_i < m_map->texture_count; tex_i++) {
-		bool has_loaded_texture = false;
 		const LMTextureData& tex = m_map->textures[tex_i];
-
-		// Find the texture with a supported extension - stop when it can be loaded
-		for (int ext_i = 0; ext_i < num_extensions; ext_i++) {
-			tex_path = texture_path(tex.name, supported_extensions[ext_i]);
-			if (resource_loader->exists(tex_path, "CompressedTexture2D")) {
-				m_loaded_map_textures[tex.name] = resource_loader->load(tex_path);
-				has_loaded_texture = true;
-				break;
-			}
-		}
-
-		if (!has_loaded_texture && strcmp(tex.name, "__TB_empty") != 0) {
-			UtilityFunctions::printerr("Texture cannot be found or is unsupported! - ", m_loader->m_texture_path, tex.name);
-			if (m_loader->m_texture_path.is_empty()) {
-				UtilityFunctions::printerr("texture_path is empty");
-			}
+		String token = String::utf8(tex.name);
+		Dictionary resolved = resolve_material(token);
+		m_loaded_map_textures[token] = resolved["texture"];
+		m_loaded_map_materials[token] = resolved["material"];
+		// Missing legacy shaders still use the historical untextured fallback.
+		// An explicit resource token promises an exact resource, so fail the bake.
+		String extension = token.get_extension().to_lower();
+		if ((token.begins_with("res://") || extension == "material" || extension == "tres" || extension == "res") && !bool(resolved["resolved"])) {
+			m_error = "Cannot resolve texture or Material resource: " + token;
 		}
 	}
 }
 
 String Builder::texture_path(const char* name, const char* extension)
 {
-	return m_loader->m_texture_path + "/" + name + "." + extension;
+	return m_loader->m_texture_path + "/" + String::utf8(name) + "." + extension;
 }
 
 String Builder::material_path(const char* name)
 {
-	auto root_path = m_loader->m_texture_path + "/" + name;
+	String token = String::utf8(name);
+	if (token.begins_with("res://")) return token;
+	auto root_path = m_loader->m_texture_path + "/" + token;
+	String extension = token.get_extension().to_lower();
+	if (extension == "material" || extension == "tres" || extension == "res") return root_path;
 	String material_path;
 
 	if (FileAccess::file_exists(root_path + ".material")) {
@@ -860,22 +853,68 @@ String Builder::material_path(const char* name)
 
 Ref<Texture2D> Builder::texture_from_name(const char* name)
 {
-	if (!m_loaded_map_textures.has(name)) {
-		return nullptr;
-	}
-	return VariantCaster<Ref<Texture2D>>::cast(m_loaded_map_textures[name]);
+	return m_loaded_map_textures.get(String::utf8(name), Variant());
 }
 
 Ref<Material> Builder::material_from_name(const char* name)
 {
-	auto path = material_path(name);
+	return m_loaded_map_materials.get(String::utf8(name), Variant());
+}
 
+Dictionary Builder::resolve_material(const String& token)
+{
 	auto resource_loader = ResourceLoader::get_singleton();
-	if (!resource_loader->exists(path)) {
-		return nullptr;
+	auto bytes = token.utf8();
+	bool direct = token.begins_with("res://");
+	String extension = token.get_extension().to_lower();
+	bool direct_material = extension == "material" || extension == "tres" || extension == "res";
+	String path = material_path(bytes.get_data());
+	String resource_path;
+	Ref<Material> material;
+	Ref<Texture2D> texture;
+	if (!path.is_empty() && resource_loader->exists(path)) {
+		Ref<Resource> resource = resource_loader->load(path);
+		material = resource;
+		if (direct) texture = resource;
+		if (material.is_valid() || texture.is_valid()) resource_path = path;
 	}
-
-	return resource_loader->load(path);
+	if (!direct && !direct_material) {
+		// Preserve legacy extension order and companion texture UV dimensions,
+		// even when a .material/.tres overrides the generated visual material.
+		const char* extensions[] = { "png", "dds", "tga", "jpg", "jpeg", "bmp", "webp", "exr", "hdr" };
+		for (const char* extension : extensions) {
+			path = texture_path(bytes.get_data(), extension);
+			if (!resource_loader->exists(path, "Texture2D")) continue;
+			texture = resource_loader->load(path);
+			if (texture.is_valid()) {
+				if (resource_path.is_empty()) resource_path = path;
+				break;
+			}
+		}
+	}
+	if (texture.is_null() && material.is_valid()) {
+		Ref<BaseMaterial3D> base = material;
+		if (base.is_valid()) texture = base->get_texture(BaseMaterial3D::TEXTURE_ALBEDO);
+	}
+	if (material.is_null() && texture.is_valid()) {
+		if (m_loader->m_material_template.is_valid()) {
+			material = m_loader->m_material_template->duplicate();
+			material->set(m_loader->m_material_texture_path, texture);
+		} else {
+			Ref<StandardMaterial3D> standard = memnew(StandardMaterial3D());
+			standard->set_texture(BaseMaterial3D::TEXTURE_ALBEDO, texture);
+			if (m_loader->m_filter_nearest) standard->set_texture_filter(BaseMaterial3D::TEXTURE_FILTER_NEAREST);
+			material = standard;
+		}
+	}
+	Dictionary result;
+	result["resolved"] = material.is_valid();
+	result["resource_path"] = resource_path;
+	result["material"] = material;
+	result["texture"] = texture;
+	result["texture_size"] = texture.is_valid() && texture->get_width() > 0 && texture->get_height() > 0
+		? Vector2i(texture->get_width(), texture->get_height()) : Vector2i(1, 1);
+	return result;
 }
 
 void Builder::smooth_mesh_shading(MeshInstance3D* mesh_instance) {

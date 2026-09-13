@@ -46,13 +46,18 @@ public:
 	TBLoader* m_loader;
 	std::shared_ptr<LMMapData> m_map;
 	Dictionary m_loaded_map_textures; // Texture Name(const char*) - Ref<Texture2D>
+	Dictionary m_loaded_map_materials;
+	Node3D* m_parent;
+	Node* m_owner;
+	String m_error;
 
 public:
-	Builder(TBLoader* loader);
+	Builder(TBLoader* loader, Node3D* parent = nullptr);
 	~Builder();
 
-	void load_map(const String& path);
-	void build_map();
+	Dictionary load_map(const String& path);
+	bool build_map();
+	Dictionary resolve_material(const String& token);
 
 	Node* build_worldspawn(int idx, LMEntity& ent, bool collision);
 	void build_brush(int idx, Node3D* node, LMEntity& ent);

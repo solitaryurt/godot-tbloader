@@ -12,6 +12,7 @@ func run() -> void:
 		return
 	test_document()
 	test_operations()
+	await test_checked_bake()
 	# Preserve the real bake regression gate alongside native document assertions.
 	var loader = ClassDB.instantiate("TBLoader")
 	checks.check(loader is Node3D, "TBLoader inherits Node3D")
@@ -53,6 +54,8 @@ func run() -> void:
 		checks.check(bounds.position.is_equal_approx(Vector3(-32, -8, -16) / 38.0), "map to Godot minimum (y,z,x)/38")
 		checks.check(bounds.end.is_equal_approx(Vector3(32, 24, 48) / 38.0), "map to Godot maximum (y,z,x)/38")
 	checks.check(loader.find_children("*", "CollisionShape3D", true, false).size() == 1, "cube collision generated")
+	for generated in loader.find_children("*", "", true, false):
+		checks.check(generated.owner == loader, "root loader owns generated output")
 	loader.free()
 	await process_frame
 	var empty_loader = ClassDB.instantiate("TBLoader")
@@ -108,6 +111,159 @@ func write_text(path: String, text: String) -> void:
 	if file:
 		file.store_string(text)
 		file.close()
+
+func test_checked_bake() -> void:
+	var scene = Node3D.new()
+	scene.name = "BakeScene"
+	root.add_child(scene)
+	var loader = ClassDB.instantiate("TBLoader")
+	scene.add_child(loader)
+	loader.owner = scene
+	loader.map_resource = "res://fixtures/classic_cube.map"
+	var result = loader.build_meshes_checked()
+	if not expect_ok(result, "checked initial bake"):
+		scene.free()
+		return
+	checks.check(result.changed and result.value == {"path": loader.map_resource, "child_count": 1}, "checked bake success value")
+	var old_children = loader.get_children()
+	var old_mesh = loader.find_children("*", "MeshInstance3D", true, false)[0]
+	var old_resource = old_mesh.mesh
+	var old_collision = loader.find_children("*", "CollisionShape3D", true, false)[0]
+	var cube: String = FileAccess.get_file_as_string(loader.map_resource)
+	var failures = [
+		["user://missing-bake.map", "IO_NOT_FOUND", ""],
+		["user://invalid-bake.map", "PARSE_ERROR", "{\n"],
+		["user://invalid-solid.map", "INVALID_GEOMETRY", cube.replace("0 0 0 1 1", "0 0 0 0 1")],
+		["user://invalid-resource.map", "RESOURCE_LOAD_FAILED", cube.replace("baseline/checker", '"res://missing-material.res"')],
+		["user://failed-generation.map", "GENERATION_FAILED", cube + '{"classname" "native_missing_entity"}\n'],
+		["user://failed-audio.map", "GENERATION_FAILED", cube + '{"classname" "target_speaker" "sound" "res://missing-audio.ogg"}\n'],
+	]
+	for failure in failures:
+		if not failure[2].is_empty():
+			write_text(failure[0], failure[2])
+		loader.map_resource = failure[0]
+		result = loader.build_meshes_checked()
+		checks.check(result.size() == 4 and not result.ok and not result.changed and result.value == null, "failed bake Result schema")
+		checks.check(result.error.has_all(["code", "message", "operation", "path", "line", "column", "entity_id", "brush_id", "face"]), "bake complete error diagnostic")
+		checks.check(result.error.code == StringName(failure[1]) and result.error.operation == &"build_meshes_checked" and result.error.path == failure[0], "bake error identifies bake rather than save: " + str(result.error))
+		if failure[1] == "PARSE_ERROR":
+			checks.check(result.error.line > 0 and result.error.column > 0, "bake reports parser location")
+		await process_frame
+		checks.check(loader.get_children() == old_children and is_instance_valid(old_mesh) and old_mesh.mesh == old_resource and is_instance_valid(old_collision), "failure retains exact successful baked nodes and resources")
+	loader.map_inverse_scale = 0
+	checks.check(loader.build_meshes_checked().error.code == &"INVALID_ARGUMENT" and loader.get_children() == old_children, "invalid bake settings retain output")
+	loader.map_inverse_scale = 38
+	loader.map_resource = "res://fixtures/classic_cube.map"
+	expect_ok(loader.build_meshes_checked(), "successful replacement after failed generation")
+	await process_frame
+	checks.check(not is_instance_valid(old_mesh), "successful replacement retires prior bake")
+	for generated in loader.find_children("*", "", true, false):
+		checks.check(generated.owner == scene, "generated mesh and collider owned by scene parent")
+	var packed = PackedScene.new()
+	checks.check(packed.pack(scene) == OK, "pack baked scene")
+	var restored = packed.instantiate()
+	checks.check(restored.find_children("*", "MeshInstance3D", true, false).size() == 1 and restored.find_children("*", "CollisionShape3D", true, false).size() == 1, "packed scene preserves mesh and collision")
+	restored.free()
+	# Instantiated scene-local ownership survives the staging-parent transfer.
+	var entity_root = Node3D.new()
+	entity_root.name = "EntityRoot"
+	var internal = Node3D.new()
+	internal.name = "Internal"
+	entity_root.add_child(internal)
+	internal.owner = entity_root
+	var entity_scene = PackedScene.new()
+	checks.check(entity_scene.pack(entity_root) == OK, "pack native entity fixture")
+	checks.check(ResourceSaver.save(entity_scene, "res://native_entity.tscn") == OK, "save native entity fixture")
+	entity_root.free()
+	loader.entity_path = "res://"
+	write_text("user://entity-bake.map", '{"classname" "worldspawn"}\n' + cube.replace('"classname" "worldspawn"', '"classname" "native_entity"'))
+	loader.map_resource = "user://entity-bake.map"
+	expect_ok(loader.build_meshes_checked(), "bake custom PackedScene entity")
+	var instances = loader.find_children("Internal", "Node3D", true, false)
+	checks.check(instances.size() == 1 and instances[0].owner == instances[0].get_parent() and instances[0].get_parent().owner == scene, "scene-internal owner stays on entity instance")
+	var entity_meshes = loader.find_children("*", "MeshInstance3D", true, false)
+	checks.check(entity_meshes.size() == 1 and entity_meshes[0].owner == scene and entity_meshes[0].get_parent() == instances[0].get_parent(), "generated brush mesh within entity keeps outer scene ownership")
+	var saved_doc = ClassDB.instantiate("TBMapDocument")
+	expect_ok(saved_doc.import_text(cube + '{"classname" "native_missing_entity"}\n'), "prepare save versus bake failure")
+	expect_ok(saved_doc.save_map("user://saved-unbakeable.map"), "saving valid map with unresolved entity succeeds")
+	loader.map_resource = saved_doc.get_path()
+	var saved_bytes: String = FileAccess.get_file_as_string(saved_doc.get_path())
+	checks.check(not loader.build_meshes_checked().ok and not saved_doc.is_dirty() and FileAccess.get_file_as_string(saved_doc.get_path()) == saved_bytes, "failed bake leaves successfully saved file and baseline intact")
+
+	# Save fixtures in this runner's disposable project, outside the texture root.
+	checks.check(DirAccess.make_dir_recursive_absolute("res://native-bake-assets") == OK, "create native resource fixtures")
+	var checker = load("res://textures/baseline/checker.png") as Texture2D
+	var material = StandardMaterial3D.new()
+	material.albedo_color = Color(0.2, 0.4, 0.8)
+	material.albedo_texture = checker
+	for extension in ["tres", "res"]:
+		checks.check(ResourceSaver.save(material, "res://native-bake-assets/standalone." + extension) == OK, "save standalone Material " + extension)
+	checks.check(ResourceSaver.save(material, "res://native-bake-assets/standalone 日本語 space.tres") == OK, "save Unicode spaced Material path")
+	var gradient = GradientTexture2D.new()
+	gradient.gradient = Gradient.new()
+	gradient.width = 64
+	gradient.height = 32
+	checks.check(ResourceSaver.save(gradient, "res://native-bake-assets/texture.tres") == OK, "save native Texture2D resource")
+	checks.check(ResourceSaver.save(material, "res://textures/baseline/legacy.tres") == OK, "save legacy material override")
+	var priority = StandardMaterial3D.new()
+	priority.albedo_color = Color.RED
+	checks.check(ResourceSaver.save(priority, "res://textures/baseline/legacy.material") == OK, "save legacy .material priority")
+	checks.check(loader.resolve_material("baseline/legacy").material == load("res://textures/baseline/legacy.material"), "legacy .material precedes .tres")
+	checks.check(loader.resolve_material("baseline/checker").texture == checker, "legacy extensionless texture lookup")
+	checks.check(ResourceSaver.save(priority, "res://textures/baseline/checker.tres") == OK, "save shadowing legacy companion material")
+	checks.check(loader.resolve_material("baseline/checker").material == load("res://textures/baseline/checker.tres"), "legacy companion Material overrides generated texture material")
+	checks.check(loader.resolve_material("res://textures/baseline/checker.png").texture == checker, "explicit texture bypasses legacy root")
+	checks.check(loader.resolve_material("res://textures/baseline/checker.png").material != load("res://textures/baseline/checker.tres"), "explicit texture bypasses shadowing companion Material")
+	loader.texture_path = "res://native-bake-assets"
+	var tokens = ["res://textures/baseline/checker.png", "res://native-bake-assets/standalone.tres", "res://native-bake-assets/standalone.res", "res://native-bake-assets/standalone 日本語 space.tres", "standalone 日本語 space.tres", "standalone.tres", "standalone.res", "standalone", "res://native-bake-assets/texture.tres"]
+	for token in tokens:
+		var resolution: Dictionary = loader.resolve_material(token)
+		checks.check(resolution.resolved and resolution.material is Material and resolution.texture_size == Vector2i(64, 32), "native preview resolves resource and dimensions: " + token)
+		var doc = ClassDB.instantiate("TBMapDocument")
+		var created = doc.create_cuboid(Vector3(-16, -32, -8), Vector3(48, 32, 24), token)
+		expect_ok(created, "create explicit token cuboid")
+		expect_ok(doc.save_map("user://material-bake.map"), "save explicit token map")
+		var reopened = ClassDB.instantiate("TBMapDocument")
+		expect_ok(reopened.load_map(doc.get_path()), "reload explicit token map")
+		checks.check(reopened.get_texture_names().has(token), "serialized token survives document reload")
+		expect_ok(reopened.set_texture_sizes({token: resolution.texture_size}), "use native resolver for preview dimensions")
+		loader.map_resource = reopened.get_path()
+		expect_ok(loader.build_meshes_checked(), "bake selected project resource: " + token)
+		checks.check(not doc.is_dirty(), "bake does not affect saved document baseline")
+		var meshes = loader.find_children("*", "MeshInstance3D", true, false)
+		if not checks.check(meshes.size() == 1, "resource bake produces mesh"):
+			continue
+		var mesh: ArrayMesh = meshes[0].mesh
+		var actual: Material = mesh.surface_get_material(0)
+		if "standalone" in token:
+			checks.check(actual == resolution.material, "bake uses identical standalone Material resource")
+		else:
+			checks.check(actual is StandardMaterial3D and actual.albedo_texture == resolution.texture, "bake uses identical project Texture2D resource")
+		var baked_uvs: PackedVector2Array = mesh.surface_get_arrays(0)[Mesh.ARRAY_TEX_UV]
+		var preview_uvs: PackedVector2Array = reopened.get_preview_data()[0].uvs
+		checks.check(baked_uvs.size() == preview_uvs.size(), "preview and bake UV cardinality")
+		for i in mini(baked_uvs.size(), preview_uvs.size()):
+			checks.check(baked_uvs[i].is_equal_approx(preview_uvs[i]), "native preview/bake texture dimensions and UV parity")
+		var shapes = loader.find_children("*", "CollisionShape3D", true, false)
+		checks.check(shapes.size() == 1 and shapes[0].shape is ConcavePolygonShape3D and shapes[0].shape.get_faces().size() == 36, "resource bake retains twelve-triangle collision")
+	var shader_material = ShaderMaterial.new()
+	checks.check(ResourceSaver.save(shader_material, "res://native-bake-assets/shader.res") == OK, "save standalone ShaderMaterial")
+	var shader_resolution = loader.resolve_material("res://native-bake-assets/shader.res")
+	checks.check(shader_resolution.resolved and shader_resolution.material == load("res://native-bake-assets/shader.res") and shader_resolution.texture_size == Vector2i.ONE, "arbitrary Material preserves resource with fallback dimensions")
+	checks.check(ResourceSaver.save(Resource.new(), "res://native-bake-assets/not-material.tres") == OK, "save wrong resource type fixture")
+	checks.check(not loader.resolve_material("res://native-bake-assets/not-material.tres").resolved, "direct lookup rejects non-Material non-Texture2D resource")
+
+	# Template resolution is shared, and the template itself must stay unchanged.
+	loader.texture_material_template = priority
+	var templated = loader.resolve_material("res://textures/baseline/checker.png")
+	checks.check(templated.material != priority and templated.material.albedo_color == priority.albedo_color and templated.material.albedo_texture == checker and priority.albedo_texture == null, "shared resolver duplicates material template")
+	loader.map_resource = "res://fixtures/empty.map"
+	result = loader.build_meshes_checked()
+	checks.check(result.ok and result.changed and result.value.child_count == 0 and loader.get_child_count() == 0, "empty map commits empty bake")
+	result = loader.build_meshes_checked()
+	checks.check(result.ok and not result.changed, "empty to empty bake reports no output change")
+	scene.free()
+	await process_frame
 
 func test_document() -> void:
 	if not checks.check(ClassDB.class_exists("TBMapDocument"), "TBMapDocument is registered"):
