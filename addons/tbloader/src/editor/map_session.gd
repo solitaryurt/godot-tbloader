@@ -18,6 +18,8 @@ var baked_text = ""
 var grid = 16.0
 var texture = "common/caulk"
 var manager: EditorUndoRedoManager
+var save_enabled = true # Explicit Discard suppresses Save All until history revives it.
+var was_bound = false
 
 func capture() -> Dictionary:
 	return {"native": document.snapshot().value, "selected_brush_ids": selected.duplicate(),
@@ -28,6 +30,7 @@ func restore(state: Dictionary) -> void:
 	if not result.ok:
 		report(result)
 		return
+	save_enabled = true
 	selected = state.selected_brush_ids.duplicate()
 	points = state.points.duplicate()
 	components.clear() # Native restore always invalidates topology tokens.
@@ -61,7 +64,7 @@ func transact(label: String, operation: Callable) -> bool:
 	token.before = before
 	token.after = after
 	token.epoch = document.get_epoch()
-	token.bytes = before.native.text.to_utf8_buffer().size() + after.native.text.to_utf8_buffer().size()
+	token.bytes = var_to_bytes(before).size() + var_to_bytes(after).size()
 	manager.create_action(label, UndoRedo.MERGE_DISABLE, self)
 	manager.add_do_method(token, "restore", true)
 	manager.add_undo_method(token, "restore", false)
@@ -98,6 +101,12 @@ func prune() -> void:
 		if entities.has(id):
 			valid.append(id)
 	points = valid
+	var first = true
+	for id in selected:
+		var item = brush(id)
+		var bounds = AABB(item.aabb_min, item.aabb_max - item.aabb_min)
+		workzone = bounds if first else workzone.merge(bounds)
+		first = false
 
 func select(ids: PackedInt64Array, point_ids: PackedInt64Array = PackedInt64Array()) -> void:
 	selected = ids

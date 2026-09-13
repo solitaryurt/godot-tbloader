@@ -23,6 +23,7 @@ func _ready() -> void:
 	custom_minimum_size = Vector2(240, 180)
 	clip_contents = true
 	focus_exited.connect(cancel)
+	focus_entered.connect(func(): host.active_graph = self; host.refresh_status(); queue_redraw())
 
 func axes() -> Vector2i:
 	return Vector2i(1 if orientation == 0 else 0, 1 if orientation == 2 else 2)
@@ -174,6 +175,18 @@ func _gui_input(event: InputEvent) -> void:
 				delta[a.y if absf(delta[a.x]) > absf(delta[a.y]) else a.x] = 0
 			if ctrl_drag and gesture == "move" and not host.session.selected.is_empty():
 				var reference: Vector3 = host.session.workzone.position
+				delta = snap_point(reference + unproject(cursor) - anchor) - reference
+				delta[orientation] = 0
+			if gesture in ["resize", "component"]:
+				var component: Dictionary = resize_face if gesture == "resize" else host.session.components[0]
+				var brush: Dictionary = host.session.brush(component.brush_id)
+				var reference: Vector3
+				if component.kind == "face":
+					reference = brush.faces[component.index].center
+				elif component.kind == "vertex":
+					reference = brush.vertices[component.index]
+				else:
+					reference = (brush.vertices[brush.edge_vertex_indices[component.index * 2]] + brush.vertices[brush.edge_vertex_indices[component.index * 2 + 1]]) * 0.5
 				delta = snap_point(reference + unproject(cursor) - anchor) - reference
 				delta[orientation] = 0
 		queue_redraw()

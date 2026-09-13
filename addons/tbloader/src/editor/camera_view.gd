@@ -48,6 +48,12 @@ func _ready() -> void:
 	hint.text = " Camera • RMB fly • WASD / Q E • Shift fast"
 	hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(hint)
+	var frame_button = Button.new()
+	frame_button.text = "Frame"
+	frame_button.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
+	frame_button.position.x = -70
+	frame_button.pressed.connect(frame_selection)
+	add_child(frame_button)
 	focus_exited.connect(stop_fly)
 	visibility_changed.connect(func():
 		if not is_visible_in_tree():
@@ -59,6 +65,23 @@ func transform_map(point: Vector3) -> Vector3:
 	if is_instance_valid(loader):
 		scale_value = maxf(loader.map_inverse_scale, 0.001)
 	return Vector3(point.y, point.z, point.x) / scale_value
+
+func frame_selection() -> void:
+	var bounds: AABB
+	var first = true
+	for brush in host.session.document.get_draw_data():
+		if host.session.hidden.has(brush.id) or (not host.session.selected.is_empty() and not host.session.selected.has(brush.id)):
+			continue
+		var box = AABB(transform_map(brush.aabb_min), transform_map(brush.aabb_max - brush.aabb_min))
+		bounds = box if first else bounds.merge(box)
+		first = false
+	if first:
+		return
+	var center = bounds.get_center()
+	camera.position = center + Vector3(1, 0.8, 1.2).normalized() * maxf(bounds.size.length() * 1.4, 2)
+	camera.look_at(center)
+	pitch = camera.rotation.x
+	yaw = camera.rotation.y
 
 func refresh() -> void:
 	if geometry == null:
@@ -109,6 +132,25 @@ func refresh() -> void:
 		material.albedo_color = Color("ffb657") if host.session.points.has(marker.id) else Color("83dfbd")
 		instance.material_override = material
 		geometry.add_child(instance)
+	var outline = ImmediateMesh.new()
+	var outline_material = StandardMaterial3D.new()
+	outline_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	outline_material.albedo_color = Color("ffb657")
+	var has_lines = false
+	for id in host.session.selected:
+		var brush: Dictionary = host.session.brush(id)
+		if brush.is_empty() or host.session.hidden.has(id):
+			continue
+		if not has_lines:
+			outline.surface_begin(Mesh.PRIMITIVE_LINES, outline_material)
+			has_lines = true
+		for edge in brush.edges:
+			outline.surface_add_vertex(transform_map(edge))
+	if has_lines:
+		outline.surface_end()
+		var instance = MeshInstance3D.new()
+		instance.mesh = outline
+		geometry.add_child(instance)
 
 func _gui_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.pressed:
@@ -132,9 +174,6 @@ func pick(position: Vector2, additive: bool) -> void:
 			if distance < nearest:
 				nearest = distance
 				point_id = marker.id
-	if point_id:
-		host.session.select(PackedInt64Array(), PackedInt64Array([point_id]))
-		return
 	var ray = camera.project_ray_origin(position)
 	var direction = camera.project_ray_normal(position)
 	var id = 0
@@ -151,7 +190,11 @@ func pick(position: Vector2, additive: bool) -> void:
 			if intersection != null and ray.distance_to(intersection) < nearest:
 				nearest = ray.distance_to(intersection)
 				id = brush_id
+				point_id = 0
 				face_index = group.triangle_face_indices[triangle]
+	if point_id:
+		host.session.select(PackedInt64Array(), PackedInt64Array([point_id]))
+		return
 	var ids = host.session.selected.duplicate() if additive else PackedInt64Array()
 	if id:
 		if ids.has(id):

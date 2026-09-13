@@ -11,6 +11,7 @@ var reporter: Callable
 
 func restore(use_after: bool) -> void:
 	if session == null or session.document.get_epoch() != epoch:
+		retire()
 		if reporter.is_valid():
 			reporter.call("Map history expired; the originating session is no longer retained.")
 		return

@@ -42,8 +42,10 @@ func _exit_tree():
 	map_control.queue_free()
 	map_control = null
 
-func _handles(object):
-	return object is TBLoader
+func _handles(_object):
+	# A main-screen plugin that handles TBLoader would auto-switch tabs on scene
+	# selection. The independent spatial-selection signal owns this toolbar.
+	return false
 
 func _make_visible(visible: bool):
 	if map_editor != null:
@@ -59,9 +61,7 @@ func _get_plugin_icon() -> Texture2D:
 	return get_editor_interface().get_base_control().get_theme_icon("GridMap", "EditorIcons")
 
 func _get_unsaved_status(_for_scene: String) -> String:
-	if map_editor != null and map_editor.session.document.is_dirty():
-		return "The Map document has unsaved changes. Save untitled maps with Map → Save As before exiting."
-	return ""
+	return map_editor.unsaved_status() if map_editor != null else ""
 
 func _save_external_data() -> void:
 	if map_editor != null:
@@ -112,9 +112,7 @@ func build_meshes():
 	if loader == map_editor.session.loader.get_ref():
 		map_editor.bake()
 		return
-	var result: Dictionary = loader.call("build_meshes_checked")
-	if map_editor.session.report(result):
-		get_editor_interface().mark_scene_as_unsaved()
+	map_editor.commit_bake(loader)
 	refresh_materials()
 
 func create_materials_panel() -> Control:
