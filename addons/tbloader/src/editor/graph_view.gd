@@ -12,6 +12,7 @@ var cursor = Vector2.ZERO
 var anchor = Vector3.ZERO
 var delta = Vector3.ZERO
 var resize_face: Dictionary = {}
+var drag_component: Dictionary = {}
 var clip_points: Array[Vector3] = []
 var clip_flip = false
 var shift_drag = false
@@ -22,6 +23,7 @@ func _ready() -> void:
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	custom_minimum_size = Vector2(240, 180)
 	clip_contents = true
+	tooltip_text = "Components: Shift-click adds/toggles; Alt-click cycles overlapping handles. Drag a selected handle to move the group; hold Shift during motion to constrain an axis."
 	focus_exited.connect(cancel)
 	focus_entered.connect(func(): host.active_graph = self; host.refresh_status(); queue_redraw())
 
@@ -66,6 +68,7 @@ func cancel() -> void:
 	gesture = ""
 	delta = Vector3.ZERO
 	resize_face.clear()
+	drag_component.clear()
 	queue_redraw()
 
 func hit_brush(position: Vector2) -> int:
@@ -94,6 +97,8 @@ func hit_point(position: Vector2) -> int:
 
 func silhouette(position: Vector2) -> Dictionary:
 	for id in host.session.selected:
+		if host.session.hidden.has(id):
+			continue
 		var brush: Dictionary = host.session.brush(id)
 		for face in brush.faces:
 			if absf(face.normal[orientation]) > 0.001:
@@ -105,26 +110,43 @@ func silhouette(position: Vector2) -> Dictionary:
 					return {"brush_id": id, "index": face.index, "kind": "face", "topology_revision": brush.topology_revision}
 	return {}
 
-func pick_component(position: Vector2, mode: String) -> Dictionary:
+func pick_component(position: Vector2, mode: String, cycle = false) -> Dictionary:
+	var hits: Array = []
+	var face_bodies: Array = []
 	for id in host.session.selected:
+		if host.session.hidden.has(id):
+			continue
 		var brush: Dictionary = host.session.brush(id)
 		if mode == "Face":
-			var edge = silhouette(position)
-			if not edge.is_empty():
-				return edge
 			for face in brush.faces:
+				var component = {"brush_id": id, "index": face.index, "kind": "face", "topology_revision": brush.topology_revision}
 				var polygon = PackedVector2Array()
 				for p in face.winding:
 					polygon.append(project(p))
-				if polygon.size() >= 3 and Geometry2D.is_point_in_polygon(position, polygon):
-					return {"brush_id": id, "index": face.index, "kind": "face", "topology_revision": brush.topology_revision}
+				if absf(face.normal[orientation]) <= 0.001:
+					for i in polygon.size():
+						var p = polygon[i]
+						var q = polygon[(i + 1) % polygon.size()]
+						if p.distance_to(q) > 1 and position.distance_to(Geometry2D.get_closest_point_to_segment(position, p, q)) < 8:
+							hits.append(component)
+							break
+				elif polygon.size() >= 3 and Geometry2D.is_point_in_polygon(position, polygon):
+					face_bodies.append(component)
 		else:
 			var count: int = brush.vertices.size() if mode == "Vertex" else brush.edge_vertex_indices.size() / 2
 			for i in count:
 				var p: Vector3 = brush.vertices[i] if mode == "Vertex" else (brush.vertices[brush.edge_vertex_indices[i * 2]] + brush.vertices[brush.edge_vertex_indices[i * 2 + 1]]) * 0.5
 				if project(p).distance_to(position) < 12:
-					return {"brush_id": id, "index": i, "kind": mode.to_lower(), "topology_revision": brush.topology_revision}
-	return {}
+					hits.append({"brush_id": id, "index": i, "kind": mode.to_lower(), "topology_revision": brush.topology_revision})
+	hits.append_array(face_bodies)
+	if hits.is_empty():
+		return {}
+	# Alt cycles coincident projected handles, including the far side of a brush.
+	if cycle and not host.session.components.is_empty():
+		var previous = hits.find(host.session.components.back())
+		if previous >= 0:
+			return hits[(previous + 1) % hits.size()]
+	return hits[0]
 
 func _gui_input(event: InputEvent) -> void:
 	if event is InputEventKey:
@@ -171,15 +193,16 @@ func _gui_input(event: InputEvent) -> void:
 			delta = snap_point(unproject(cursor) - anchor)
 			delta[orientation] = 0
 			var a = axes()
-			if shift_drag and gesture in ["move", "component", "resize"]:
-				delta[a.y if absf(delta[a.x]) > absf(delta[a.y]) else a.x] = 0
 			if ctrl_drag and gesture == "move" and not host.session.selected.is_empty():
 				var reference: Vector3 = host.session.workzone.position
 				delta = snap_point(reference + unproject(cursor) - anchor) - reference
 				delta[orientation] = 0
 			if gesture in ["resize", "component"]:
-				var component: Dictionary = resize_face if gesture == "resize" else host.session.components[0]
+				var component: Dictionary = resize_face if gesture == "resize" else drag_component
 				var brush: Dictionary = host.session.brush(component.brush_id)
+				if not host.session.component_valid(component, brush):
+					cancel()
+					return
 				var reference: Vector3
 				if component.kind == "face":
 					reference = brush.faces[component.index].center
@@ -189,6 +212,8 @@ func _gui_input(event: InputEvent) -> void:
 					reference = (brush.vertices[brush.edge_vertex_indices[component.index * 2]] + brush.vertices[brush.edge_vertex_indices[component.index * 2 + 1]]) * 0.5
 				delta = snap_point(reference + unproject(cursor) - anchor) - reference
 				delta[orientation] = 0
+			if shift_drag and gesture in ["move", "component", "resize"]:
+				delta[a.y if absf(delta[a.x]) > absf(delta[a.y]) else a.x] = 0
 		queue_redraw()
 		accept_event()
 
@@ -206,11 +231,11 @@ func begin_left(event: InputEventMouseButton) -> void:
 		queue_redraw()
 		return
 	if (host.tool in ["Face", "Vertex", "Edge"] or event.ctrl_pressed) and not host.session.selected.is_empty():
-		var component = pick_component(start, "Face" if event.ctrl_pressed else host.tool)
-		host.session.components = [] if component.is_empty() else [component]
-		if not component.is_empty():
+		var component = pick_component(start, "Face" if event.ctrl_pressed else host.tool, event.alt_pressed)
+		host.session.select_component(component, event.shift_pressed)
+		if not component.is_empty() and not event.shift_pressed:
+			drag_component = component.duplicate()
 			gesture = "component"
-		host.session.changed.emit()
 		return
 	var point_id = hit_point(start)
 	var id = hit_brush(start)
@@ -283,17 +308,12 @@ func finish_left(event: InputEventMouseButton) -> void:
 				if r.ok:
 					r = session.document.translate_point_entities(session.points, movement)
 				return r)
+		elif gesture == "resize":
+			var component = resize_face.duplicate()
+			session.transact("Resize map face", func():
+				return session.document.translate_face(component.brush_id, component.index, movement, component.topology_revision))
 		else:
-			var component: Dictionary = resize_face if gesture == "resize" else session.components[0]
-			session.transact("Resize map face" if gesture == "resize" else "Move map component", func():
-				if component.kind == "face":
-					return session.document.translate_face(component.brush_id, component.index, movement, component.topology_revision)
-				var indices = PackedInt32Array([component.index])
-				if component.kind == "edge":
-					var b: Dictionary = session.brush(component.brush_id)
-					indices = PackedInt32Array([b.edge_vertex_indices[component.index * 2], b.edge_vertex_indices[component.index * 2 + 1]])
-				return session.document.translate_vertices(component.brush_id, indices, movement, component.topology_revision))
-		session.select(session.selected, session.points)
+			session.transact("Move map components", func(): return session.move_components(movement))
 	cancel()
 
 func box_select(end: Vector2) -> void:
@@ -384,12 +404,23 @@ func _draw() -> void:
 			for p in vertices:
 				draw_circle(project(p), 4, color)
 		for component in host.session.components:
-			if component.brush_id == brush.id and component.kind == "face":
+			if component.brush_id != brush.id or not host.session.component_valid(component, brush):
+				continue
+			if component.kind == "face":
 				var polygon = PackedVector2Array()
 				for p in brush.faces[component.index].winding:
 					polygon.append(project(p))
 				if polygon.size() >= 3 and absf(brush.faces[component.index].normal[orientation]) > 0.001:
 					draw_colored_polygon(polygon, Color(1, 0.6, 0.1, 0.25))
+				for i in polygon.size():
+					draw_line(polygon[i], polygon[(i + 1) % polygon.size()], Color("ffe6a6"), 3)
+			elif component.kind == "vertex":
+				draw_circle(project(brush.vertices[component.index]), 6, Color("ffe6a6"))
+			else:
+				var p: Vector3 = brush.vertices[brush.edge_vertex_indices[component.index * 2]]
+				var q: Vector3 = brush.vertices[brush.edge_vertex_indices[component.index * 2 + 1]]
+				draw_line(project(p), project(q), Color("ffe6a6"), 3)
+				draw_circle(project((p + q) * 0.5), 6, Color("ffe6a6"))
 	for marker in host.session.point_markers():
 		var p = project(marker.origin + (delta if gesture == "move" and host.session.points.has(marker.id) else Vector3.ZERO))
 		var color = Color("ffb657") if host.session.points.has(marker.id) else Color("83dfbd")

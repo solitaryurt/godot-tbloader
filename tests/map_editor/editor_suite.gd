@@ -20,13 +20,14 @@ func find_tb_plugin(node: Node) -> EditorPlugin:
 			return found
 	return null
 
-func mouse(graph: Control, position: Vector2, pressed: bool, button_index: int = MOUSE_BUTTON_LEFT, shift = false, ctrl = false) -> void:
+func mouse(graph: Control, position: Vector2, pressed: bool, button_index: int = MOUSE_BUTTON_LEFT, shift = false, ctrl = false, alt = false) -> void:
 	var event = InputEventMouseButton.new()
 	event.position = position
 	event.button_index = button_index
 	event.pressed = pressed
 	event.shift_pressed = shift
 	event.ctrl_pressed = ctrl
+	event.alt_pressed = alt
 	graph._gui_input(event)
 
 func motion(graph: Control, position: Vector2, relative = Vector2.ZERO, shift = false, ctrl = false) -> void:
@@ -394,6 +395,7 @@ func run() -> void:
 	loader.free()
 	await binding_journey(plugin)
 	precision_journey()
+	await phase5_journey()
 	if suite == "ui":
 		print("TB_UI_STAGE: capturing rendered quad")
 		checks.check(DisplayServer.get_name() != "headless", "display-backed journey")
@@ -637,3 +639,252 @@ func precision_journey() -> void:
 	graph.zoom = 1
 	ui.set_tool("Brush")
 	ui.graph_a.grab_focus()
+
+func click_component(graph: Control, position: Vector3, toggle = false) -> void:
+	mouse(graph, graph.project(position), true, MOUSE_BUTTON_LEFT, toggle)
+	mouse(graph, graph.project(position), false, MOUSE_BUTTON_LEFT, toggle)
+
+func solid_volume(b: Dictionary) -> float:
+	var center = Vector3.ZERO
+	for p in b.vertices:
+		center += p
+	center /= b.vertices.size()
+	var volume = 0.0
+	var valid = b.vertices.size() - b.edge_vertex_indices.size() / 2 + b.faces.size() == 2
+	for face in b.faces:
+		valid = valid and face.winding.size() >= 3 and face.normal.is_normalized() and face.normal.dot(face.center - center) > 0
+		for p in b.vertices:
+			valid = valid and face.normal.dot(p - face.center) <= 0.001
+		for p in face.winding:
+			valid = valid and absf(face.normal.dot(p - face.center)) < 0.001
+		for i in range(1, face.winding.size() - 1):
+			var a: Vector3 = face.winding[0] - center
+			var c: Vector3 = face.winding[i] - center
+			var d: Vector3 = face.winding[i + 1] - center
+			valid = valid and (c - a).cross(d - a).dot(face.normal) < 0
+			volume -= a.dot(c.cross(d)) / 6.0
+	checks.check(valid and volume > 0, "UI result has bounded convex planar outward clockwise solid")
+	return volume
+
+func phase5_journey() -> void:
+	print("TB_UI_STAGE: Phase5 component batches, cap/clip direction and all prism axes")
+	var original = ui.session
+	var scratch = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	ui.set_session(scratch)
+	var graph = ui.graph_a
+	graph.grab_focus()
+	graph.orientation = 2
+	graph.origin = Vector3(32, 32, 32)
+	graph.zoom = 2
+	var doc = scratch.document
+	var id: int = doc.create_cuboid(Vector3.ZERO, Vector3.ONE * 64, "baseline/checker").value
+	scratch.select(PackedInt64Array([id]))
+	var baseline: Dictionary = scratch.capture()
+	ui.set_tool("Face")
+	click_component(graph, Vector3(0, 32, 32))
+	click_component(graph, Vector3(64, 32, 32), true)
+	checks.check(scratch.components.size() == 2, "Shift adds second face")
+	click_component(graph, Vector3(64, 32, 32), true)
+	checks.check(scratch.components.size() == 1, "Shift toggles selected face off")
+	click_component(graph, Vector3(64, 32, 32), true)
+	await capture_phase5("faces")
+	var before = text()
+	var count: int = ui.tokens.filter(func(token): return token.session == scratch).size()
+	drag(graph, Vector3(0, 32, 32), Vector3(128, 32, 32))
+	checks.check(scratch.brush(id).aabb_min.x == 128 and scratch.brush(id).aabb_max.x == 192, "graph moves all selected planes atomically past invalid intermediate hull")
+	checks.check(ui.tokens.filter(func(token): return token.session == scratch).size() == count + 1, "multi-face gesture records exactly one originating-session action")
+	checks.check(scratch.components.size() == 2, "successful face batch retains both selections")
+	var moved = text()
+	key(KEY_Z, true)
+	checks.check(text() == before and scratch.components.size() == 2 and scratch.components.all(func(c): return scratch.component_valid(c, scratch.brush(c.brush_id))), "face batch undo restores selection with fresh topology guards")
+	key(KEY_Y, true)
+	checks.check(text() == moved and scratch.components.size() == 2, "face batch redo restores geometry and selected faces")
+	key(KEY_Z, true)
+	# Assign to a selected face and compare every other plane, winding and UV.
+	click_component(graph, Vector3(64, 32, 32), true)
+	var selected_face: int = scratch.components[0].index
+	var source: Dictionary = scratch.brush(id)
+	var uvs: Array = []
+	for face in source.faces:
+		uvs.append(doc.get_face_uv(id, face.index, source.topology_revision).value)
+	ui.texture_field.text = "common/caulk"
+	ui.assign_texture()
+	var textured: Dictionary = scratch.brush(id)
+	for face in textured.faces:
+		checks.check(face.winding == source.faces[face.index].winding and face.normal == source.faces[face.index].normal and doc.get_face_uv(id, face.index, textured.topology_revision).value == uvs[face.index], "selected-face material preserves every plane and UV")
+		checks.check(face.texture == ("common/caulk" if face.index == selected_face else "baseline/checker"), "selected-face material affects only selected index")
+	key(KEY_Z, true)
+	checks.check(text() == before and scratch.components.size() == 1, "material undo restores selected face")
+	# A stale component cannot be silently rebound by material or deformation tools.
+	var stale: Array = scratch.components.duplicate(true)
+	doc.rebuild()
+	scratch.components = stale
+	count = ui.tokens.size()
+	ui.assign_texture()
+	checks.check(text() == before and ui.tokens.size() == count and ui.notice.text.contains("STALE_COMPONENT"), "material assignment rejects stale selection")
+	checks.check(not scratch.transact("Stale component test", func(): return scratch.move_components(Vector3(16, 0, 0))) and text() == before and ui.tokens.size() == count, "batch deformation rejects stale selection without history")
+	scratch.transact("Create beside stale selection", func(): return doc.create_cuboid(Vector3(128, 0, 0), Vector3(192, 64, 64), "baseline/checker"))
+	key(KEY_Z, true)
+	checks.check(text() == before and scratch.components.is_empty(), "unrelated edit undo never revives a stale component as a fresh index")
+	scratch.restore(baseline)
+	ui.set_tool("Edge")
+	click_component(graph, Vector3(64, 0, 32))
+	click_component(graph, Vector3(64, 64, 32), true)
+	checks.check(scratch.components.size() == 2, "Shift adds second edge")
+	click_component(graph, Vector3(64, 64, 32), true)
+	checks.check(scratch.components.size() == 1, "Shift toggles edge off")
+	click_component(graph, Vector3(64, 64, 32), true)
+	count = ui.tokens.size()
+	mouse(graph, graph.project(Vector3(64, 64, 32)), true)
+	motion(graph, graph.project(Vector3(96, 80, 32)), Vector2.ZERO, true)
+	checks.check(graph.delta == Vector3(32, 0, 0) and text() == before, "axis constraint applies after component reference snapping; preview is disposable")
+	mouse(graph, graph.project(Vector3(96, 80, 32)), false)
+	checks.check(scratch.brush(id).aabb_max == Vector3(96, 64, 64) and scratch.components.size() == 2 and ui.tokens.size() == count + 1, "all selected edges move together with one constrained commit")
+	checks.check(is_equal_approx(solid_volume(scratch.brush(id)), 96 * 64 * 64), "edge batch expected expanded volume")
+	await capture_phase5("edges")
+	key(KEY_Z, true)
+	checks.check(text() == before and scratch.components.size() == 2, "edge batch undo selection")
+	key(KEY_Y, true)
+	checks.check(scratch.components.size() == 2 and scratch.components.all(func(c): return scratch.component_valid(c, scratch.brush(id))), "edge batch redo safely remaps edge handles")
+	key(KEY_Z, true)
+	# Reject a nonplanar corner in a cube with no document/cache/history changes.
+	ui.set_tool("Vertex")
+	mouse(graph, graph.project(Vector3(32, 32, 32)), true, MOUSE_BUTTON_LEFT, false, true)
+	mouse(graph, graph.project(Vector3(32, 32, 32)), false, MOUSE_BUTTON_LEFT, false, true)
+	checks.check(scratch.components.size() == 1 and scratch.components[0].kind == "face", "Ctrl LMB retains quick-face selection in component modes")
+	ui.set_tool("Vertex")
+	click_component(graph, Vector3(64, 64, 0))
+	mouse(graph, graph.project(Vector3(64, 64, 0)), true, MOUSE_BUTTON_LEFT, true, false, true)
+	mouse(graph, graph.project(Vector3(64, 64, 0)), false, MOUSE_BUTTON_LEFT, true, false, true)
+	checks.check(scratch.components.size() == 2 and scratch.components[0].index != scratch.components[1].index, "Shift Alt adds coincident far-side vertex without losing near-side selection")
+	drag(graph, Vector3(64, 64, 0), Vector3(80, 64, 0))
+	checks.check(scratch.brush(id).vertices.has(Vector3(80, 64, 0)) and scratch.brush(id).vertices.has(Vector3(80, 64, 64)), "incident grouped cube vertices move as a valid constrained edge")
+	key(KEY_Z, true)
+	ui.set_tool("Vertex")
+	var revision: int = doc.get_revision()
+	count = ui.tokens.size()
+	drag(graph, Vector3(64, 64, 0), Vector3(80, 80, 0))
+	checks.check(text() == before and doc.get_revision() == revision and ui.tokens.size() == count and ui.notice.text.contains("INVALID_GEOMETRY"), "nonplanar single quad corner rejected atomically")
+	# A valid first brush and invalid second brush must both remain untouched.
+	var second: int = doc.create_cuboid(Vector3(128, 0, 0), Vector3(192, 64, 64), "baseline/checker").value
+	scratch.select(PackedInt64Array([id, second]))
+	ui.set_tool("Edge")
+	click_component(graph, Vector3(64, 64, 32))
+	click_component(graph, Vector3(160, 64, 0), true)
+	checks.check(scratch.components.size() == 2 and scratch.components[0].brush_id != scratch.components[1].brush_id, "multi-brush edge selection")
+	before = text()
+	revision = doc.get_revision()
+	count = ui.tokens.size()
+	drag(graph, Vector3(64, 64, 32), Vector3(80, 80, 32))
+	checks.check(text() == before and doc.get_revision() == revision and ui.tokens.size() == count and scratch.components.size() == 2, "invalid later brush leaves entire selected group and history intact")
+	scratch.restore(baseline)
+	# Triangular incident faces permit constrained single and grouped vertex edits.
+	doc.clip_brushes(PackedInt64Array([id]), Vector3(64, 0, 0), Vector3(0, 0, 64), Vector3(0, 64, 0), false)
+	scratch.select(PackedInt64Array([id]))
+	ui.set_tool("Vertex")
+	before = text()
+	drag(graph, Vector3(64, 0, 0), Vector3(80, 0, 0))
+	checks.check(scratch.brush(id).vertices.has(Vector3(80, 0, 0)) and scratch.components.size() == 1, "constrained tetrahedron vertex drag succeeds")
+	checks.check(is_equal_approx(solid_volume(scratch.brush(id)), 80 * 64 * 64 / 6.0), "single vertex expected volume")
+	key(KEY_Z, true)
+	checks.check(text() == before and scratch.components.size() == 1, "vertex undo restores selected corner")
+	click_component(graph, Vector3(0, 64, 0), true)
+	checks.check(scratch.components.size() == 2, "Shift adds vertex")
+	click_component(graph, Vector3(0, 64, 0), true)
+	checks.check(scratch.components.size() == 1, "Shift toggles vertex off")
+	click_component(graph, Vector3(0, 64, 0), true)
+	drag(graph, Vector3(64, 0, 0), Vector3(80, 0, 0))
+	checks.check(scratch.brush(id).vertices.has(Vector3(80, 0, 0)) and scratch.brush(id).vertices.has(Vector3(16, 64, 0)) and scratch.components.size() == 2, "graph deforms both selected vertices")
+	await capture_phase5("vertices")
+	key(KEY_Z, true)
+	checks.check(text() == before and scratch.components.size() == 2, "multi-vertex undo selection")
+	key(KEY_Y, true)
+	checks.check(scratch.components.size() == 2 and scratch.components.all(func(c): return scratch.component_valid(c, scratch.brush(id))), "multi-vertex redo resolves fresh handles")
+	before = text()
+	key(KEY_H)
+	checks.check(scratch.components.is_empty() and scratch.hidden.has(id) and graph.pick_component(graph.project(Vector3(80, 0, 0)), "Vertex").is_empty() and text() == before, "hide clears component owners without editing geometry")
+	key(KEY_Z, true)
+	checks.check(scratch.selected.is_empty() and scratch.components.is_empty() and scratch.hidden.has(id), "snapshot undo respects current hidden-owner filter")
+	key(KEY_H, false, true)
+	# Real 2D placement + Enter/Ctrl+Enter/Shift+Enter in every orientation.
+	for axis in [2, 1, 0]:
+		graph.orientation = axis
+		var u: int = graph.axes().x
+		var v: int = graph.axes().y
+		for split in [false, true]:
+			for flipped in [false, true]:
+				scratch.restore(baseline)
+				ui.set_tool("Cut")
+				graph.clip_points.clear()
+				graph.clip_flip = false
+				var p = Vector3.ONE * 32
+				var q = p
+				p[v] = -16.2
+				q[v] = 80.2
+				click_component(graph, p)
+				click_component(graph, q)
+				checks.check(graph.clip_points.size() == 2 and graph.clip_points[0][v] == -16 and graph.clip_points[1][v] == 80, "2D clip points use shared grid")
+				var normal: Vector3 = Vector3.ZERO
+				var extrusion = Vector3.ZERO
+				extrusion[axis] = -96
+				normal = extrusion.cross(graph.clip_points[1] - graph.clip_points[0]).normalized()
+				if flipped:
+					key(KEY_ENTER, true)
+					normal = -normal
+				before = text()
+				count = ui.tokens.size()
+				key(KEY_ENTER, false, split)
+				var ids: PackedInt64Array = scratch.selected.duplicate()
+				checks.check(ids.size() == (2 if split else 1) and graph.clip_points.is_empty() and ui.tokens.size() == count + 1, "2D clip/split/flip commits one action axis %d" % axis)
+				var volume = 0.0
+				var normals: Array = []
+				for piece_id in ids:
+					var piece: Dictionary = scratch.brush(piece_id)
+					volume += solid_volume(piece)
+					if not split:
+						checks.check(piece.aabb_max[u] == 32 if normal[u] > 0 else piece.aabb_min[u] == 32, "flip retains expected half-space")
+					for face in piece.faces:
+						if absf(face.center[u] - 32) < 0.001 and absf(face.normal[u]) > 0.99:
+							normals.append(face.normal)
+							var uv: Dictionary = doc.get_face_uv(piece_id, face.index, piece.topology_revision).value
+							checks.check(face.texture == "common/caulk" and uv.projection == "classic" and uv.shift == Vector2.ZERO and uv.rotation == 0 and uv.scale == Vector2.ONE, "UI clip cap uses caulk identity UV")
+				checks.check(is_equal_approx(volume, 64 * 64 * 64 * (1.0 if split else 0.5)), "UI clip volume conservation")
+				checks.check(normals.size() == ids.size() and (not split or normals[0] == -normals[1]), "UI cap counts and complementary orientation")
+				if axis == 2 and split and not flipped:
+					await capture_phase5("split")
+				moved = text()
+				key(KEY_Z, true)
+				checks.check(text() == before and scratch.selected == PackedInt64Array([id]), "clip undo topology and selection")
+				key(KEY_Y, true)
+				checks.check(text() == moved and scratch.selected == ids, "clip redo result identities and selection")
+		for sides in range(3, 10):
+			scratch.restore(baseline)
+			ui.set_tool("Brush")
+			key(KEY_0 + sides, true)
+			var prism: Dictionary = scratch.brush(id)
+			checks.check(prism.faces.size() == sides + 2 and prism.vertices.size() == sides * 2 and prism.aabb_min[axis] == 0 and prism.aabb_max[axis] == 64, "Ctrl %d prism expected axis %d caps and depth" % [sides, axis])
+			checks.check(is_equal_approx(solid_volume(prism), sides * sin(TAU / sides) / 8.0 * 64 * 64 * 64), "UI prism analytic volume")
+			var roundtrip = ClassDB.instantiate("TBMapDocument")
+			checks.check(roundtrip.import_text(text()).ok and roundtrip.export_text().value == text(), "UI prism canonical round-trip")
+			key(KEY_Z, true)
+			checks.check(scratch.brush(id).faces.size() == 6 and scratch.selected == PackedInt64Array([id]), "prism undo restores selected cube")
+	scratch.save_enabled = false
+	ui.set_session(original)
+	graph.orientation = 2
+	graph.origin = Vector3.ZERO
+	graph.zoom = 1
+	graph.clip_flip = false
+	ui.set_tool("Brush")
+	graph.grab_focus()
+
+func capture_phase5(label: String) -> void:
+	if OS.get_environment("TB_TEST_SUITE") != "ui":
+		return
+	ui.camera_view.frame_selection()
+	ui.set_status("Phase 5 acceptance • " + label)
+	await get_tree().process_frame
+	await get_tree().process_frame
+	RenderingServer.force_draw()
+	var image = EditorInterface.get_base_control().get_viewport().get_texture().get_image()
+	checks.check(not image.is_empty(), "rendered Phase5 " + label)
+	checks.check(image.save_png("res://phase5-" + label + ".png") == OK, "Phase5 overlay screenshot " + label)

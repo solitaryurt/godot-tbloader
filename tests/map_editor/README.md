@@ -21,14 +21,17 @@ failure cleanup, external changes/removal and path aliases. It also retains the 
 **TBLoader** cube bake, coordinate conversion/bounds, twelve triangles, finite UVs,
 normals, collision and imported texture checks, and adds empty-worldspawn bake.
 
-`editor` runs an actual `@tool EditorPlugin` inside `--editor`: addon startup,
-Build Meshes visibility callbacks, Map Materials, real EditorUndoRedoManager
-commit/undo/redo, and addon disable/re-enable with released controls. Scene-bound
-document history and graph interaction are Phase 3 tests, not current coverage.
+`editor` runs an actual `@tool EditorPlugin` inside `--editor`: real graph handlers,
+component groups, clip/flip/split, all 21 prism combinations, material/UV and entity
+editing, persistence, originating-session global history, scene bake history and
+addon disable/re-enable with released controls.
 
-`ui` is **display feasibility/editor smoke only**, adding a rendered screenshot
-to the editor suite. It requires a display, never falls back to headless, and does
-not implement the Phase 6 editing journey or window-system input automation.
+`ui` runs the editor acceptance with a display, adding rendered intermediate
+face/edge/vertex/split captures and a main-screen screenshot. It requires a display
+and never falls back to headless. Use `ui_journey_runner.py` with the same arguments
+to retain the project and launch a fresh-process reopen/rebake gate. Tests use real
+in-engine handlers, not window-system mouse injection; full Phase 6 manual UX and
+representative-map performance acceptance remain open.
 The runner selects X11 when `DISPLAY` is set, otherwise Wayland.
 Here X11 `:0` works; Wayland `wayland-1` produces engine GLES3 errors/crash.
 
@@ -96,5 +99,8 @@ normal extension binary untouched. `CXX` and `TB_NATIVE_OUTPUT` override compile
 output path. The Godot wrapper and filesystem API are covered by the runtime suite,
 not by this standalone instrumentation target.
 
-Brush operations, draw/preview data, entity authoring and larger-map performance
-coverage are upcoming gates. See [implementation contract/progress](../../MAP_EDITOR_IMPLEMENTATION.md).
+Native document checks include validated brush/component batches, draw/preview
+geometry, caulk caps with identity UV, source projection/flag preservation, analytic
+volumes, N=3…9 prisms on all axes, canonical round-trips and entity authoring.
+See [implementation contract](../../MAP_EDITOR_IMPLEMENTATION.md) and
+[latest acceptance counts/artifacts](../../MAP_EDITOR_UI_IMPLEMENTATION.md).

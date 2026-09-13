@@ -378,6 +378,7 @@ void TBMapDocument::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("delete_entities", "ids", "delete_owned_brushes"), &TBMapDocument::delete_entities);
 	ClassDB::bind_method(D_METHOD("make_prism", "id", "sides", "axis"), &TBMapDocument::make_prism);
 	ClassDB::bind_method(D_METHOD("translate_vertices", "id", "vertex_indices", "delta", "topology_revision"), &TBMapDocument::translate_vertices);
+	ClassDB::bind_method(D_METHOD("translate_components", "components", "delta"), &TBMapDocument::translate_components);
 	ClassDB::bind_method(D_METHOD("clip_brushes", "ids", "p0", "p1", "p2", "split"), &TBMapDocument::clip_brushes);
 	ADD_SIGNAL(MethodInfo("map_changed", PropertyInfo(Variant::INT, "revision")));
 	ADD_SIGNAL(MethodInfo("preview_changed"));

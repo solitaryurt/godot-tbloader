@@ -27,6 +27,7 @@ class TBMapDocument : public RefCounted {
 	Dictionary finish_edit(const LMMapEdit &edit, const StringName &operation, const Variant &value = Variant());
 	Dictionary check_brushes(const PackedInt64Array &ids, const StringName &operation) const;
 	Dictionary check_face(int64_t id, int face, int64_t token, const StringName &operation) const;
+	Dictionary move_components(const Array &components, Vector3 delta, const StringName &operation);
 	void resolve_texture_sizes(LMMapData &data, const Dictionary &sizes) const;
 
 	Dictionary replace_text(const std::string &text, const StringName &operation, const String &new_path, bool saved);
@@ -82,6 +83,7 @@ public:
 	Dictionary delete_entities(const PackedInt64Array &ids, bool delete_owned_brushes);
 	Dictionary make_prism(int64_t id, int sides, int axis);
 	Dictionary translate_vertices(int64_t id, const PackedInt32Array &vertex_indices, Vector3 delta, int64_t topology_revision);
+	Dictionary translate_components(const Array &components, Vector3 delta);
 	Dictionary clip_brushes(const PackedInt64Array &ids, Vector3 p0, Vector3 p1, Vector3 p2, bool split);
 };
 }

@@ -1,6 +1,6 @@
 # Map editor implementation contract and progress
 
-Phases 0–2 native, 2026-09-13. Specification: [MAP_EDITOR_PRD.md](MAP_EDITOR_PRD.md),
+Phases 0–5 integration, 2026-09-13. Specification: [MAP_EDITOR_PRD.md](MAP_EDITOR_PRD.md),
 especially §§6–8 and 14–16. **API v1 is frozen and the native operation/query surface
 is implemented.** The Phase 2 handoff below adds the N-inspector entity API.
 Changes require updating this document and its consumers together.
@@ -16,7 +16,13 @@ Changes require updating this document and its consumers together.
 - [x] Display feasibility established using existing X11 display `:0`.
 - [x] Phase 1: transactional document, semantic persistence, identity and ownership gate.
 - [x] Phase 2 native: validated brush/entity operations, clipboard and draw/preview.
-- [ ] Remaining Phases 2–6: material-browser integration, authoring UI and acceptance.
+- [x] Phases 3–4: integrated browser, authoring views, inspector and checked bake/history.
+- [x] Phase 5: atomic component groups, caulk clip caps, graph/clip/prism acceptance.
+- [ ] Phase 6: full window-system UX and representative-map performance acceptance.
+
+Latest integrated verification and limitations:
+[Map editor UI implementation](MAP_EDITOR_UI_IMPLEMENTATION.md#phase-5-acceptance--2026-09-13).
+Phase 5 adds the backwards-compatible `translate_components` batch API below.
 
 Supported **tested baseline**: Linux x86_64, Godot
 `4.8.dev.custom_build.3924ec46f`, executable
@@ -217,6 +223,7 @@ user input errors return diagnostics rather than `push_error`/assert/crash.
 | `delete_brushes(ids)`, `translate_brushes(ids,delta)`, `make_prism(id,sides,axis)` | null |
 | `translate_face(id,face,delta,topology_revision:int)` | null |
 | `translate_vertices(id,vertex_indices,delta,topology_revision:int)` | null |
+| `translate_components(components:Array,delta:Vector3)` | null; atomic face/edge/vertex group, schema below |
 | `set_brush_texture(ids,name)` | null |
 | `set_face_texture(id,face,name,topology_revision:int)` | null |
 | `get_face_uv(id,face,topology_revision:int)` | UV Dictionary |
@@ -487,6 +494,7 @@ Every selected handle is validated before committing any candidate.
 | `translate_brushes(ids,delta:Vector3)` | null; move all supporting plane points once; projection parameters retained (no texture lock) |
 | `translate_face(id,face:int,delta:Vector3,topology_revision:int)` | null; normal component of delta moves the plane; tangent-only motion is a no-op |
 | `translate_vertices(id,vertex_indices,delta,topology_revision)` | null; requires planar faces and exactly the requested closed convex hull; nonplanar/collapsed/unexpected hull changes reject atomically |
+| `translate_components(components:Array,delta:Vector3)` | null; validates all tokens, deduplicates components/shared vertices, stages all brushes and commits once; failed groups preserve all state/signals |
 | `make_prism(id,sides:int,axis:int)` | null; replaces hull inside current AABB, 3..62 sides, extrusion axis 0=X/1=Y/2=Z; elliptical cross-section for asymmetric bounds; inherits first face's material/UV/flags |
 | `clip_brushes(ids,p0,p1,p2,split:bool)` | Surviving result brush IDs in selection order; semantics below |
 | `export_selection(ids)` / `import_selection(text:String)` | Map String / fresh brush IDs; in-place paste, world brushes merge, other owners clone ordered epairs with new entity IDs |
@@ -500,9 +508,28 @@ One-sided clipping keeps `normal.dot(vertex-p0) <= 0`: intersected brushes retai
 their ID, fully discarded brushes disappear. Split allocates **two fresh IDs**
 only for intersected brushes (negative half first), and retains original IDs for
 uncut brushes. Tangency is a no-op; classification tolerance is 1e-5 map units.
-Cut faces inherit the first source face's material/UV/flags. Empty old planes are
+Cut faces use `common/caulk`, classic UV shift/rotation zero, scale one, no surface
+flags. Surviving source faces retain their planes/material/projection/UV/flags.
+Empty old planes are
 pruned on a disposable candidate before whole-document validation. A 64-plane
 source that needs another plane returns `LIMIT_EXCEEDED`; no partial batch edit.
+
+`translate_components` takes dictionaries with `brush_id:int`, `kind:String`
+(`"face"`, `"edge"`, `"vertex"`), `index:int`, `topology_revision:int`. Indices refer
+to current copied draw data (edge index addresses the pair at `index * 2`). Invalid
+schema/kind/index, stale tokens and missing owners reject the whole operation.
+Face groups translate each supporting plane by the normal projection of delta.
+Vertex/edge groups union incident vertex indices per brush and move each once;
+the validated hull must contain exactly the requested vertices. Mixing face and
+vertex/edge deformation within one brush rejects as ambiguous. Across brushes,
+the final candidate is validated before any live content, revision or signal changes.
+The existing `translate_vertices` delegates to this same validation path and keeps
+its original Result/error operation names.
+
+The UI rebinds saved component indices only after successful matching-snapshot
+restore, or an explicitly geometry-preserving surface edit. Successful vertex/edge
+movement resolves the moved positions into fresh indices. Other stale selections
+are pruned or rejected; hidden owners remain excluded across undo/redo.
 
 Empty selection exports `""`; empty/whitespace clipboard imports no-op. Clipboard
 patch primitives reject with `UNSUPPORTED_SYNTAX`; point-only clipboard entities
@@ -582,7 +609,7 @@ Commands use repository root and retain runtime input/library hashes in artifact
   lies on the diagonal face of a triangular prism). Corrected the test to use the
   convex hull's mean vertex position; positive volumes and outward windings pass.
 
-Next native/UI integration gate: material browser consumes the texture APIs;
-authoring views consume copied draw/preview data and use snapshots for gestures.
-Phase 4 inspector/bake integration, Phase 5 interaction tools, full Phase 6 UI
-acceptance and representative-map performance measurement remain pending.
+Phases 3–5 integration now passes the expanded native, editor and X11 journey gates;
+see [current evidence and remaining limitations](MAP_EDITOR_UI_IMPLEMENTATION.md).
+Full Phase 6 window-system acceptance and representative-map performance measurement
+remain pending. Historical results above are retained as phase-specific evidence.

@@ -23,7 +23,9 @@ var was_bound = false
 
 func capture() -> Dictionary:
 	return {"native": document.snapshot().value, "selected_brush_ids": selected.duplicate(),
-		"points": points.duplicate(), "components": components.duplicate(true), "workzone": workzone}
+		"points": points.duplicate(),
+		"components": components.filter(func(c): return component_valid(c, brush(c.brush_id))).duplicate(true),
+		"workzone": workzone}
 
 func restore(state: Dictionary) -> void:
 	var result: Dictionary = document.restore_snapshot(state.native)
@@ -33,7 +35,10 @@ func restore(state: Dictionary) -> void:
 	save_enabled = true
 	selected = state.selected_brush_ids.duplicate()
 	points = state.points.duplicate()
-	components.clear() # Native restore always invalidates topology tokens.
+	# Only a matching native snapshot permits rebinding saved component indices.
+	# Arbitrary live/stale tokens are never refreshed this way.
+	components = state.components.duplicate(true)
+	rebind_components()
 	workzone = state.workzone
 	prune()
 	changed.emit()
@@ -58,7 +63,6 @@ func transact(label: String, operation: Callable) -> bool:
 	if before.native.text == after.native.text:
 		changed.emit()
 		return false
-	components.clear()
 	var token = Action.new()
 	token.session = self
 	token.before = before
@@ -81,6 +85,63 @@ func brush(id: int) -> Dictionary:
 			return item
 	return {}
 
+func component_valid(component: Dictionary, item: Dictionary) -> bool:
+	if item.is_empty() or not selected.has(component.brush_id) or hidden.has(component.brush_id):
+		return false
+	var count: int = item.faces.size() if component.kind == "face" else (item.vertices.size() if component.kind == "vertex" else item.edge_vertex_indices.size() / 2)
+	return component.kind in ["face", "edge", "vertex"] and component.topology_revision == item.topology_revision and component.index >= 0 and component.index < count
+
+func rebind_components() -> void:
+	for component in components:
+		var item = brush(component.brush_id)
+		if not item.is_empty():
+			component.topology_revision = item.topology_revision
+
+func select_component(component: Dictionary, toggle: bool) -> void:
+	prune()
+	if component.is_empty():
+		if not toggle:
+			components.clear()
+	elif toggle:
+		var index = components.find(component)
+		if index >= 0:
+			components.remove_at(index)
+		else:
+			components.append(component)
+	elif not components.has(component):
+		components = [component]
+	changed.emit()
+
+func move_components(movement: Vector3) -> Dictionary:
+	var old: Dictionary = {}
+	for component in components:
+		old[component.brush_id] = brush(component.brush_id)
+	var result: Dictionary = document.translate_components(components, movement)
+	if not result.ok or not result.changed:
+		return result
+	# Vertex ordering is cache-derived. Resolve moved positions, not old indices.
+	for component in components:
+		var item = brush(component.brush_id)
+		var source: Dictionary = old[component.brush_id]
+		if component.kind == "vertex":
+			component.index = vertex_at(item, source.vertices[component.index] + movement)
+		elif component.kind == "edge":
+			var a = vertex_at(item, source.vertices[source.edge_vertex_indices[component.index * 2]] + movement)
+			var b = vertex_at(item, source.vertices[source.edge_vertex_indices[component.index * 2 + 1]] + movement)
+			component.index = -1
+			for i in range(0, item.edge_vertex_indices.size(), 2):
+				if (item.edge_vertex_indices[i] == a and item.edge_vertex_indices[i + 1] == b) or (item.edge_vertex_indices[i] == b and item.edge_vertex_indices[i + 1] == a):
+					component.index = i / 2
+					break
+		component.topology_revision = item.topology_revision
+	return result
+
+func vertex_at(item: Dictionary, position: Vector3) -> int:
+	for i in item.vertices.size():
+		if item.vertices[i].distance_squared_to(position) < 0.00000001:
+			return i
+	return -1
+
 func prune() -> void:
 	var existing: Dictionary = {}
 	for item in document.get_draw_data():
@@ -93,6 +154,7 @@ func prune() -> void:
 		if existing.has(id) and not hidden.has(id):
 			valid.append(id)
 	selected = valid
+	components = components.filter(func(c): return component_valid(c, brush(c.brush_id)))
 	var entities: Dictionary = {}
 	for entity in document.get_entities():
 		entities[entity.id] = true

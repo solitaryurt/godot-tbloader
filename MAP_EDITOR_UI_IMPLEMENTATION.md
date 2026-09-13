@@ -29,9 +29,19 @@
   with packed before/after generated-child snapshots and validated weak targets.
   Explicit loader-path changes also use scene history. Global Map undo remains
   independent from these scene operations.
-- Basic Phase 5 UI is present: face/edge/vertex modes and picks, constrained native
-  component movement, selected-face assignment, 2/3-point clip/split/flip, prism
-  toolbar and Ctrl+3…9. Full Phase 5 acceptance remains pending.
+- Phase 5 graph/component/clipper/prism acceptance is complete on the pinned engine.
+  Shift-click adds/toggles face, edge and vertex selections; Alt-click cycles
+  overlapping handles (Shift+Alt adds the far-side handle). Dragging a selected
+  handle moves the whole group, with Shift axis constraint applied after snapping.
+  Selected components have distinct face outlines/fills, edge lines and handles.
+- Native `translate_components` validates every token, unions shared vertices and
+  stages all selected brushes before one commit. Face groups move supporting planes;
+  vertex/edge groups retain incident planar convex topology. Invalid later brushes
+  leave all content, revision, cache, selection and history untouched.
+- Clip caps are fresh `common/caulk` faces with classic identity UV and no inherited
+  flags. Surviving source planes, texture/projection/UV/flags are preserved exactly.
+  Component undo/redo rebinds indices only against the matching native snapshot;
+  successful vertex/edge edits resolve moved positions, and stale live tokens reject.
 
 ## Architecture / ownership
 
@@ -47,7 +57,7 @@
 | `editor/material_browser.gd` | Independently delivered browser; consumed through documented API |
 
 `.map` remains canonical. Preview and baked nodes never feed edits back into the
-document. Native and shared document-test files are owned by the native workstream.
+document. Phase 5 integrates the native batch API and shared document acceptance.
 This harness offers no subagent tool; UI implementation/testing is performed directly.
 
 ## Verification
@@ -91,6 +101,41 @@ Display tests run the same handlers with actual rendering/capture on X11; they d
 not claim window-system mouse-injection or complete Phase 6 manual UX acceptance.
 No errors/warnings are allowlisted.
 
+### Phase 5 acceptance — 2026-09-13
+
+| Gate | Result | Artifact beneath `tests/map_editor/artifacts/` |
+|---|---|---|
+| Native debug extension, bounded `scons ... -j2` | Build passed | `/tmp/opencode/tbloader-phase5-build.log` |
+| Native document runtime | **10,528 checks**, zero failures | `document-kiyvda6t/` |
+| Headless real editor | **416 checks**, zero failures | `editor-vbiq_qi7/` |
+| X11 display journey | **427 checks**, zero failures | `journey-87x_6yf_/ui-jfdgft2g/` |
+| Fresh-process reopen/rebake | **8 checks**, zero failures | Same journey, `reopen.*` |
+| ASan/UBSan/leak detection | PASS; 500 reset, 1,000 rebuild, 200 detached edit cycles plus parser corpus | `/tmp/opencode/tbloader-phase5-native.log` |
+
+Commands are the three runner commands above (`--timeout 90`) plus
+`timeout 900s scons platform=linux target=template_debug arch=x86_64 -j2` and
+`timeout 180s bash tests/map_editor/run_native_tests.sh`. Concise logs:
+`/tmp/opencode/tbloader-phase5-{build,document,editor,journey,native}.log`.
+Instrumentation covers production parser/writer/model/geometry/edit staging;
+the Godot wrapper is verified in the real runtime, not sanitizer-instrumented.
+
+Acceptance covers successful single tetrahedron vertex, paired cube vertices,
+single edge and multi-edge/face deformation; multi-brush atomic success/rejection;
+duplicate/shared handles; stale IDs/tokens (including unrelated-edit undo preventing
+stale selection revival); preserved Ctrl+LMB quick-face selection;
+nonplanar, collapsed and inverted edits;
+axis-constrained snapping; isolated material edits and exact surviving-face UVs;
+2D clip/flip/split on all axes via graph/key handlers; half-space boundary cases,
+coplanar/tangent/near-degenerate and multi-brush cuts; outward planes, planar
+clockwise windings, closed convex hulls and analytic volumes; all **21** N=3…9 ×
+axis prism combinations and canonical round-trips; selection undo/redo and hide.
+
+Visually inspected intermediate display captures in
+`journey-sdnxdtxp/ui-fl12csim/project/phase5-{faces,edges,vertices,split}.png`.
+The final run retains the same four capture names under
+`journey-87x_6yf_/ui-jfdgft2g/project/`, plus `editor-smoke.png` at the run root.
+Tests render intermediate component states as well as invoking actual handlers.
+
 The pinned 4.8 adapter creates an `EditorDock` for legacy main screens, then only
 detaches it on disable. Plugin teardown explicitly frees that detached `_dock`
 wrapper; it leaves an attached, editor-owned wrapper alone at editor shutdown.
@@ -118,14 +163,10 @@ previous output. The journey supplies `fixtures/info_player_start.tscn` delibera
 
 ## Remaining acceptance / limitations
 
-- Phase 5 requires broader component deformation, clip direction and cap-material
-  acceptance. Native clip caps inherit the source first face (not forced caulk).
-- Graph component selection currently selects one handle at a time. Resize and
-  component previews show the drag reference rather than rebuilding a live hull.
-- Phase 5 tests should expand vertex/edge successful constrained deformations,
-  multi-handle selection, clip flip/one-sided outcomes and all prism orientations.
-  Current UI tests establish split, Ctrl+5, face assignment and invalid vertex
-  rejection; native geometric cases are covered separately by the document suite.
+- Resize/component drag previews show the drag reference rather than rebuilding a
+  live hull. Geometry is validated on release; arbitrary nonplanar mesh deformation
+  is intentionally rejected. General three-point placement across graph panes is
+  not implemented (the Phase 5 exit gate exercises the usable two-point 2D tool).
 - Brush clipboard follows the native API (point-only clipboard unsupported).
 - Patch primitives persist natively but have no graph/camera drawing or editing.
 - Save All can save named maps synchronously; untitled maps need a Save As dialog.

@@ -494,10 +494,15 @@ func assign_texture() -> void:
 		if not component_mode:
 			return session.document.set_brush_texture(session.selected, session.texture)
 		for target in targets:
+			var validation: Dictionary = session.document.get_face_uv(target.brush_id, target.index, target.topology_revision)
+			if not validation.ok:
+				return validation
+		for target in targets:
 			var brush: Dictionary = session.brush(target.brush_id)
 			var result: Dictionary = session.document.set_face_texture(target.brush_id, target.index, session.texture, brush.topology_revision)
 			if not result.ok:
 				return result
+		session.rebind_components() # Surface edits preserve face order and geometry.
 		return session.success())
 	refresh_materials()
 
@@ -532,10 +537,15 @@ func apply_uv() -> void:
 	var scale_value = Vector2(uv_fields[3].value, uv_fields[4].value)
 	session.transact("Edit map UV", func():
 		for target in targets:
+			var validation: Dictionary = session.document.get_face_uv(target.brush_id, target.index, target.topology_revision)
+			if not validation.ok:
+				return validation
+		for target in targets:
 			var revision: int = session.brush(target.brush_id).topology_revision
 			var result: Dictionary = session.document.set_face_uv(target.brush_id, target.index, shift, rotation, scale_value, revision)
 			if not result.ok:
 				return result
+		session.rebind_components()
 		return session.success())
 
 func build_dialogs() -> void:

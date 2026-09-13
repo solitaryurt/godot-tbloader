@@ -12,6 +12,7 @@ func run() -> void:
 		return
 	test_document()
 	test_operations()
+	test_phase5()
 	await test_checked_bake()
 	# Preserve the real bake regression gate alongside native document assertions.
 	var loader = ClassDB.instantiate("TBLoader")
@@ -460,7 +461,10 @@ func assert_solid(doc, id: int, expected_volume: float = -1.0) -> void:
 	checks.check(b.vertices.size() - b.edge_vertex_indices.size() / 2 + b.faces.size() == 2, "convex hull Euler characteristic")
 	for f in b.faces:
 		checks.check(f.normal.is_normalized() and f.normal.dot(f.center - center) > 0, "outward unit face normal")
+		for vertex in b.vertices:
+			checks.check(f.normal.dot(vertex - f.center) <= 0.001, "every vertex inside supporting half-space")
 		for i in f.winding.size():
+			checks.check(absf(f.normal.dot(f.winding[i] - f.center)) < 0.001, "face winding is planar")
 			checks.check(f.winding[i].is_equal_approx(b.vertices[f.vertex_indices[i]]), "face component refers to copied unique vertex")
 			var a: int = f.vertex_indices[i]
 			var c: int = f.vertex_indices[(i + 1) % f.vertex_indices.size()]
@@ -573,10 +577,17 @@ func test_operations() -> void:
 	checks.check(not unknown.is_empty() and unknown.texture_size == Vector2i.ONE and unknown.triangle_brush_ids == PackedInt64Array([id, id]) and unknown.triangle_face_indices == PackedInt32Array([0, 0]), "preview groups exact texture with fallback dimensions and face ownership")
 	checks.check(doc.get_texture_names().has("unknown/texture"), "texture names include assigned face shader")
 	for axis in 3:
-		expect_ok(doc.restore_snapshot(snapshot), "reset for prism")
-		expect_ok(doc.make_prism(id, 5, axis), "five sided prism axis " + str(axis))
-		assert_solid(doc, id)
-		checks.check(brush_data(doc, id).faces.size() == 7, "prism caps and sides")
+		for sides in range(3, 10):
+			expect_ok(doc.restore_snapshot(snapshot), "reset for prism")
+			expect_ok(doc.make_prism(id, sides, axis), "%d sided prism axis %d" % [sides, axis])
+			assert_solid(doc, id, sides * sin(TAU / sides) / 8.0 * 64 * 64 * 32)
+			var prism = brush_data(doc, id)
+			checks.check(prism.faces.size() == sides + 2 and prism.vertices.size() == sides * 2, "prism caps sides and vertices")
+			checks.check(prism.aabb_min[axis] == Vector3(-16, -32, -8)[axis] and prism.aabb_max[axis] == Vector3(48, 32, 24)[axis], "prism extrusion axis/depth")
+			checks.check(absf(prism.faces[0].normal[axis]) == 1 and prism.faces[0].normal == -prism.faces[1].normal, "prism cap orientation")
+			var roundtrip = ClassDB.instantiate("TBMapDocument")
+			expect_ok(roundtrip.import_text(doc.export_text().value), "prism round-trip")
+			checks.check(roundtrip.export_text().value == doc.export_text().value, "prism canonical round-trip")
 	expect_failure(doc, doc.make_prism(id, 2, 2), state(doc), "INVALID_ARGUMENT", "make_prism")
 	expect_ok(doc.restore_snapshot(snapshot), "reset for vertex edits")
 	b = brush_data(doc, id)
@@ -603,6 +614,121 @@ func test_operations() -> void:
 		var expected = Vector2(p.dot(face_uv.u_axis) / face_uv.scale.x + face_uv.shift.x, p.dot(face_uv.v_axis) / face_uv.scale.y + face_uv.shift.y) / Vector2(128, 64)
 		checks.check(preview.uvs[i].is_equal_approx(expected), "Valve analytic UV normalization")
 	test_entities_and_clipboard(doc)
+
+func component(b: Dictionary, kind: String, index: int) -> Dictionary:
+	return {"brush_id": b.id, "kind": kind, "index": index, "topology_revision": b.topology_revision}
+
+func test_phase5() -> void:
+	var doc = ClassDB.instantiate("TBMapDocument")
+	var id: int = doc.create_cuboid(Vector3.ZERO, Vector3.ONE * 64, "baseline/checker").value
+	var snapshot: Dictionary = doc.snapshot().value
+	var b = brush_data(doc, id)
+	var faces = [component(b, "face", 0), component(b, "face", 1), component(b, "face", 0)]
+	for movement in [Vector3(64, 0, 0), Vector3(80, 0, 0)]:
+		expect_failure(doc, doc.translate_components([component(b, "face", 0)], movement), state(doc), "INVALID_GEOMETRY", "translate_components")
+		expect_failure(doc, doc.translate_components(Array(b.faces[0].vertex_indices).map(func(index): return component(b, "vertex", index)), movement), state(doc), "INVALID_GEOMETRY", "translate_components")
+	var events = {"map": 0}
+	doc.map_changed.connect(func(_r): events.map += 1)
+	expect_ok(doc.translate_components(faces, Vector3(128, 0, 0)), "opposite planes batch bypasses invalid intermediate hull")
+	checks.check(events.map == 1 and brush_data(doc, id).aabb_min.x == 128 and brush_data(doc, id).aabb_max.x == 192, "batch deduplicates and commits once")
+	assert_solid(doc, id, 64 * 64 * 64)
+	expect_failure(doc, doc.translate_components(faces, Vector3.ONE), state(doc), "STALE_COMPONENT", "translate_components")
+	expect_ok(doc.restore_snapshot(snapshot), "reset batch")
+	b = brush_data(doc, id)
+	var edge_index = -1
+	for i in range(0, b.edge_vertex_indices.size(), 2):
+		var p: Vector3 = b.vertices[b.edge_vertex_indices[i]]
+		var q: Vector3 = b.vertices[b.edge_vertex_indices[i + 1]]
+		if p.x == 64 and q.x == 64 and p.y == 64 and q.y == 64:
+			edge_index = i / 2
+	checks.check(edge_index >= 0, "find vertical edge by endpoints")
+	expect_ok(doc.translate_components([component(b, "edge", edge_index)], Vector3(16, 0, 0)), "valid constrained edge moves both incident vertices")
+	assert_solid(doc, id, 72 * 64 * 64)
+	expect_ok(doc.restore_snapshot(snapshot), "reset atomic group")
+	var second: int = doc.create_cuboid(Vector3(128, 0, 0), Vector3(192, 64, 64), "baseline/checker").value
+	b = brush_data(doc, id)
+	var group = [component(b, "face", 1), component(brush_data(doc, second), "vertex", 0)]
+	var before = state(doc)
+	var event_count: int = events.map
+	expect_failure(doc, doc.translate_components(group, Vector3(16, 8, 0)), before, "INVALID_GEOMETRY", "translate_components")
+	checks.check(events.map == event_count, "invalid later brush emits no partial group commit")
+	group = [component(b, "face", 1), component(brush_data(doc, second), "face", 1)]
+	expect_ok(doc.translate_components(group, Vector3(16, 0, 0)), "valid multi-brush face batch")
+	checks.check(events.map == event_count + 1 and brush_data(doc, id).aabb_max.x == 80 and brush_data(doc, second).aabb_max.x == 208, "every selected brush deformed in one commit")
+	expect_ok(doc.restore_snapshot(snapshot), "reset tetrahedron")
+	expect_ok(doc.clip_brushes(PackedInt64Array([id]), Vector3(64, 0, 0), Vector3(0, 0, 64), Vector3(0, 64, 0), false), "construct tetrahedron with clip")
+	b = brush_data(doc, id)
+	var corner: int = b.vertices.find(Vector3(64, 0, 0))
+	checks.check(b.vertices.size() == 4 and corner >= 0, "tetrahedron corner")
+	expect_ok(doc.translate_vertices(id, PackedInt32Array([corner]), Vector3(16, 0, 0), b.topology_revision), "valid constrained single vertex deformation")
+	assert_solid(doc, id, 80 * 64 * 64 / 6.0)
+	# Source face planes, projections, transforms and flags survive clipping.
+	for fixture in ["classic_cube", "valve_cube"]:
+		expect_ok(doc.load_map("res://fixtures/" + fixture + ".map"), "clip textured fixture")
+		var original_lines: PackedStringArray = doc.export_text().value.split("\n")
+		b = doc.get_draw_data()[0]
+		var source_uvs: Array = []
+		for face in b.faces:
+			source_uvs.append(doc.get_face_uv(b.id, face.index, b.topology_revision).value)
+		var split = doc.clip_brushes(PackedInt64Array([b.id]), Vector3(16, 0, 0), Vector3(16, 0, 1), Vector3(16, 1, 0), true)
+		expect_ok(split, "midpoint textured split")
+		for line in doc.export_text().value.split("\n"):
+			if line.begins_with("("):
+				if line.contains("common/caulk"):
+					checks.check(line.ends_with('"common/caulk" 0 0 0 1 1'), "cap has no inherited surface flags or projection")
+				else:
+					checks.check(original_lines.has(line), "surviving source face preserves serialized planes texture UV and flags exactly")
+		var normals: Array = []
+		for piece_id in split.value:
+			assert_solid(doc, piece_id, 32 * 64 * 32)
+			var piece = brush_data(doc, piece_id)
+			var cap_count = 0
+			for face in piece.faces:
+				var uv: Dictionary = doc.get_face_uv(piece_id, face.index, piece.topology_revision).value
+				if absf(face.center.x - 16) < 0.001 and absf(face.normal.x) > 0.999:
+					cap_count += 1
+					normals.append(face.normal)
+					checks.check(face.texture == "common/caulk" and uv.projection == "classic" and uv.shift == Vector2.ZERO and uv.rotation == 0 and uv.scale == Vector2.ONE, "new caulk cap identity UV even from Valve source")
+				else:
+					var matched = false
+					for source in b.faces:
+						if face.normal.is_equal_approx(source.normal) and absf(face.normal.dot(face.center - source.center)) < 0.001:
+							matched = true
+							checks.check(face.texture == source.texture and uv == source_uvs[source.index], "original plane retains texture and complete UV")
+					checks.check(matched, "surviving face retains original plane orientation")
+			checks.check(cap_count == 1, "one fresh cap per half")
+		checks.check(normals.size() == 2 and normals[0] == -normals[1], "split caps have complementary normals")
+	# Half-space boundary outcomes, including coplanar/tangent and near-degenerate.
+	expect_ok(doc.restore_snapshot(doc.snapshot().value), "clip snapshot self restore")
+	var boundary = ClassDB.instantiate("TBMapDocument")
+	id = boundary.create_cuboid(Vector3.ZERO, Vector3.ONE * 64, "baseline/checker").value
+	snapshot = boundary.snapshot().value
+	for x in [-16.0, 0.0, 64.0, 80.0, 64.000001]:
+		for split in [false, true]:
+			for flipped in [false, true]:
+				expect_ok(boundary.restore_snapshot(snapshot), "reset clip boundary")
+				var p = Vector3(x, 0, 0)
+				var q = p + Vector3(0, 0, 1)
+				var r = p + Vector3(0, 1, 0)
+				before = state(boundary)
+				var result = boundary.clip_brushes(PackedInt64Array([id]), p, r if flipped else q, q if flipped else r, split)
+				expect_ok(result, "clip boundary %s split %s flip %s" % [x, split, flipped])
+				var kept: bool = split or (x <= 0 if flipped else x >= 64)
+				checks.check(result.value.size() == int(kept), "boundary keeps/discards expected solid")
+				if kept:
+					checks.check(state(boundary) == before and not result.changed, "coplanar/tangent/entirely retained is exact no-op")
+	expect_ok(boundary.restore_snapshot(snapshot), "reset near-degenerate plane")
+	expect_failure(boundary, boundary.clip_brushes(PackedInt64Array([id]), Vector3.ZERO, Vector3(0, 0, 0.000001), Vector3(0, 0.000001, 0), true), state(boundary), "INVALID_ARGUMENT", "clip_brushes")
+	var right: int = boundary.create_cuboid(Vector3(128, 0, 0), Vector3(192, 64, 64), "baseline/checker").value
+	var left: int = boundary.create_cuboid(Vector3(-128, 0, 0), Vector3(-64, 64, 64), "baseline/checker").value
+	snapshot = boundary.snapshot().value
+	for split in [true, false]:
+		expect_ok(boundary.restore_snapshot(snapshot), "reset multi-brush clip")
+		var result = boundary.clip_brushes(PackedInt64Array([id, right, left, id]), Vector3(32, 0, 0), Vector3(32, 0, 1), Vector3(32, 1, 0), split)
+		expect_ok(result, "multi-brush clipping crosses retains and discards")
+		checks.check(result.value.size() == (4 if split else 2) and result.value.has(left) and result.value.has(right) == split, "multi-brush clip deduplicates and keeps expected owners")
+		for piece_id in result.value:
+			assert_solid(boundary, piece_id, 64 * 64 * 64 if piece_id in [left, right] else 32 * 64 * 64)
 
 func test_clipping(doc, snapshot: Dictionary, id: int) -> void:
 	expect_ok(doc.restore_snapshot(snapshot), "reset for clipping")

@@ -8,6 +8,7 @@
 #include <cmath>
 #include <iomanip>
 #include <locale>
+#include <map>
 #include <set>
 #include <sstream>
 
@@ -272,47 +273,86 @@ Dictionary TBMapDocument::make_prism(int64_t id, int sides, int axis) {
 
 Dictionary TBMapDocument::translate_vertices(int64_t id, const PackedInt32Array &vertex_indices, Vector3 delta, int64_t topology_revision) {
 	auto r = check_face(id, 0, topology_revision, "translate_vertices"); if (!bool(r["ok"])) return r;
-	if (!valid(delta)) return failure("INVALID_ARGUMENT", "Invalid translation", "translate_vertices");
-	Dictionary brush; Array draw = get_draw_data();
-	for (int i = 0; i < draw.size(); ++i) { Dictionary b = draw[i]; if (int64_t(b["id"]) == id) { brush = b; break; } }
-	PackedVector3Array vertices = brush["vertices"];
-	std::set<int> selected;
+	Array components;
 	for (int index : vertex_indices) {
-		if (index < 0 || index >= vertices.size()) return failure("INVALID_ARGUMENT", "Invalid vertex index", "translate_vertices");
-		selected.insert(index);
+		Dictionary c; c["brush_id"] = id; c["kind"] = "vertex"; c["index"] = index; c["topology_revision"] = topology_revision; components.push_back(c);
 	}
-	if (selected.empty() || delta == Vector3()) return success();
-	for (int index : selected) { vertices.set(index, vertices[index] + delta); if (!valid(vertices[index])) return failure("INVALID_ARGUMENT", "Vertex exceeds coordinate bounds", "translate_vertices"); }
-	LMMapEdit edit(*map); auto &target = *edit.brush(id); Array faces = brush["faces"];
-	for (int f = 0; f < faces.size(); ++f) {
-		Dictionary face = faces[f]; PackedInt32Array indices = face["vertex_indices"];
-		bool affected = false; for (int index : indices) if (selected.count(index)) affected = true;
-		if (!affected) continue;
-		Vector3 a = vertices[indices[0]], b, c, n;
-		for (int i = 1; i + 1 < indices.size(); ++i) {
-			b = vertices[indices[i]]; c = vertices[indices[i + 1]]; n = (c - a).cross(b - a);
-			if (n.length_squared() > 1e-10) break;
+	return move_components(components, delta, "translate_vertices");
+}
+
+Dictionary TBMapDocument::translate_components(const Array &components, Vector3 delta) {
+	return move_components(components, delta, "translate_components");
+}
+
+Dictionary TBMapDocument::move_components(const Array &components, Vector3 delta, const StringName &operation) {
+	if (!valid(delta)) return failure("INVALID_ARGUMENT", "Invalid translation", operation);
+	std::map<int64_t, Dictionary> brushes;
+	Array draw = get_draw_data();
+	for (int i = 0; i < draw.size(); ++i) { Dictionary b = draw[i]; brushes[int64_t(b["id"])] = b; }
+	std::map<int64_t, std::set<int>> selected_vertices, selected_faces;
+	for (int i = 0; i < components.size(); ++i) {
+		Variant item = components[i];
+		if (item.get_type() != Variant::DICTIONARY) return failure("INVALID_ARGUMENT", "Expected component dictionary", operation);
+		Dictionary c = item;
+		if (!c.has("brush_id") || !c.has("kind") || !c.has("index") || !c.has("topology_revision") ||
+				c["brush_id"].get_type() != Variant::INT || c["index"].get_type() != Variant::INT ||
+				c["topology_revision"].get_type() != Variant::INT || c["kind"].get_type() != Variant::STRING)
+			return failure("INVALID_ARGUMENT", "Invalid component schema", operation);
+		int64_t id = c["brush_id"], index = c["index"]; String kind = c["kind"];
+		auto r = check_face(id, 0, c["topology_revision"], operation); if (!bool(r["ok"])) return r;
+		Dictionary b = brushes.at(id); PackedVector3Array vertices = b["vertices"]; PackedInt32Array edges = b["edge_vertex_indices"]; Array faces = b["faces"];
+		int count = kind == "vertex" ? vertices.size() : kind == "edge" ? edges.size() / 2 : kind == "face" ? faces.size() : 0;
+		if (index < 0 || index >= count) return failure("INVALID_ARGUMENT", "Invalid component kind or index", operation);
+		if (kind == "face") selected_faces[id].insert(index);
+		else if (kind == "vertex") selected_vertices[id].insert(index);
+		else { selected_vertices[id].insert(edges[index * 2]); selected_vertices[id].insert(edges[index * 2 + 1]); }
+	}
+	// Face mode moves supporting planes; vertex/edge mode moves incident vertices.
+	// Mixing these semantics in one brush is ambiguous and must never drop handles.
+	for (const auto &group : selected_faces) if (selected_vertices.count(group.first)) return failure("INVALID_ARGUMENT", "Cannot mix face and vertex/edge deformation on a brush", operation);
+	if (components.is_empty() || delta == Vector3()) return success();
+	LMMapEdit edit(*map);
+	for (const auto &group : selected_faces) for (int index : group.second) {
+		auto &f = edit.brush(group.first)->faces[index]; Vector3 n = vector(f.plane.plane_normal); move_face(f, n * n.dot(delta));
+	}
+	std::map<int64_t, PackedVector3Array> expected;
+	for (const auto &group : selected_vertices) {
+		int64_t id = group.first; const auto &selected = group.second;
+		Dictionary brush = brushes.at(id); PackedVector3Array vertices = brush["vertices"];
+		for (int index : selected) { vertices.set(index, vertices[index] + delta); if (!valid(vertices[index])) return failure("INVALID_ARGUMENT", "Vertex exceeds coordinate bounds", operation); }
+		expected[id] = vertices;
+		auto &target = *edit.brush(id); Array faces = brush["faces"];
+		for (int f = 0; f < faces.size(); ++f) {
+			Dictionary face = faces[f]; PackedInt32Array indices = face["vertex_indices"];
+			bool affected = false; for (int index : indices) if (selected.count(index)) affected = true;
+			if (!affected) continue;
+			Vector3 a = vertices[indices[0]], b, c, n;
+			for (int i = 1; i + 1 < indices.size(); ++i) {
+				b = vertices[indices[i]]; c = vertices[indices[i + 1]]; n = (c - a).cross(b - a);
+				if (n.length_squared() > 1e-10) break;
+			}
+			if (n.length_squared() <= 1e-10) return failure("INVALID_GEOMETRY", "Vertex edit collapses a face", operation);
+			n.normalize();
+			for (int index : indices) if (std::abs(n.dot(vertices[index] - a)) > 1e-5) return failure("INVALID_GEOMETRY", "Vertex edit makes a nonplanar face", operation);
+			target.faces[f].plane.plane_points = {native(a), native(b), native(c)};
 		}
-		if (n.length_squared() <= 1e-10) return failure("INVALID_GEOMETRY", "Vertex edit collapses a face", "translate_vertices");
-		n.normalize();
-		for (int index : indices) if (std::abs(n.dot(vertices[index] - a)) > 1e-5) return failure("INVALID_GEOMETRY", "Vertex edit makes a nonplanar face", "translate_vertices");
-		target.faces[f].plane.plane_points = {native(a), native(b), native(c)};
 	}
 	// Ensure the convex candidate has exactly the requested vertices, not a different
 	// hull produced by intersecting changed supporting planes.
-	std::shared_ptr<LMMapData> candidate; r = prepare(edit.text(), candidate, "translate_vertices", path); if (!bool(r["ok"])) return r;
+	std::shared_ptr<LMMapData> candidate; auto r = prepare(edit.text(), candidate, operation, path); if (!bool(r["ok"])) return r;
 	for (int e = 0; e < candidate->entity_count; ++e) for (int b = 0; b < candidate->entities[e].brush_count; ++b) {
-		if (map->entities[e].brushes[b].id != id) continue;
+		auto found = expected.find(map->entities[e].brushes[b].id); if (found == expected.end()) continue;
+		const auto &vertices = found->second;
 		std::set<int> matched; const auto &geo = candidate->entity_geo[e].brushes[b];
 		for (int f = 0; f < geo.face_count; ++f) for (int v = 0; v < geo.faces[f].vertex_count; ++v) {
 			Vector3 p = vector(geo.faces[f].vertices[v].vertex); int index = 0;
 			for (; index < vertices.size(); ++index) if (p.distance_squared_to(vertices[index]) < 1e-8) break;
-			if (index == vertices.size()) return failure("INVALID_GEOMETRY", "Vertex edit changes the convex hull unexpectedly", "translate_vertices");
+			if (index == vertices.size()) return failure("INVALID_GEOMETRY", "Vertex edit changes the convex hull unexpectedly", operation);
 			matched.insert(index);
 		}
-		if (matched.size() != size_t(vertices.size())) return failure("INVALID_GEOMETRY", "Vertex edit removes a hull vertex", "translate_vertices");
+		if (matched.size() != size_t(vertices.size())) return failure("INVALID_GEOMETRY", "Vertex edit removes a hull vertex", operation);
 	}
-	return finish_edit(edit, "translate_vertices");
+	return finish_edit(edit, operation);
 }
 
 Dictionary TBMapDocument::clip_brushes(const PackedInt64Array &ids, Vector3 p0, Vector3 p1, Vector3 p2, bool split) {
@@ -332,7 +372,9 @@ Dictionary TBMapDocument::clip_brushes(const PackedInt64Array &ids, Vector3 p0, 
 			auto source = *edit.brush(id);
 			if (source.faces.size() >= 64) return failure("LIMIT_EXCEEDED", "Clip candidate exceeds 64 supporting planes", "clip_brushes");
 			for (int side = 0; side < (split ? 2 : 1); ++side) {
-				auto piece = source; auto cut = source.faces.front();
+				auto piece = source; LMEditFace cut{};
+				cut.texture = "common/caulk";
+				cut.plane.uv_extra = {0, 1, 1};
 				cut.plane.plane_points = {native(p0), native(side ? p2 : p1), native(side ? p1 : p2)};
 				piece.faces.push_back(cut);
 				if (!lm_edit_prune_faces(piece)) return failure("INVALID_GEOMETRY", "Clip produced a degenerate solid", "clip_brushes");
