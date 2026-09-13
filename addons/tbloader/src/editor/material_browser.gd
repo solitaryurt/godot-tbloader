@@ -1,6 +1,6 @@
 @tool
 extends Control
-## Project-wide metadata index. Only explicit selection loads a resource; visible
+## Texture-root metadata index. Only explicit selection loads a resource; visible
 ## rows ask EditorResourcePreview for thumbnails. No dependency on TBMapDocument.
 
 signal resource_selected(resource: Resource, path: String, suggested_token: String, mapping: Dictionary)
@@ -87,9 +87,14 @@ func _disconnect_filesystem() -> void:
 
 
 func set_texture_root(texture_root: String) -> void:
-	_texture_root = _normalize_folder(texture_root) if not texture_root.is_empty() else ""
+	var normalized := _normalize_folder(texture_root) if not texture_root.is_empty() else ""
+	if normalized == _texture_root:
+		return
+	_texture_root = normalized
+	_folder = _texture_root if _texture_root.begins_with("res://") else "res://"
+	_selected_path = ""
 	_update_status()
-	mapping_changed.emit()
+	request_refresh()
 
 
 func request_refresh() -> void:
@@ -134,6 +139,12 @@ func set_folder(path: String) -> bool:
 func _normalize_folder(path: String) -> String:
 	var normalized := path.simplify_path()
 	return normalized if normalized == "res://" else normalized.trim_suffix("/")
+
+
+func _inside_texture_root(path: String) -> bool:
+	if not _texture_root.begins_with("res://"):
+		return false
+	return _texture_root == "res://" or path == _texture_root or path.begins_with(_texture_root + "/")
 
 
 func focus_search() -> void:
@@ -267,12 +278,16 @@ func _scan_step() -> void:
 		budget -= 1
 		var frame: Dictionary = _scan_stack.back()
 		var directory: Object = frame.directory
-		_staged_folders[_normalize_folder(directory.get_path())] = true
+		var directory_path := _normalize_folder(directory.get_path())
+		if _inside_texture_root(directory_path):
+			_staged_folders[directory_path] = true
 		if frame.file < directory.get_file_count():
 			var index: int = frame.file
 			frame.file += 1
 			var path: String = directory.get_file_path(index)
 			var type: String = directory.get_file_type(index)
+			if not _inside_texture_root(path):
+				continue
 			_staged_files[path] = type
 			var is_material := ClassDB.is_parent_class(type, "Material") and path.get_extension() in ["tres", "res", "material"]
 			if is_material or ClassDB.is_parent_class(type, "Texture"):
@@ -373,7 +388,8 @@ func _rebuild_folders() -> void:
 		item.set_metadata(0, path)
 		item.collapsed = not (_folder == path or _folder.begins_with(path + "/"))
 		_folder_items[path] = item
-	_folder_items[_folder].select(0)
+	var selected: TreeItem = _folder_items.get(_folder, root)
+	selected.select(0)
 	_updating = false
 	_rebuild_breadcrumbs()
 

@@ -33,6 +33,7 @@ var save_then_pending = false
 var dialog_operation = ""
 var tool = "Brush"
 var tool_buttons: Dictionary = {}
+var visibility_buttons: Dictionary = {}
 var tokens: Array = []
 var material_cache: Dictionary = {}
 var texture_sizes: Dictionary = {}
@@ -53,46 +54,52 @@ var scan_delay = -1.0
 func _ready() -> void:
 	size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	size_flags_vertical = Control.SIZE_EXPAND_FILL
-	var files = HFlowContainer.new()
-	add_child(files)
-	for entry in [["New", "new"], ["Open…", "open"], ["Save", "save"], ["Save As…", "save_as"]]:
-		var command: String = entry[1]
-		button(files, entry[0], func(): file_command(command))
-	button(files, "Bind selected loader", bind_selected)
-	button(files, "Detach", detach)
-	button(files, "Update loader path", update_loader_path)
-	button(files, "Bake saved map", bake)
+	var toolbar = HFlowContainer.new()
+	add_child(toolbar)
+	for mode in ["Select", "Brush", "Cut", "Rotate", "Face", "Edge", "Vertex", "Texture"]:
+		var value: String = mode
+		var control = button(toolbar, mode, func(): set_tool(value))
+		control.toggle_mode = true
+		tool_buttons[mode] = control
+	button(toolbar, "Bind selected loader", bind_selected)
+	button(toolbar, "Detach", detach)
+	button(toolbar, "Update loader path", update_loader_path)
+	button(toolbar, "Bake saved map", bake)
 	rebuild_on_save = CheckBox.new()
 	rebuild_on_save.text = "Bake on save"
 	rebuild_on_save.button_pressed = true
-	files.add_child(rebuild_on_save)
+	toolbar.add_child(rebuild_on_save)
 	session_picker = OptionButton.new()
 	session_picker.tooltip_text = "Open and unresolved Map documents"
 	session_picker.item_selected.connect(func(index):
 		var origin = session_picker.get_item_metadata(index).get_ref()
 		if origin != null:
 			set_session(origin))
-	files.add_child(session_picker)
+	toolbar.add_child(session_picker)
 	binding_label = Label.new()
 	add_child(binding_label)
-	var tools = HFlowContainer.new()
-	add_child(tools)
-	for mode in ["Select", "Brush", "Cut", "Face", "Edge", "Vertex", "Texture"]:
-		var value: String = mode
-		var control = button(tools, mode, func(): set_tool(value))
-		control.toggle_mode = true
-		tool_buttons[mode] = control
-	button(tools, "Clip", func(): active_graph.apply_clip(false))
-	button(tools, "Split", func(): active_graph.apply_clip(true))
-	button(tools, "Flip", func(): active_graph.clip_flip = not active_graph.clip_flip; set_status("Clip side flipped"))
+	button(toolbar, "Clip", func(): active_graph.apply_clip(false))
+	button(toolbar, "Split", func(): active_graph.apply_clip(true))
+	button(toolbar, "Flip", func(): active_graph.clip_flip = not active_graph.clip_flip; set_status("Clip side flipped"))
 	var sides = SpinBox.new()
 	sides.min_value = 3
 	sides.max_value = 62
 	sides.value = 5
 	sides.prefix = "Sides "
-	tools.add_child(sides)
-	button(tools, "Prism", func(): make_prism(int(sides.value)))
-	button(tools, "Entity (N)", show_entities)
+	toolbar.add_child(sides)
+	button(toolbar, "Prism", func(): make_prism(int(sides.value)))
+	button(toolbar, "Entity (N)", show_entities)
+	var filters = HFlowContainer.new()
+	add_child(filters)
+	var filter_label = Label.new()
+	filter_label.text = "Hide:"
+	filters.add_child(filter_label)
+	for entry in [["Entities", "entities"], ["Caulk", "caulk"], ["Clips", "clips"]]:
+		var category: String = entry[1]
+		var control = button(filters, entry[0], func(): session.set_visibility_filter(category, not session.visibility_filters[category]))
+		control.toggle_mode = true
+		control.tooltip_text = "Hide %s in all map views; this does not edit the map" % entry[0].to_lower()
+		visibility_buttons[category] = control
 	var quad = HSplitContainer.new()
 	quad.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	quad.split_offset = 0
@@ -165,12 +172,14 @@ func _ready() -> void:
 	graph_b.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	graph_b.orientation = 1
 	right.add_child(graph_b)
+	camera_view.camera_moved.connect(graph_a.set_camera_pose)
+	camera_view.camera_moved.connect(graph_b.set_camera_pose)
 	active_graph = graph_a
 	status = Label.new()
 	add_child(status)
 	notice = Label.new()
 	notice.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	notice.text = "Drag empty grid: cuboid • Shift click: select • RMB: pan • Shift RMB: box • H: hide • Space: clone"
+	notice.text = "Drag empty grid: cuboid • R: rotate 15° • Shift click: select • RMB: pan • Shift RMB: box • H: hide • Space: clone"
 	add_child(notice)
 	build_dialogs()
 	set_session(Session.new())
@@ -239,12 +248,10 @@ func set_status(text: String) -> void:
 func refresh_status() -> void:
 	if session == null or status == null:
 		return
-	var path: String = session.document.get_path()
-	var title = path if path else "Untitled.map"
-	if not session.recovery_source.is_empty():
-		title = "Recovered %s (Save As)" % session.recovery_source
 	var baked = "never baked" if session.baked_text.is_empty() else ("baked current" if session.baked_text == session.document.export_text().value else "bake stale")
-	status.text = "%s%s • %s • grid %.3f • %s • %s • %d selected • %d hidden" % [title, " * UNSAVED" if session.document.is_dirty() else " • saved", baked, session.grid, tool, ["Side", "Front", "Top"][active_graph.orientation], session.selected.size() + session.points.size(), session.hidden.size()]
+	status.text = "%s • %s • grid %.3f • %s • %s • %d selected • %d hidden" % ["UNSAVED" if session.document.is_dirty() else "saved", baked, session.grid, tool, ["Side", "Front", "Top"][active_graph.orientation], session.selected.size() + session.points.size(), session.hidden_count()]
+	for category in visibility_buttons:
+		visibility_buttons[category].set_pressed_no_signal(session.visibility_filters[category])
 	var loader = session.loader.get_ref()
 	binding_label.text = "Bound: %s — %s" % [loader.name, loader.map_resource] if is_instance_valid(loader) else "Standalone document • Select a TBLoader, then explicitly Bind"
 	session_picker.clear()
@@ -344,6 +351,8 @@ func route_key(event: InputEventKey, graph: Control) -> bool:
 				set_tool("Cut")
 			KEY_Q:
 				set_tool("Brush")
+			KEY_R:
+				set_tool("Rotate")
 			KEY_F:
 				set_tool("Face")
 			KEY_E:
@@ -443,12 +452,12 @@ func resolve_token(token: String) -> Dictionary:
 		resolver.free()
 	return result
 
-func material_selected(_resource: Resource, path: String, token: String, _mapping: Dictionary) -> void:
+func material_selected(_resource: Resource, path: String, token: String, mapping: Dictionary) -> void:
 	sync_resolver()
+	if not mapping.get("resolved", false):
+		set_status("Cannot assign resource outside the loader Texture Path: " + path)
+		return
 	var result = resolve_token(token)
-	if not result.get("resolved", false) or result.get("resource_path", "") != path:
-		token = path
-		result = resolve_token(token)
 	if not result.get("resolved", false) or result.get("resource_path", "") != path:
 		set_status("Cannot resolve selected resource: " + path)
 		return
@@ -652,7 +661,7 @@ func refresh_entities() -> void:
 	entity_list.clear()
 	var root = entity_list.create_item()
 	var targets: PackedInt64Array = session.entity_targets()
-	for entity in session.document.get_entities():
+	for entity in session.entity_data():
 		if not targets.has(entity.id):
 			continue
 		var group = entity_list.create_item(root)
@@ -671,7 +680,7 @@ func entity_row_selected() -> void:
 		return
 	entity_key.text = row.get_metadata(0)
 	var values: Array = []
-	for entity in session.document.get_entities():
+	for entity in session.entity_data():
 		if not session.entity_targets().has(entity.id):
 			continue
 		var value = "<absent>"
@@ -768,6 +777,42 @@ func open_path(path: String) -> bool:
 	refresh_materials()
 	set_status("Opened %s" % path)
 	return true
+
+func open_scene_map() -> void:
+	if shutting_down or session == null or pending.is_valid() or dirty_dialog.visible:
+		return
+	var root = EditorInterface.get_edited_scene_root()
+	if root == null:
+		return
+	var loaders: Array[Node] = []
+	if root is TBLoader and not root.map_resource.is_empty():
+		loaders.append(root)
+	for node in root.find_children("*", "TBLoader", true, false):
+		if not node.map_resource.is_empty():
+			loaders.append(node)
+	if loaders.size() != 1:
+		return
+	var loader = loaders[0]
+	var target = weakref(loader)
+	var target_scene = weakref(root)
+	var path: String = loader.map_resource
+	var apply = func():
+		var node = target.get_ref()
+		if not is_instance_valid(node) or target_scene.get_ref() != EditorInterface.get_edited_scene_root() or node.map_resource != path:
+			set_status("Scene map open cancelled: loader or scene changed.")
+			return
+		if not same_path(session.document.get_path(), path) and not open_path(path):
+			return
+		session.loader = target
+		session.scene = target_scene
+		session.was_bound = true
+		configure_browser(node.texture_path)
+		refresh()
+	var untouched = session.document.get_path().is_empty() and session.recovery_source.is_empty() and session.document.get_revision() == 1
+	if untouched or same_path(session.document.get_path(), path):
+		apply.call()
+	else:
+		request_replace(apply)
 
 func replace_session(candidate: RefCounted) -> void:
 	if discard_on_replace != null and discard_on_replace == session:
@@ -981,6 +1026,8 @@ func shutdown() -> void:
 		token.retire()
 	tokens.clear()
 	material_cache.clear()
+	for origin in sessions:
+		origin.dispose()
 	sessions.clear()
 	resolver_config.clear()
 	texture_sizes.clear()
@@ -1015,6 +1062,8 @@ func restore_recovery() -> void:
 		return
 	# Recovery deliberately starts a new epoch. No snapshot IDs or scene targets
 	# are transplanted into a new native document; Save As establishes its baseline.
+	for origin in sessions:
+		origin.dispose()
 	sessions.clear()
 	for record in records:
 		if not record is Dictionary or not record.get("text") is String:

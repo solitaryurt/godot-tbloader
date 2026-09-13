@@ -11,7 +11,9 @@ func run() -> void:
 		checks.finish(self, "document")
 		return
 	test_document()
+	test_tohunga_fixture()
 	test_operations()
+	test_rotation()
 	test_phase5()
 	await test_checked_bake()
 	# Preserve the real bake regression gate alongside native document assertions.
@@ -95,6 +97,40 @@ func run() -> void:
 
 func state(doc) -> Dictionary:
 	return {"snapshot": doc.snapshot().value, "path": doc.get_path(), "dirty": doc.is_dirty(), "revision": doc.get_revision(), "epoch": doc.get_epoch(), "entities": doc.get_entities()}
+
+func test_tohunga_fixture() -> void:
+	const PATH = "res://fixtures/tohunga.map"
+	checks.check(FileAccess.get_sha256(PATH) == "1e9d250d26267ebda5ff52978ebacca23e37a686865fe47f950b0109e7ca8811", "Tohunga fixture has expected content")
+	var doc = ClassDB.instantiate("TBMapDocument")
+	if not expect_ok(doc.load_map(PATH), "load Tohunga regression map"):
+		return
+	var initial_brushes: int = doc.get_draw_data().size()
+	checks.check(initial_brushes > 100 and doc.get_entities().size() > 1, "Tohunga loads substantial brush and entity topology")
+	var history_before = doc.capture_history_state()
+	var original_text: String = doc.export_text().value
+	var original_ids: Dictionary = doc.snapshot().value.identities
+	checks.check(doc.is_history_state_current(history_before) and history_before.get_retained_bytes() > original_text.to_utf8_buffer().size(), "Tohunga native history accounts for canonical, parsed and generated state")
+	checks.check(history_before.get_additional_retained_bytes(history_before) < history_before.get_retained_bytes(), "shared native history payload is not counted twice")
+	var created: Dictionary = doc.create_cuboid(Vector3(-64, -64, -64), Vector3(64, 64, 64), "common/caulk")
+	expect_ok(created, "create Tohunga native-history brush")
+	var history_after = doc.capture_history_state()
+	var edited_text: String = doc.export_text().value
+	var edited_ids: Dictionary = doc.snapshot().value.identities
+	checks.check(not doc.is_history_state_current(history_before) and doc.is_history_state_current(history_after), "committed edit changes native history state")
+	expect_ok(doc.restore_history_state(history_before), "restore Tohunga native history undo")
+	checks.check(doc.export_text().value == original_text and doc.snapshot().value.identities == original_ids, "native history undo restores exact Tohunga map and identities")
+	expect_ok(doc.restore_history_state(history_after), "restore Tohunga native history redo")
+	checks.check(doc.export_text().value == edited_text and doc.snapshot().value.identities == edited_ids, "native history redo restores exact Tohunga map and identities")
+	var foreign = ClassDB.instantiate("TBMapDocument")
+	expect_failure(doc, doc.restore_history_state(foreign.capture_history_state()), state(doc), "SNAPSHOT_MISMATCH", "restore_history_state")
+	for repeat in 3:
+		var before: Dictionary = doc.snapshot()
+		expect_ok(before, "capture Tohunga snapshot %d" % repeat)
+		expect_ok(doc.create_cuboid(Vector3(-64, -64, -64), Vector3(64, 64, 64), "common/caulk"), "edit Tohunga map %d" % repeat)
+		var after: Dictionary = doc.snapshot()
+		expect_ok(after, "capture edited Tohunga snapshot %d" % repeat)
+		checks.check(not var_to_bytes(before.value).is_empty() and not var_to_bytes(after.value).is_empty(), "serialize Tohunga undo snapshots %d" % repeat)
+	checks.check(doc.get_draw_data().size() == initial_brushes + 4, "Tohunga edits retain original topology")
 
 func expect_ok(result: Dictionary, message: String) -> bool:
 	checks.check(result.size() == 4 and result.has_all(["ok", "changed", "value", "error"]), message + " Result schema")
@@ -617,6 +653,36 @@ func test_operations() -> void:
 
 func component(b: Dictionary, kind: String, index: int) -> Dictionary:
 	return {"brush_id": b.id, "kind": kind, "index": index, "topology_revision": b.topology_revision}
+
+func test_rotation() -> void:
+	var doc = ClassDB.instantiate("TBMapDocument")
+	var first: int = doc.create_cuboid(Vector3.ZERO, Vector3(16, 16, 16), "first/material").value
+	var second: int = doc.create_cuboid(Vector3(32, 0, 0), Vector3(48, 16, 16), "second/material").value
+	var first_brush = brush_data(doc, first)
+	expect_ok(doc.set_face_uv(first, 0, Vector2(7, -3), 22.5, Vector2(0.5, 2), first_brush.topology_revision), "prepare rotation material data")
+	first_brush = brush_data(doc, first)
+	var before_text: String = doc.export_text().value
+	var before_state = doc.capture_history_state()
+	var before_uv: Dictionary = doc.get_face_uv(first, 0, first_brush.topology_revision).value
+	var ids = PackedInt64Array([first, second, first])
+	expect_ok(doc.rotate_brushes(ids, Vector3(24, 8, 8), 2, PI / 2), "rotate deduplicated brush selection")
+	var a = brush_data(doc, first)
+	var b = brush_data(doc, second)
+	checks.check(a.aabb_min.is_equal_approx(Vector3(16, -16, 0)) and a.aabb_max.is_equal_approx(Vector3(32, 0, 16)), "first brush rotates around shared selection center")
+	checks.check(b.aabb_min.is_equal_approx(Vector3(16, 16, 0)) and b.aabb_max.is_equal_approx(Vector3(32, 32, 16)), "second brush rotates around shared selection center")
+	checks.check(a.faces.all(func(face): return face.texture == "first/material") and b.faces.all(func(face): return face.texture == "second/material"), "rotation preserves per-brush face materials")
+	var after_uv: Dictionary = doc.get_face_uv(first, 0, a.topology_revision).value
+	checks.check(after_uv.projection == before_uv.projection and after_uv.shift == before_uv.shift and after_uv.rotation == before_uv.rotation and after_uv.scale == before_uv.scale, "rotation preserves face UV metadata")
+	var rotated_text: String = doc.export_text().value
+	var rotated_state = doc.capture_history_state()
+	expect_ok(doc.restore_history_state(before_state), "native rotation undo state")
+	checks.check(doc.export_text().value == before_text, "native rotation undo restores exact canonical text")
+	expect_ok(doc.restore_history_state(rotated_state), "native rotation redo state")
+	checks.check(doc.export_text().value == rotated_text, "native rotation redo restores exact canonical text")
+	var unchanged = state(doc)
+	checks.check(not doc.rotate_brushes(ids, Vector3.ZERO, 0, TAU).changed and state(doc) == unchanged, "full-turn rotation is an exact no-op")
+	expect_failure(doc, doc.rotate_brushes(ids, Vector3(INF, 0, 0), 2, PI), unchanged, "INVALID_ARGUMENT", "rotate_brushes")
+	expect_failure(doc, doc.rotate_brushes(PackedInt64Array([999999]), Vector3.ZERO, 2, PI), unchanged, "INVALID_ID", "rotate_brushes")
 
 func test_phase5() -> void:
 	var doc = ClassDB.instantiate("TBMapDocument")

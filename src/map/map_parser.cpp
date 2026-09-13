@@ -3,13 +3,12 @@
 #include "face.h"
 #include "patch.h"
 #include "platform.h"
+#include <charconv>
 #include <cmath>
 #include <cctype>
 #include <cstring>
 #include <fstream>
 #include <limits>
-#include <locale>
-#include <sstream>
 
 namespace {
 template <typename T> T &append(T *&items, int &count) {
@@ -88,18 +87,20 @@ class Parser {
 		return next();
 	}
 	bool number(double &out) {
-		std::istringstream in(current.text);
-		in.imbue(std::locale::classic());
-		if (current.quoted || !(in >> out) || !in.eof() || !std::isfinite(out)) return fail("Expected a finite number");
+		const char *first = current.text.data(), *last = first + current.text.size();
+		if (first != last && *first == '+') ++first;
+		auto parsed = std::from_chars(first, last, out, std::chars_format::general);
+		if (current.quoted || first == last || parsed.ec != std::errc() || parsed.ptr != last || !std::isfinite(out)) return fail("Expected a finite number");
 		if (std::abs(out) > 1e9) return fail("Numeric magnitude exceeds 1e9", "LIMIT_EXCEEDED");
 		return next();
 	}
 	bool integer(int &out) {
 		// Flags use the complete signed 32-bit range, independently of coordinate limits.
-		std::istringstream in(current.text);
-		in.imbue(std::locale::classic());
 		int64_t value;
-		if (current.quoted || !(in >> value) || !in.eof() || value < INT32_MIN || value > INT32_MAX) return fail("Expected a signed 32-bit integer");
+		const char *first = current.text.data(), *last = first + current.text.size();
+		if (first != last && *first == '+') ++first;
+		auto parsed = std::from_chars(first, last, value);
+		if (current.quoted || first == last || parsed.ec != std::errc() || parsed.ptr != last || value < INT32_MIN || value > INT32_MAX) return fail("Expected a signed 32-bit integer");
 		out = static_cast<int>(value);
 		return next();
 	}

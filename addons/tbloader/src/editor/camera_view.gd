@@ -1,16 +1,30 @@
 @tool
 extends Control
 
+signal camera_moved(map_position: Vector3, map_direction: Vector3)
+
 var host: Control
 var viewport: SubViewport
 var camera: Camera3D
 var geometry: Node3D
+var map_geometry: Node3D
+var overlays: Node3D
+var preview_lights: Node3D
 var flying = false
 var held: Dictionary = {}
 var pitch = -0.4
 var yaw = 0.65
 var triangle_count = 0
 var hint: Label
+var rendered_key = ""
+var geometry_chunks: Dictionary = {}
+var lighting_key: Array = []
+var lighting_initialized = false
+var lighting_sync_delay = 0.0
+var marker_transform := Transform3D()
+var marker_scale = 0.0
+const CHUNK_TRIANGLES = 2048
+const CHUNK_SIZE = 64.0
 
 func _ready() -> void:
 	focus_mode = Control.FOCUS_ALL
@@ -27,6 +41,10 @@ func _ready() -> void:
 	container.add_child(viewport)
 	geometry = Node3D.new()
 	viewport.add_child(geometry)
+	map_geometry = Node3D.new()
+	geometry.add_child(map_geometry)
+	overlays = Node3D.new()
+	geometry.add_child(overlays)
 	camera = Camera3D.new()
 	viewport.add_child(camera)
 	camera.position = Vector3(8, 7, 12)
@@ -41,11 +59,11 @@ func _ready() -> void:
 	environment.environment.ambient_light_color = Color.WHITE
 	environment.environment.ambient_light_energy = 0.75
 	viewport.add_child(environment)
-	var light = DirectionalLight3D.new()
-	light.rotation_degrees = Vector3(-45, -35, 0)
-	viewport.add_child(light)
+	preview_lights = Node3D.new()
+	viewport.add_child(preview_lights)
+	sync_scene_lighting(true)
 	hint = Label.new()
-	hint.text = " Camera • RMB fly • WASD / Q E • Shift fast"
+	hint.text = " Camera • LMB select • Shift+LMB multi-select • RMB fly"
 	hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(hint)
 	var frame_button = Button.new()
@@ -60,17 +78,40 @@ func _ready() -> void:
 			stop_fly())
 
 func transform_map(point: Vector3) -> Vector3:
+	return transform_map_scaled(point, map_scale())
+
+func map_scale() -> float:
 	var scale_value = 38.0
 	var loader = host.session.loader.get_ref()
 	if is_instance_valid(loader):
 		scale_value = maxf(loader.map_inverse_scale, 0.001)
+	return scale_value
+
+func transform_map_scaled(point: Vector3, scale_value: float) -> Vector3:
 	return Vector3(point.y, point.z, point.x) / scale_value
+
+func camera_map_position(scale_value := map_scale()) -> Vector3:
+	return Vector3(camera.global_position.z, camera.global_position.x, camera.global_position.y) * scale_value
+
+func camera_map_direction() -> Vector3:
+	var direction := -camera.global_basis.z
+	return Vector3(direction.z, direction.x, direction.y).normalized()
+
+func sync_camera_marker(force = false) -> void:
+	if camera == null or host == null or host.session == null:
+		return
+	var scale_value := map_scale()
+	if not force and camera.global_transform == marker_transform and is_equal_approx(scale_value, marker_scale):
+		return
+	marker_transform = camera.global_transform
+	marker_scale = scale_value
+	camera_moved.emit(camera_map_position(scale_value), camera_map_direction())
 
 func frame_selection() -> void:
 	var bounds: AABB
 	var first = true
-	for brush in host.session.document.get_draw_data():
-		if host.session.hidden.has(brush.id) or (not host.session.selected.is_empty() and not host.session.selected.has(brush.id)):
+	for brush in host.session.draw_data():
+		if not host.session.brush_visible(brush) or (not host.session.selected.is_empty() and not host.session.selected.has(brush.id)):
 			continue
 		var box = AABB(transform_map(brush.aabb_min), transform_map(brush.aabb_max - brush.aabb_min))
 		bounds = box if first else bounds.merge(box)
@@ -86,52 +127,183 @@ func frame_selection() -> void:
 func refresh() -> void:
 	if geometry == null:
 		return
-	for child in geometry.get_children():
-		geometry.remove_child(child)
+	sync_camera_marker()
+	sync_scene_lighting()
+	var hidden_ids: Array = host.session.hidden.keys()
+	hidden_ids.sort()
+	var scale_value := map_scale()
+	var loader = host.session.loader.get_ref()
+	var visual_layer: int = loader.option_visual_layer_mask if is_instance_valid(loader) else 1
+	var key := "%d:%d:%s:%s:%s:%d" % [host.session.preview_generation, host.session.visibility_generation, str(hidden_ids), scale_value, str(host.resolver_config), visual_layer]
+	if key != rendered_key:
+		rendered_key = key
+		rebuild_geometry(scale_value)
+	for child in overlays.get_children():
+		overlays.remove_child(child)
 		child.queue_free()
+	build_overlays(scale_value)
+
+func add_preview_mesh(vertices: PackedVector3Array, normals: PackedVector3Array, uvs: PackedVector2Array, material: Material) -> MeshInstance3D:
+	if vertices.is_empty():
+		return null
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	arrays[Mesh.ARRAY_NORMAL] = normals
+	arrays[Mesh.ARRAY_TEX_UV] = uvs
+	var mesh = ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	var instance = MeshInstance3D.new()
+	instance.mesh = mesh
+	instance.material_override = material
+	var loader = host.session.loader.get_ref()
+	if is_instance_valid(loader):
+		instance.layers = loader.option_visual_layer_mask
+	map_geometry.add_child(instance)
+	return instance
+
+func scene_directional_lights() -> Array[DirectionalLight3D]:
+	var result: Array[DirectionalLight3D] = []
+	var root = host.session.scene.get_ref()
+	if not is_instance_valid(root):
+		return result
+	if root is DirectionalLight3D:
+		result.append(root)
+	for node in root.find_children("*", "DirectionalLight3D", true, false):
+		result.append(node)
+	return result
+
+func copied_light_properties(light: DirectionalLight3D) -> Array:
+	var result: Array = []
+	for property in light.get_property_list():
+		var property_name: String = property.name
+		if property_name == "visible" or property_name == "editor_only" or property_name.begins_with("light_") or property_name.begins_with("shadow_") or property_name.begins_with("directional_") or property_name.begins_with("distance_fade_"):
+			result.append([property.name, light.get(property.name)])
+	return result
+
+func sync_scene_lighting(force = false) -> void:
+	if preview_lights == null or host == null or host.session == null:
+		return
+	var sources := scene_directional_lights()
+	var key: Array = []
+	for source in sources:
+		key.append([source.get_instance_id(), source.global_transform, copied_light_properties(source)])
+	if not force and lighting_initialized and key == lighting_key:
+		return
+	lighting_key = key
+	lighting_initialized = true
+	for child in preview_lights.get_children():
+		preview_lights.remove_child(child)
+		child.queue_free()
+	if sources.is_empty():
+		var fallback = DirectionalLight3D.new()
+		fallback.rotation_degrees = Vector3(-45, -35, 0)
+		fallback.shadow_enabled = true
+		preview_lights.add_child(fallback)
+		return
+	for source in sources:
+		var light = DirectionalLight3D.new()
+		for property in copied_light_properties(source):
+			light.set(property[0], property[1])
+		preview_lights.add_child(light)
+		light.global_transform = source.global_transform
+
+func rebuild_geometry(scale_value: float) -> void:
 	triangle_count = 0
-	for group in host.session.document.get_preview_data():
-		var vertices = PackedVector3Array()
-		var normals = PackedVector3Array()
-		var uvs = PackedVector2Array()
-		var colors = PackedColorArray()
+	var retained: Dictionary = {}
+	for group in host.session.preview_data():
+		var chunks: Dictionary = {}
 		for triangle in group.triangle_brush_ids.size():
 			var id: int = group.triangle_brush_ids[triangle]
-			if host.session.hidden.has(id):
+			if not host.session.triangle_visible(id, group.texture):
 				continue
 			triangle_count += 1
+			var first: int = group.indices[triangle * 3]
+			var center: Vector3 = (group.vertices[first] + group.vertices[group.indices[triangle * 3 + 1]] + group.vertices[group.indices[triangle * 3 + 2]]) / 3.0
+			var chunk_key = Vector3i.ZERO
+			if group.triangle_brush_ids.size() > CHUNK_TRIANGLES:
+				var transformed_center := transform_map_scaled(center, scale_value)
+				chunk_key = Vector3i(floori(transformed_center.x / CHUNK_SIZE), floori(transformed_center.y / CHUNK_SIZE), floori(transformed_center.z / CHUNK_SIZE))
+			if not chunks.has(chunk_key):
+				chunks[chunk_key] = {"vertices": [], "normals": [], "uvs": []}
+			var chunk: Dictionary = chunks[chunk_key]
 			for corner in 3:
 				var index: int = group.indices[triangle * 3 + corner]
-				vertices.append(transform_map(group.vertices[index]))
+				chunk.vertices.append(transform_map_scaled(group.vertices[index], scale_value))
 				var normal: Vector3 = group.normals[index]
-				normals.append(Vector3(normal.y, normal.z, normal.x))
-				uvs.append(group.uvs[index])
-				colors.append(Color(1, 0.65, 0.25) if host.session.selected.has(id) else Color.WHITE)
-		if vertices.is_empty():
-			continue
-		var arrays: Array = []
-		arrays.resize(Mesh.ARRAY_MAX)
-		arrays[Mesh.ARRAY_VERTEX] = vertices
-		arrays[Mesh.ARRAY_NORMAL] = normals
-		arrays[Mesh.ARRAY_TEX_UV] = uvs
-		arrays[Mesh.ARRAY_COLOR] = colors
-		var mesh = ArrayMesh.new()
-		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-		var instance = MeshInstance3D.new()
-		instance.mesh = mesh
-		instance.material_override = host.preview_material(group.texture)
-		geometry.add_child(instance)
+				chunk.normals.append(Vector3(normal.y, normal.z, normal.x))
+				chunk.uvs.append(group.uvs[index])
+		var material: Material = host.preview_material(group.texture)
+		for chunk_key in chunks:
+			var key := "%s|%d,%d,%d" % [group.texture, chunk_key.x, chunk_key.y, chunk_key.z]
+			var chunk: Dictionary = chunks[chunk_key]
+			var vertices := PackedVector3Array(chunk.vertices)
+			var normals := PackedVector3Array(chunk.normals)
+			var uvs := PackedVector2Array(chunk.uvs)
+			var cached: Dictionary = geometry_chunks.get(key, {})
+			if not cached.is_empty() and cached.vertices == vertices and cached.normals == normals and cached.uvs == uvs:
+				cached.instance.material_override = material
+				var loader = host.session.loader.get_ref()
+				cached.instance.layers = loader.option_visual_layer_mask if is_instance_valid(loader) else 1
+				retained[key] = cached
+			else:
+				if not cached.is_empty():
+					map_geometry.remove_child(cached.instance)
+					cached.instance.queue_free()
+				var instance := add_preview_mesh(vertices, normals, uvs, material)
+				retained[key] = {"instance": instance, "vertices": vertices, "normals": normals, "uvs": uvs}
+	for key in geometry_chunks:
+		if not retained.has(key):
+			var stale: Dictionary = geometry_chunks[key]
+			map_geometry.remove_child(stale.instance)
+			stale.instance.queue_free()
+	geometry_chunks = retained
+
+func build_overlays(scale_value: float) -> void:
 	for marker in host.session.point_markers():
+		if not host.session.marker_visible():
+			continue
 		var instance = MeshInstance3D.new()
 		var mesh = SphereMesh.new()
 		mesh.radius = 0.15
 		mesh.height = 0.3
 		instance.mesh = mesh
-		instance.position = transform_map(marker.origin)
+		instance.position = transform_map_scaled(marker.origin, scale_value)
 		var material = StandardMaterial3D.new()
 		material.albedo_color = Color("ffb657") if host.session.points.has(marker.id) else Color("83dfbd")
 		instance.material_override = material
-		geometry.add_child(instance)
+		overlays.add_child(instance)
+	if host.tool in ["Face", "Edge"]:
+		var handle_material = StandardMaterial3D.new()
+		handle_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		handle_material.albedo_color = Color("ffb657")
+		var selected_handle_material = StandardMaterial3D.new()
+		selected_handle_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		selected_handle_material.albedo_color = Color("ffe6a6")
+		for id in host.session.selected:
+			var brush: Dictionary = host.session.brush(id)
+			if not host.session.brush_visible(brush):
+				continue
+			var count: int = brush.faces.size() if host.tool == "Face" else brush.edge_vertex_indices.size() / 2
+			for index in count:
+				var position: Vector3
+				if host.tool == "Face":
+					if host.session.material_filtered(brush.faces[index].texture):
+						continue
+					position = brush.faces[index].center
+				else:
+					var edge: int = index * 2
+					position = (brush.vertices[brush.edge_vertex_indices[edge]] + brush.vertices[brush.edge_vertex_indices[edge + 1]]) * 0.5
+				var selected: bool = host.session.components.any(func(component):
+					return component.brush_id == id and component.kind == host.tool.to_lower() and component.index == index and host.session.component_valid(component, brush))
+				var handle = MeshInstance3D.new()
+				var handle_mesh = SphereMesh.new()
+				handle_mesh.radius = 0.1
+				handle_mesh.height = 0.2
+				handle.mesh = handle_mesh
+				handle.position = transform_map_scaled(position, scale_value)
+				handle.material_override = selected_handle_material if selected else handle_material
+				overlays.add_child(handle)
 	var outline = ImmediateMesh.new()
 	var outline_material = StandardMaterial3D.new()
 	outline_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -139,18 +311,18 @@ func refresh() -> void:
 	var has_lines = false
 	for id in host.session.selected:
 		var brush: Dictionary = host.session.brush(id)
-		if brush.is_empty() or host.session.hidden.has(id):
+		if not host.session.brush_visible(brush):
 			continue
 		if not has_lines:
 			outline.surface_begin(Mesh.PRIMITIVE_LINES, outline_material)
 			has_lines = true
 		for edge in brush.edges:
-			outline.surface_add_vertex(transform_map(edge))
+			outline.surface_add_vertex(transform_map_scaled(edge, scale_value))
 	if has_lines:
 		outline.surface_end()
 		var instance = MeshInstance3D.new()
 		instance.mesh = outline
-		geometry.add_child(instance)
+		overlays.add_child(instance)
 
 func _gui_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton and event.pressed:
@@ -168,6 +340,8 @@ func pick(position: Vector2, additive: bool) -> void:
 	var nearest = INF
 	var point_id = 0
 	for marker in host.session.point_markers():
+		if not host.session.marker_visible():
+			continue
 		var p = transform_map(marker.origin)
 		if not camera.is_position_behind(p) and camera.unproject_position(p).distance_to(position) < 14:
 			var distance = camera.global_position.distance_to(p)
@@ -176,24 +350,57 @@ func pick(position: Vector2, additive: bool) -> void:
 				point_id = marker.id
 	var ray = camera.project_ray_origin(position)
 	var direction = camera.project_ray_normal(position)
+	var scale_value := map_scale()
+	var candidates: Dictionary = {}
+	for brush in host.session.draw_data():
+		if not host.session.brush_visible(brush):
+			continue
+		var box := AABB(transform_map_scaled(brush.aabb_min, scale_value), transform_map_scaled(brush.aabb_max - brush.aabb_min, scale_value))
+		if box.intersects_ray(ray, direction) != null:
+			candidates[brush.id] = true
 	var id = 0
 	var face_index = -1
-	for group in host.session.document.get_preview_data():
+	for group in host.session.preview_data():
 		for triangle in group.triangle_brush_ids.size():
 			var brush_id: int = group.triangle_brush_ids[triangle]
-			if host.session.hidden.has(brush_id):
+			if not candidates.has(brush_id) or not host.session.triangle_visible(brush_id, group.texture):
 				continue
-			var p = transform_map(group.vertices[group.indices[triangle * 3]])
-			var q = transform_map(group.vertices[group.indices[triangle * 3 + 1]])
-			var r = transform_map(group.vertices[group.indices[triangle * 3 + 2]])
+			var p = transform_map_scaled(group.vertices[group.indices[triangle * 3]], scale_value)
+			var q = transform_map_scaled(group.vertices[group.indices[triangle * 3 + 1]], scale_value)
+			var r = transform_map_scaled(group.vertices[group.indices[triangle * 3 + 2]], scale_value)
 			var intersection = Geometry3D.ray_intersects_triangle(ray, direction, p, q, r)
-			if intersection != null and ray.distance_to(intersection) < nearest:
-				nearest = ray.distance_to(intersection)
+			if intersection != null:
+				var distance := ray.distance_to(intersection)
+				if distance >= nearest:
+					continue
+				nearest = distance
 				id = brush_id
 				point_id = 0
 				face_index = group.triangle_face_indices[triangle]
+	apply_pick(id, point_id, face_index, additive)
+
+func apply_pick(id: int, point_id: int, face_index: int, additive: bool) -> void:
 	if point_id:
 		host.session.select(PackedInt64Array(), PackedInt64Array([point_id]))
+		return
+	if host.tool == "Face":
+		var ids = host.session.selected.duplicate() if additive else PackedInt64Array()
+		var components: Array = host.session.components.duplicate(true) if additive else []
+		if not id:
+			if not additive:
+				host.session.select(PackedInt64Array())
+			return
+		if not ids.has(id):
+			ids.append(id)
+		host.session.select(ids)
+		var component = {"brush_id": id, "kind": "face", "index": face_index, "topology_revision": host.session.brush(id).topology_revision}
+		var existing := components.find(component)
+		if additive and existing >= 0:
+			components.remove_at(existing)
+		else:
+			components.append(component)
+		host.session.components = components.filter(func(item): return host.session.component_valid(item, host.session.brush(item.brush_id)))
+		host.session.changed.emit()
 		return
 	var ids = host.session.selected.duplicate() if additive else PackedInt64Array()
 	if id:
@@ -202,9 +409,6 @@ func pick(position: Vector2, additive: bool) -> void:
 		else:
 			ids.append(id)
 	host.session.select(ids)
-	if id and host.tool == "Face":
-		host.session.components = [{"brush_id": id, "kind": "face", "index": face_index, "topology_revision": host.session.brush(id).topology_revision}]
-		host.session.changed.emit()
 
 func start_fly() -> void:
 	flying = true
@@ -218,7 +422,7 @@ func stop_fly() -> void:
 	flying = false
 	held.clear()
 	if hint != null:
-		hint.text = " Camera • RMB fly • WASD / Q E • Shift fast"
+		hint.text = " Camera • LMB select • Shift+LMB multi-select • RMB fly"
 
 func _input(event: InputEvent) -> void:
 	if not flying:
@@ -237,12 +441,16 @@ func _input(event: InputEvent) -> void:
 	get_viewport().set_input_as_handled()
 
 func _process(dt: float) -> void:
-	if not flying:
-		return
-	var direction = Vector3(float(held.get(KEY_D, false)) - float(held.get(KEY_A, false)),
-		float(held.get(KEY_E, false)) - float(held.get(KEY_Q, false)),
-		float(held.get(KEY_S, false)) - float(held.get(KEY_W, false)))
-	camera.position += camera.basis * direction.normalized() * dt * (30 if held.get(KEY_SHIFT, false) else 8)
+	lighting_sync_delay -= dt
+	if lighting_sync_delay <= 0:
+		lighting_sync_delay = 0.25
+		sync_scene_lighting()
+	if flying:
+		var direction = Vector3(float(held.get(KEY_D, false)) - float(held.get(KEY_A, false)),
+			float(held.get(KEY_E, false)) - float(held.get(KEY_Q, false)),
+			float(held.get(KEY_S, false)) - float(held.get(KEY_W, false)))
+		camera.position += camera.basis * direction.normalized() * dt * (30 if held.get(KEY_SHIFT, false) else 8)
+	sync_camera_marker()
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_APPLICATION_FOCUS_OUT or what == NOTIFICATION_EXIT_TREE:

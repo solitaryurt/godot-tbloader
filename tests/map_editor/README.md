@@ -87,6 +87,7 @@ python tests/map_editor/run_tests.py --godot "$GODOT_BIN" --suite document --pro
 | `valve_cube.map` | Roundtrip explicit axes and fractional offsets |
 | `patches.map` | def2/def3 header values/subdivisions, fractional point, ordered light epairs |
 | `ownership.map` | Ordered duplicate/empty/escaped/Unicode epairs, point/brush owners, fractional planes and nonzero flags |
+| `tohunga.map` | Provided 3,195,820-byte production map; large-map parse, geometry, snapshot serialization, editor transaction and undo regression (SHA-256 `1e9d250d26267ebda5ff52978ebacca23e37a686865fe47f950b0109e7ca8811`) |
 | Generated `textures/baseline/checker.png` | 64x32 checker with unique red top-left tile; stdlib-only generator in runner |
 
 The document suite also composes interleaved brush/patch input and malformed cases

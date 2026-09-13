@@ -10,6 +10,46 @@
 #include <string.h>
 #include <utility>
 
+size_t LMMapData::retained_bytes() const {
+	size_t bytes = sizeof(LMMapData);
+	bytes += size_t(entity_count) * sizeof(LMEntity);
+	for (int e = 0; e < entity_count; ++e) {
+		const auto &entity = entities[e];
+		bytes += size_t(entity.primitive_count) * sizeof(LMPrimitive);
+		bytes += size_t(entity.property_count) * sizeof(LMProperty);
+		for (int p = 0; p < entity.property_count; ++p) {
+			bytes += entity.properties[p].key ? strlen(entity.properties[p].key) + 1 : 0;
+			bytes += entity.properties[p].value ? strlen(entity.properties[p].value) + 1 : 0;
+		}
+		bytes += size_t(entity.brush_count) * sizeof(LMBrush);
+		for (int b = 0; b < entity.brush_count; ++b) bytes += size_t(entity.brushes[b].face_count) * sizeof(LMFace);
+		bytes += size_t(entity.patch_count) * sizeof(LMPatch);
+		for (int p = 0; p < entity.patch_count; ++p) bytes += size_t(entity.patches[p].width) * size_t(entity.patches[p].height) * sizeof(LMPatchControlPoint);
+	}
+	bytes += size_t(texture_count) * sizeof(LMTextureData);
+	for (int t = 0; t < texture_count; ++t) bytes += textures[t].name ? strlen(textures[t].name) + 1 : 0;
+	bytes += size_t(worldspawn_layer_count) * sizeof(LMWorldspawnLayer);
+	bytes += size_t(geometry_entity_count) * sizeof(LMEntityGeometry);
+	for (int e = 0; e < geometry_entity_count; ++e) {
+		const auto &geometry = entity_geo[e];
+		bytes += size_t(geometry.brush_count) * sizeof(LMBrushGeometry);
+		for (int b = 0; b < geometry.brush_count; ++b) {
+			const auto &brush = geometry.brushes[b];
+			bytes += size_t(brush.face_count) * sizeof(LMFaceGeometry);
+			for (int f = 0; f < brush.face_count; ++f) {
+				bytes += size_t(brush.faces[f].vertex_count) * sizeof(LMFaceVertex);
+				bytes += size_t(brush.faces[f].index_count) * sizeof(int);
+			}
+		}
+		bytes += size_t(geometry.patch_count) * sizeof(LMPatchGeometry);
+		for (int p = 0; p < geometry.patch_count; ++p) {
+			bytes += size_t(geometry.patches[p].vertex_count) * sizeof(LMFaceVertex);
+			bytes += size_t(geometry.patches[p].index_count) * sizeof(int);
+		}
+	}
+	return bytes;
+}
+
 void LMMapData::map_data_free_geometry() {
 	// Allocation counts belong to the cache, never to subsequently edited topology.
 	if (entity_geo) {

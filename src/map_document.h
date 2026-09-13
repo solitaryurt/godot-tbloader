@@ -14,12 +14,29 @@
 
 namespace godot {
 
+class TBMapDocumentState : public RefCounted {
+	GDCLASS(TBMapDocumentState, RefCounted);
+	friend class TBMapDocument;
+	std::shared_ptr<LMMapData> map;
+	std::shared_ptr<const std::string> canonical;
+	Dictionary texture_sizes;
+	int64_t epoch = 0;
+
+protected:
+	static void _bind_methods();
+
+public:
+	int64_t get_retained_bytes() const;
+	int64_t get_additional_retained_bytes(const Ref<TBMapDocumentState> &other) const;
+};
+
 class TBMapDocument : public RefCounted {
 	GDCLASS(TBMapDocument, RefCounted);
 	std::shared_ptr<LMMapData> map;
 	String path;
 	String disk_path;
-	std::string canonical, baseline, disk_bytes;
+	std::shared_ptr<const std::string> canonical = std::make_shared<const std::string>();
+	std::string baseline, disk_bytes;
 	bool has_baseline = false;
 	int64_t epoch = 0, revision = 0, next_id = 1, topology = 0;
 	std::unordered_map<int64_t, char> issued_ids;
@@ -31,7 +48,7 @@ class TBMapDocument : public RefCounted {
 	void resolve_texture_sizes(LMMapData &data, const Dictionary &sizes) const;
 
 	Dictionary replace_text(const std::string &text, const StringName &operation, const String &new_path, bool saved);
-	Dictionary prepare(const std::string &text, std::shared_ptr<LMMapData> &candidate, const StringName &operation, const String &error_path) const;
+	Dictionary prepare(const std::string &text, std::shared_ptr<LMMapData> &candidate, const StringName &operation, const String &error_path, std::string *normalized = nullptr) const;
 	void assign_ids(LMMapData &candidate);
 	void commit(std::shared_ptr<LMMapData> candidate, const std::string &text, bool was_dirty);
 	Dictionary identities(const LMMapData &data) const;
@@ -51,8 +68,11 @@ public:
 	Dictionary export_text() const;
 	Dictionary snapshot() const;
 	Dictionary restore_snapshot(const Dictionary &snapshot);
+	Ref<TBMapDocumentState> capture_history_state() const;
+	Dictionary restore_history_state(const Ref<TBMapDocumentState> &state);
+	bool is_history_state_current(const Ref<TBMapDocumentState> &state) const;
 	Dictionary rebuild();
-	bool is_dirty() const { return !has_baseline || canonical != baseline; }
+	bool is_dirty() const { return !has_baseline || *canonical != baseline; }
 	String get_path() const { return path; }
 	int64_t get_revision() const { return revision; }
 	int64_t get_epoch() const { return epoch; }
@@ -66,6 +86,7 @@ public:
 	Dictionary duplicate_brushes(const PackedInt64Array &ids);
 	Dictionary delete_brushes(const PackedInt64Array &ids);
 	Dictionary translate_brushes(const PackedInt64Array &ids, Vector3 delta);
+	Dictionary rotate_brushes(const PackedInt64Array &ids, Vector3 pivot, int axis, double radians);
 	Dictionary translate_face(int64_t id, int face, Vector3 delta, int64_t topology_revision);
 	Dictionary set_brush_texture(const PackedInt64Array &ids, const String &name);
 	Dictionary set_face_texture(int64_t id, int face, const String &name, int64_t topology_revision);

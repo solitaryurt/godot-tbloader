@@ -4,6 +4,7 @@
 #include "entity.h"
 #include "entity_geometry.h"
 #include "libmap.h"
+#include <stddef.h>
 #include <stdlib.h>
 
 typedef struct LMTextureData {
@@ -50,6 +51,7 @@ public:
 	~LMMapData();
 	LMMapData(const LMMapData &) = delete;
 	LMMapData &operator=(const LMMapData &) = delete;
+	size_t retained_bytes() const;
 	void swap(LMMapData &other);
 	void map_data_free_geometry();
 	void map_data_reset();

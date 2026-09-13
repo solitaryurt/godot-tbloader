@@ -17,6 +17,12 @@ var clip_points: Array[Vector3] = []
 var clip_flip = false
 var shift_drag = false
 var ctrl_drag = false
+var rotation_pivot = Vector3.ZERO
+var rotation_start_angle = 0.0
+var rotation_angle = 0.0
+var camera_position = Vector3.ZERO
+var camera_direction = Vector3.ZERO
+var camera_pose_valid = false
 
 func _ready() -> void:
 	focus_mode = Control.FOCUS_ALL
@@ -37,6 +43,18 @@ func axes() -> Vector2i:
 func project(point: Vector3) -> Vector2:
 	var a = axes()
 	return size * 0.5 + Vector2(point[a.x] - origin[a.x], origin[a.y] - point[a.y]) * zoom
+
+func set_camera_pose(position: Vector3, direction: Vector3) -> void:
+	if camera_pose_valid and camera_position.is_equal_approx(position) and camera_direction.is_equal_approx(direction):
+		return
+	camera_position = position
+	camera_direction = direction
+	camera_pose_valid = true
+	queue_redraw()
+
+func projected_camera_direction(direction: Vector3 = camera_direction) -> Vector2:
+	var a := axes()
+	return Vector2(direction[a.x], -direction[a.y]).normalized()
 
 func unproject(point: Vector2) -> Vector3:
 	var a = axes()
@@ -71,15 +89,19 @@ func zoom_at(position: Vector2, factor: float) -> void:
 func cancel() -> void:
 	gesture = ""
 	delta = Vector3.ZERO
+	rotation_angle = 0.0
 	resize_face.clear()
 	drag_component.clear()
 	queue_redraw()
 
 func hit_brush(position: Vector2) -> int:
-	var data: Array = host.session.document.get_draw_data()
+	var data: Array = host.session.draw_data().duplicate()
 	data.reverse()
 	for brush in data:
-		if host.session.hidden.has(brush.id):
+		if not host.session.brush_visible(brush):
+			continue
+		var bounds := Rect2(project(brush.aabb_min), project(brush.aabb_max) - project(brush.aabb_min)).abs().grow(6)
+		if not bounds.has_point(position):
 			continue
 		for face in brush.faces:
 			var polygon = PackedVector2Array()
@@ -94,10 +116,34 @@ func hit_brush(position: Vector2) -> int:
 	return 0
 
 func hit_point(position: Vector2) -> int:
+	if not host.session.marker_visible():
+		return 0
 	for marker in host.session.point_markers():
 		if project(marker.origin).distance_to(position) <= 12:
 			return marker.id
 	return 0
+
+func selection_center() -> Vector3:
+	var bounds: AABB
+	var first = true
+	for id in host.session.selected:
+		var brush: Dictionary = host.session.brush(id)
+		if brush.is_empty():
+			continue
+		var item = AABB(brush.aabb_min, brush.aabb_max - brush.aabb_min)
+		bounds = item if first else bounds.merge(item)
+		first = false
+	return bounds.get_center() if not first else Vector3.ZERO
+
+func rotate_point(point: Vector3, angle: float) -> Vector3:
+	var a = axes()
+	var relative = point - rotation_pivot
+	var cosine = cos(angle)
+	var sine = sin(angle)
+	var result = point
+	result[a.x] = rotation_pivot[a.x] + relative[a.x] * cosine - relative[a.y] * sine
+	result[a.y] = rotation_pivot[a.y] + relative[a.x] * sine + relative[a.y] * cosine
+	return result
 
 func silhouette(position: Vector2) -> Dictionary:
 	for id in host.session.selected:
@@ -199,6 +245,10 @@ func _gui_input(event: InputEvent) -> void:
 			var a = axes()
 			origin[a.x] -= event.relative.x / zoom
 			origin[a.y] += event.relative.y / zoom
+		elif gesture == "rotate":
+			var center = project(rotation_pivot)
+			if cursor.distance_to(center) > 0.001:
+				rotation_angle = snappedf(rotation_start_angle - (cursor - center).angle(), deg_to_rad(15.0))
 		else:
 			delta = snap_point(unproject(cursor) - anchor)
 			delta[orientation] = 0
@@ -240,6 +290,28 @@ func begin_left(event: InputEventMouseButton) -> void:
 		clip_points.append(snap_point(anchor))
 		queue_redraw()
 		return
+	if host.tool == "Rotate":
+		var id = hit_brush(start)
+		if event.shift_pressed:
+			var ids = host.session.selected.duplicate()
+			if id and ids.has(id):
+				ids.remove_at(ids.find(id))
+			elif id:
+				ids.append(id)
+			host.session.select(ids)
+			return
+		if id and not host.session.selected.has(id):
+			host.session.select(PackedInt64Array([id]))
+		if not id:
+			host.session.select(PackedInt64Array())
+			return
+		rotation_pivot = selection_center()
+		var center = project(rotation_pivot)
+		if start.distance_to(center) > 4:
+			rotation_start_angle = (start - center).angle()
+			gesture = "rotate"
+		queue_redraw()
+		return
 	if (host.tool in ["Face", "Vertex", "Edge"] or event.ctrl_pressed) and not host.session.selected.is_empty():
 		var component = pick_component(start, "Face" if event.ctrl_pressed else host.tool, event.alt_pressed)
 		host.session.select_component(component, event.shift_pressed)
@@ -268,7 +340,7 @@ func begin_left(event: InputEventMouseButton) -> void:
 		if not host.session.points.has(point_id):
 			host.session.select(PackedInt64Array(), PackedInt64Array([point_id]))
 		gesture = "move"
-	elif host.session.selected.is_empty() and host.session.points.is_empty() and host.tool != "Select":
+	elif host.session.selected.is_empty() and host.session.points.is_empty() and host.tool == "Brush":
 		gesture = "create"
 	else:
 		resize_face = silhouette(start)
@@ -324,6 +396,10 @@ func finish_left(event: InputEventMouseButton) -> void:
 				return session.document.translate_face(component.brush_id, component.index, movement, component.topology_revision))
 		else:
 			session.transact("Move map components", func(): return session.move_components(movement))
+	elif gesture == "rotate" and not is_zero_approx(rotation_angle):
+		var angle = rotation_angle
+		var pivot = rotation_pivot
+		session.transact("Rotate map selection", func(): return session.document.rotate_brushes(session.selected, pivot, orientation, angle))
 	cancel()
 
 func box_select(end: Vector2) -> void:
@@ -333,13 +409,14 @@ func box_select(end: Vector2) -> void:
 	var direction = end - start
 	var add = direction.x >= 0 and direction.y <= 0
 	var remove = direction.x <= 0 and direction.y >= 0
-	for brush in host.session.document.get_draw_data():
-		if host.session.hidden.has(brush.id):
+	for brush in host.session.draw_data():
+		if not host.session.brush_visible(brush):
 			continue
 		var contained = true
 		for vertex in brush.vertices:
 			if not rect.has_point(project(vertex)):
 				contained = false
+				break
 		if contained:
 			if ids.has(brush.id) and (remove or not add):
 				ids.remove_at(ids.find(brush.id))
@@ -397,14 +474,26 @@ func _draw() -> void:
 				color = Color("88605e") if axis == a.x else Color("527e93")
 			draw_line(project(p), project(q), color)
 			v += step
-	for brush in host.session.document.get_draw_data():
-		if host.session.hidden.has(brush.id):
+	var visible_rect := Rect2(Vector2.ZERO, size).grow(10)
+	var selected_ids: Dictionary = {}
+	for id in host.session.selected:
+		selected_ids[id] = true
+	for brush in host.session.draw_data():
+		if not host.session.brush_visible(brush):
 			continue
-		var selected: bool = host.session.selected.has(brush.id)
+		var projected_bounds := Rect2(project(brush.aabb_min), project(brush.aabb_max) - project(brush.aabb_min)).abs()
+		if not visible_rect.intersects(projected_bounds):
+			continue
+		var selected: bool = selected_ids.has(brush.id)
 		var color = Color("ffb657") if selected else Color("9eb2c7")
 		var offset = delta if selected and gesture == "move" else Vector3.ZERO
 		for i in range(0, brush.edges.size(), 2):
-			draw_line(project(brush.edges[i] + offset), project(brush.edges[i + 1] + offset), color, 2 if selected else 1, true)
+			var p: Vector3 = brush.edges[i] + offset
+			var q: Vector3 = brush.edges[i + 1] + offset
+			if selected and gesture == "rotate":
+				p = rotate_point(p, rotation_angle)
+				q = rotate_point(q, rotation_angle)
+			draw_line(project(p), project(q), color, 2 if selected else 1, true)
 		if selected and host.tool in ["Vertex", "Edge"]:
 			var vertices: PackedVector3Array = brush.vertices
 			if host.tool == "Edge":
@@ -431,13 +520,34 @@ func _draw() -> void:
 				var q: Vector3 = brush.vertices[brush.edge_vertex_indices[component.index * 2 + 1]]
 				draw_line(project(p), project(q), Color("ffe6a6"), 3)
 				draw_circle(project((p + q) * 0.5), 6, Color("ffe6a6"))
-	for marker in host.session.point_markers():
-		var p = project(marker.origin + (delta if gesture == "move" and host.session.points.has(marker.id) else Vector3.ZERO))
-		var color = Color("ffb657") if host.session.points.has(marker.id) else Color("83dfbd")
-		draw_rect(Rect2(p - Vector2.ONE * 6, Vector2.ONE * 12), color, false, 2)
-		draw_string(ThemeDB.fallback_font, p + Vector2(10, -5), marker.classname, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, color)
+	if host.session.marker_visible():
+		for marker in host.session.point_markers():
+			var p = project(marker.origin + (delta if gesture == "move" and host.session.points.has(marker.id) else Vector3.ZERO))
+			var color = Color("ffb657") if host.session.points.has(marker.id) else Color("83dfbd")
+			draw_rect(Rect2(p - Vector2.ONE * 6, Vector2.ONE * 12), color, false, 2)
+			draw_string(ThemeDB.fallback_font, p + Vector2(10, -5), marker.classname, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, color)
+	if camera_pose_valid:
+		var camera_color := Color("62c7ff")
+		var camera_center := project(camera_position)
+		var view_direction := projected_camera_direction()
+		draw_circle(camera_center, 7, Color("20252d"))
+		draw_circle(camera_center, 7, camera_color, false, 2, true)
+		if not view_direction.is_zero_approx():
+			var tip := camera_center + view_direction * 28
+			var side := Vector2(-view_direction.y, view_direction.x)
+			draw_line(camera_center, tip, camera_color, 2, true)
+			draw_colored_polygon(PackedVector2Array([tip, tip - view_direction * 9 + side * 5, tip - view_direction * 9 - side * 5]), camera_color)
 	if gesture in ["create", "box", "resize", "component"]:
 		draw_rect(Rect2(start, cursor - start).abs(), Color("ffda8e"), false, 2)
+	if host.tool == "Rotate" and not host.session.selected.is_empty():
+		var pivot = project(rotation_pivot if gesture == "rotate" else selection_center())
+		draw_circle(pivot, 7, Color("20252d"))
+		draw_circle(pivot, 7, Color("ffda8e"), false, 2, true)
+		draw_line(pivot - Vector2(11, 0), pivot + Vector2(11, 0), Color("ffda8e"), 1)
+		draw_line(pivot - Vector2(0, 11), pivot + Vector2(0, 11), Color("ffda8e"), 1)
+		if gesture == "rotate":
+			draw_line(pivot, cursor, Color("ffda8e"), 2, true)
+			draw_string(ThemeDB.fallback_font, pivot + Vector2(12, -12), "%d°" % roundi(rad_to_deg(rotation_angle)), HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("ffda8e"))
 	for i in clip_points.size():
 		var p = project(clip_points[i])
 		draw_circle(p, 5, Color("fc7373"))

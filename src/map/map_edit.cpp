@@ -4,6 +4,7 @@
 #include "patch.h"
 #include "map_parser.h"
 #include "geo_generator.h"
+#include <cmath>
 
 std::string LMEditEntity::property(const std::string &key) const {
 	for (const auto &p : epairs) if (p.first == key) return p.second;
@@ -33,8 +34,9 @@ LMMapEdit::LMMapEdit(const LMMapData &map) {
 		entities.push_back(std::move(e));
 	}
 }
-std::string LMMapEdit::text() const {
+std::string LMMapEdit::text(size_t reserve) const {
 	std::string out;
+	out.reserve(reserve);
 	for (const auto &e : entities) {
 		out += "{\n";
 		for (const auto &p : e.epairs) out += lm_quote(p.first) + " " + lm_quote(p.second) + "\n";
@@ -80,6 +82,25 @@ LMEditPrimitive lm_edit_cuboid(vec3 mins, vec3 maxs, const std::string &texture)
 		brush.faces.push_back(f);
 	}
 	return brush;
+}
+
+void lm_edit_rotate_brush(LMEditPrimitive &brush, vec3 pivot, int axis, double radians) {
+	const int u = axis == 0 ? 1 : 0;
+	const int v = axis == 2 ? 1 : 2;
+	const double cosine = std::cos(radians), sine = std::sin(radians);
+	auto rotate = [&](vec3 &point) {
+		double values[] = {point.x, point.y, point.z};
+		const double center[] = {pivot.x, pivot.y, pivot.z};
+		const double x = values[u] - center[u], y = values[v] - center[v];
+		values[u] = center[u] + x * cosine - y * sine;
+		values[v] = center[v] + x * sine + y * cosine;
+		point = {values[0], values[1], values[2]};
+	};
+	for (auto &face : brush.faces) {
+		rotate(face.plane.plane_points.v0);
+		rotate(face.plane.plane_points.v1);
+		rotate(face.plane.plane_points.v2);
+	}
 }
 
 bool lm_edit_prune_faces(LMEditPrimitive &brush) {

@@ -174,7 +174,7 @@ def run(args):
         env["TB_TEST_PROBE"] = args.probe or ""
         if args.suite == "document":
             command = base + ["--headless", "--script", "res://document_suite.gd"]
-        elif args.suite == "editor":
+        elif args.suite in ("editor", "toolbar"):
             command = base + ["--headless", "--editor"]
         else:
             # Prefer the tested X11 path when both desktop sockets are available.
@@ -205,7 +205,7 @@ def run(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--godot", default=os.environ.get("GODOT_BIN", DEFAULT_ENGINE))
-    parser.add_argument("--suite", choices=("document", "editor", "ui"), required=True)
+    parser.add_argument("--suite", choices=("document", "editor", "toolbar", "ui"), required=True)
     parser.add_argument("--timeout", type=float, default=90, help="external timeout per process, seconds")
     parser.add_argument("--artifacts", type=Path, default=HERE / "artifacts")
     parser.add_argument("--keep-project", action="store_true")

@@ -71,7 +71,7 @@ func run() -> void:
 		print("TB_TEST_COMPLETE:import:PASS")
 		get_tree().quit(0)
 		return
-	if suite not in ["editor", "ui", "reopen"]:
+	if suite not in ["editor", "toolbar", "ui", "reopen"]:
 		return
 	for frame in 8:
 		await get_tree().process_frame
@@ -91,7 +91,52 @@ func run() -> void:
 	checks.check(Engine.is_editor_hint() and ClassDB.class_exists("TBMapDocument"), "actual editor and native document")
 	checks.check(plugin._has_main_screen() and ui.is_visible_in_tree(), "Map main screen attached and visible")
 	checks.check(plugin.materials_panel.is_inside_tree(), "legacy materials panel retained")
+	checks.check(plugin.materials_grid is ItemList and plugin.materials_grid.icon_mode == ItemList.ICON_MODE_TOP and plugin.materials_grid.visible, "materials panel defaults to rendered grid")
 	checks.check(plugin.map_control.get_child(0).text == "Build Meshes", "legacy build toolbar retained")
+	var map_toolbar: Control = ui.get_child(0)
+	var toolbar_labels: Array[String] = []
+	for child in map_toolbar.get_children():
+		if child is Button:
+			toolbar_labels.append(child.text)
+	checks.check(["Select", "Brush", "Cut", "Rotate", "Face", "Edge", "Vertex", "Texture"].all(func(mode): return toolbar_labels.count(mode) == 1 and ui.tool_buttons[mode].get_parent() == map_toolbar), "map toolbar exposes each established editing mode once")
+	checks.check(["New", "Open…", "Save", "Save As…"].all(func(command): return not toolbar_labels.has(command)), "map toolbar omits redundant document controls")
+	checks.check((ui.status.text.begins_with("UNSAVED •") or ui.status.text.begins_with("saved •")) and ui.status.text.contains("baked") and ui.status.text.contains("grid") and ui.status.text.contains("selected") and ui.status.text.contains("hidden"), "bottom status omits map title and retains editing state")
+	camera_marker_regression()
+	if suite == "toolbar":
+		var graph = ui.graph_a
+		graph.grab_focus()
+		graph.origin = Vector3.ZERO
+		graph.zoom = 1
+		var created: Dictionary = ui.session.document.create_cuboid(Vector3(-32, -16, -16), Vector3(32, 16, 16), "rotate/material")
+		ui.session.select(PackedInt64Array([created.value]))
+		var before_rotate: String = text()
+		key(KEY_R)
+		checks.check(ui.tool == "Rotate" and ui.tool_buttons.Rotate.button_pressed, "R activates toolbar Rotate tool")
+		mouse(graph, graph.project(Vector3(24, 0, 0)), true)
+		motion(graph, graph.project(Vector3(0, 24, 0)))
+		checks.check(graph.gesture == "rotate" and is_equal_approx(rad_to_deg(graph.rotation_angle), 90) and text() == before_rotate, "Rotate provides snapped disposable grid preview")
+		mouse(graph, graph.project(Vector3(0, 24, 0)), false)
+		var rotated: String = text()
+		checks.check(rotated != before_rotate and ui.session.brush(created.value).aabb_min.is_equal_approx(Vector3(-16, -32, -16)), "Rotate release commits valid brush geometry")
+		checks.check(history.undo() and text() == before_rotate, "Rotate action uses exact editor undo")
+		checks.finish(get_tree(), suite)
+		return
+	checks.check(ui.camera_view.preview_lights.get_child_count() == 1 and ui.camera_view.preview_lights.get_child(0).shadow_enabled, "standalone camera uses shadowed fallback sun")
+	var scene_root = Node3D.new()
+	get_tree().root.add_child(scene_root)
+	var scene_light = DirectionalLight3D.new()
+	scene_light.rotation_degrees = Vector3(-20, 35, 5)
+	scene_light.light_color = Color("d8e6ff")
+	scene_light.light_energy = 2.5
+	scene_light.shadow_enabled = true
+	scene_root.add_child(scene_light)
+	ui.session.scene = weakref(scene_root)
+	ui.camera_view.sync_scene_lighting()
+	var preview_light: DirectionalLight3D = ui.camera_view.preview_lights.get_child(0)
+	checks.check(ui.camera_view.preview_lights.get_child_count() == 1 and preview_light.light_color == scene_light.light_color and preview_light.light_energy == scene_light.light_energy and preview_light.shadow_enabled and preview_light.global_basis.is_equal_approx(scene_light.global_basis), "camera mirrors scene DirectionalLight3D lighting and shadows")
+	ui.session.scene = weakref(null)
+	scene_root.free()
+	ui.camera_view.sync_scene_lighting(true)
 	checks.check(ui.graph_a.orientation == 2 and ui.graph_b.orientation == 1, "quad starts camera/top/materials/front")
 	var graph = ui.graph_a
 	graph.grab_focus()
@@ -129,6 +174,10 @@ func run() -> void:
 	checks.check(ui.tokens.size() == 1, "one gesture one action")
 	checks.check(manager.get_object_history_id(ui.session) == EditorUndoRedoManager.GLOBAL_HISTORY, "map session uses real global editor history")
 	checks.check(ui.camera_view.triangle_count == 12, "camera generated from native preview")
+	var preview_nodes: Array[Node] = ui.camera_view.map_geometry.get_children()
+	ui.camera_view.camera.position.x += 1
+	ui.camera_view._process(0)
+	checks.check(ui.camera_view.map_geometry.get_children() == preview_nodes, "camera marker update does not rebuild preview geometry")
 	var created = text()
 	key(KEY_Z, true)
 	checks.check(text() == before and ui.session.selected.is_empty(), "router undo restores geometry and selection")
@@ -149,6 +198,25 @@ func run() -> void:
 	checks.check(text() == created, "gesture motion is disposable preview")
 	key(KEY_ESCAPE)
 	checks.check(text() == created and ui.tokens.size() == count and graph.gesture == "", "Esc cancel no history")
+	var rotation_before: String = text()
+	var rotation_bounds: Dictionary = ui.session.brush(id)
+	var rotation_center: Vector3 = (rotation_bounds.aabb_min + rotation_bounds.aabb_max) * 0.5
+	key(KEY_R)
+	checks.check(ui.tool == "Rotate" and ui.tool_buttons.Rotate.button_pressed, "R activates toolbar Rotate tool")
+	mouse(graph, graph.project(rotation_center + Vector3(32, 0, 0)), true)
+	motion(graph, graph.project(rotation_center + Vector3(0, 32, 0)))
+	checks.check(graph.gesture == "rotate" and is_equal_approx(rad_to_deg(graph.rotation_angle), 90) and text() == rotation_before, "rotate drag shows snapped disposable preview around selection pivot")
+	mouse(graph, graph.project(rotation_center + Vector3(0, 32, 0)), false)
+	var rotation_after: String = text()
+	var rotated_brush: Dictionary = ui.session.brush(id)
+	checks.check(rotated_brush.aabb_min.is_equal_approx(Vector3(-48, -64, -64)) and rotated_brush.aabb_max.is_equal_approx(Vector3(48, 64, 64)), "top-grid rotate swaps projected brush extents and preserves hidden axis")
+	checks.check(rotation_after != rotation_before and ui.tokens.size() == count + 1, "rotate release commits one action")
+	key(KEY_Z, true)
+	checks.check(text() == rotation_before and ui.session.brush(id).aabb_min == rotation_bounds.aabb_min, "rotate undo restores exact text and geometry")
+	key(KEY_Y, true)
+	checks.check(text() == rotation_after, "rotate redo restores exact canonical result")
+	key(KEY_Z, true)
+	ui.set_tool("Brush")
 	for orientation in [2, 1, 0]:
 		graph.orientation = orientation
 		var center: Vector3 = (ui.session.brush(id).aabb_min + ui.session.brush(id).aabb_max) / 2
@@ -228,16 +296,13 @@ func run() -> void:
 	key(KEY_Z, true)
 	checks.check(text() == saved and ui.session.hidden.is_empty(), "text focus protects graph shortcuts and global undo")
 	graph.grab_focus()
-	# Material browser uses real EditorFileSystem and actual imported texture.
+	# Material browser uses the loader texture root and actual imported texture.
 	print("TB_UI_STAGE: graph/history complete; waiting for browser")
 	while ui.browser.is_refreshing():
 		await get_tree().process_frame
 	ui.browser.set_search("icon")
-	ui.browser.set_folder("res://addons")
-	checks.check(ui.browser.select_path("res://addons/tbloader/icon.png"), "browser selects texture outside loader root")
-	checks.check(ui.texture_field.text == "res://addons/tbloader/icon.png", "native exact project path resolves outside-root browser selection")
-	ui.assign_texture()
-	checks.check(ui.session.brush(id).faces[0].texture == "res://addons/tbloader/icon.png" and text().contains('"res://addons/tbloader/icon.png"'), "exact project token assigned and quoted in map")
+	checks.check(not ui.browser.set_folder("res://addons") and not ui.browser.select_path("res://addons/tbloader/icon.png"), "browser cannot leave loader texture root")
+	checks.check(ui.texture_field.text != "res://addons/tbloader/icon.png" and ui.session.brush(id).faces[0].texture != "res://addons/tbloader/icon.png", "outside-root texture is never assigned")
 	ui.browser.set_search("checker")
 	ui.browser.set_folder("res://")
 	checks.check(ui.browser.get_visible_paths().has("res://textures/baseline/checker.png"), "real browser search discovers checker")
@@ -395,8 +460,11 @@ func run() -> void:
 	loader.free()
 	await binding_journey(plugin)
 	precision_journey()
+	visibility_filter_journey()
 	await phase5_journey()
 	await review_regressions(plugin)
+	await tohunga_editor_journey()
+	await automatic_scene_journey(plugin)
 	if suite == "ui":
 		print("TB_UI_STAGE: capturing rendered quad")
 		checks.check(DisplayServer.get_name() != "headless", "display-backed journey")
@@ -435,6 +503,34 @@ func run() -> void:
 	ui = plugin.map_editor
 	verify_recovery_regression(recovery)
 	checks.finish(get_tree(), suite)
+
+func camera_marker_regression() -> void:
+	var graph = ui.graph_a
+	var camera_view = ui.camera_view
+	var camera_updates: Array[Vector3] = []
+	var observe = func(position: Vector3, _direction: Vector3): camera_updates.append(position)
+	camera_view.camera_moved.connect(observe)
+	camera_view.camera.position = Vector3(2, 3, 4)
+	camera_view.camera.rotation = Vector3.ZERO
+	camera_view.sync_camera_marker()
+	checks.check(graph.camera_position.is_equal_approx(Vector3(4, 2, 3) * camera_view.map_scale()) and graph.camera_direction.is_equal_approx(Vector3(-1, 0, 0)), "camera pose converts preview coordinates back to map coordinates")
+	var projected_directions := {2: Vector2(1, -2).normalized(), 1: Vector2(1, -3).normalized(), 0: Vector2(2, -3).normalized()}
+	for orientation in [2, 1, 0]:
+		graph.orientation = orientation
+		checks.check(graph.projected_camera_direction(Vector3(1, 2, 3)).is_equal_approx(projected_directions[orientation]), "%s camera direction projection" % [["Side", "Front", "Top"][orientation]])
+	graph.orientation = 2
+	camera_view.sync_camera_marker()
+	checks.check(camera_updates.size() == 1, "unchanged camera pose does not request another graph update")
+	var preview_sentinel = Node3D.new()
+	camera_view.map_geometry.add_child(preview_sentinel)
+	camera_view.camera.position += Vector3(1, 2, 3)
+	camera_view._process(0)
+	checks.check(graph.camera_position.is_equal_approx(Vector3(7, 3, 5) * camera_view.map_scale()) and ui.graph_b.camera_position.is_equal_approx(graph.camera_position), "camera movement updates every graph marker on the camera frame")
+	checks.check(camera_updates.size() == 2, "camera movement emits one graph update")
+	checks.check(preview_sentinel.get_parent() == camera_view.map_geometry, "camera marker update leaves map geometry untouched")
+	camera_view.map_geometry.remove_child(preview_sentinel)
+	preview_sentinel.free()
+	camera_view.camera_moved.disconnect(observe)
 
 func binding_journey(plugin: EditorPlugin) -> void:
 	print("TB_UI_STAGE: explicit binding and checked scene bake")
@@ -566,6 +662,52 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	checks.check(ui.session == kept_session and text() == kept_text and not ui.valid_binding(), "scene switch preserves document and detaches")
 	EditorInterface.set_main_screen_editor("Map")
 	ui.graph_a.grab_focus()
+
+func automatic_scene_journey(plugin: EditorPlugin) -> void:
+	var automatic = Node3D.new()
+	automatic.name = "AutomaticMapJourney"
+	var automatic_loader = ClassDB.instantiate("TBLoader")
+	automatic_loader.name = "OnlyLoader"
+	automatic_loader.map_resource = "res://journey-copy.map"
+	automatic_loader.texture_path = "res://textures-other"
+	automatic.add_child(automatic_loader)
+	automatic_loader.owner = automatic
+	var automatic_scene = PackedScene.new()
+	checks.check(automatic_scene.pack(automatic) == OK and ResourceSaver.save(automatic_scene, "res://automatic-scene.tscn") == OK, "single-loader scene persisted")
+	automatic.free()
+	EditorInterface.open_scene_from_path("res://automatic-scene.tscn")
+	for frame in 5:
+		await get_tree().process_frame
+	var previous_session = ui.session
+	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
+	plugin._make_visible(true)
+	var automatic_root = EditorInterface.get_edited_scene_root()
+	checks.check(ui.same_path(ui.session.document.get_path(), "res://journey-copy.map"), "Map tab opens the only TBLoader map in the current scene")
+	checks.check(ui.session.loader.get_ref() == automatic_root.get_node("OnlyLoader") and ui.valid_binding(), "automatic scene map binds its discovered TBLoader")
+	checks.check(ui.browser._texture_root == "res://textures-other", "automatic scene map parses textures from its TBLoader Texture Path")
+	ui.set_session(previous_session)
+
+func tohunga_editor_journey() -> void:
+	print("TB_UI_STAGE: local Tohunga editor regression")
+	var previous_session = ui.session
+	checks.check(ui.open_path("res://fixtures/tohunga.map"), "editor opens local Tohunga fixture")
+	var canonical := text()
+	var brushes: Array = ui.session.document.get_draw_data()
+	checks.check(brushes.size() > 100 and ui.session.document.get_entities().size() > 1, "editor exposes Tohunga brush and entity topology")
+	if brushes.size() >= 2:
+		var preview_nodes: Array[Node] = ui.camera_view.map_geometry.get_children()
+		ui.camera_view.apply_pick(brushes[0].id, 0, -1, false)
+		ui.camera_view.apply_pick(brushes[1].id, 0, -1, true)
+		checks.check(ui.session.selected == PackedInt64Array([brushes[0].id, brushes[1].id]), "camera Shift-click adds a second Tohunga brush")
+		ui.camera_view.apply_pick(brushes[0].id, 0, -1, true)
+		checks.check(ui.session.selected == PackedInt64Array([brushes[1].id]), "camera Shift-click toggles one brush out of a multi-selection")
+		checks.check(ui.camera_view.map_geometry.get_children() == preview_nodes, "camera selection reuses large-map preview meshes")
+		ui.clone_selection(0)
+		checks.check(ui.session.document.get_draw_data().size() == brushes.size() + 1 and text() != canonical, "editor transaction edits Tohunga with native snapshots")
+		var edited_preview_nodes: Array[Node] = ui.camera_view.map_geometry.get_children()
+		checks.check(preview_nodes.any(func(node): return edited_preview_nodes.has(node)), "localized Tohunga edit retains unaffected camera preview chunks")
+		checks.check(history.undo() and text() == canonical, "editor undo restores exact Tohunga document")
+	ui.set_session(previous_session)
 
 func reopen_journey(plugin: EditorPlugin) -> void:
 	checks.check(ui.open_path("res://journey-bound.map"), "fresh process opens canonical saved journey")
@@ -759,8 +901,9 @@ func resolver_regression(plugin: EditorPlugin) -> void:
 	checks.check(signatures[0] == signatures[2] and signatures[0] != signatures[1], "A-B-A baked mesh UV/material parity restored")
 	ui.configure_browser("res://textures-other")
 	checks.check(ui.texture_root.text == "res://textures", "bound root UI rejects resolver disagreement")
+	var previous_texture: String = ui.texture_field.text
 	ui.material_selected(load("res://textures-other/baseline/checker.png"), "res://textures-other/baseline/checker.png", "baseline/checker", {"resolved": true})
-	checks.check(ui.texture_field.text == "res://textures-other/baseline/checker.png" and ui.resolve_token(ui.texture_field.text).resource_path == "res://textures-other/baseline/checker.png", "browser stale/colliding relative token falls back to exact selected native resource")
+	checks.check(ui.texture_field.text == previous_texture and ui.notice.text.contains("Cannot resolve"), "stale cross-root token is rejected without absolute fallback")
 	ui.session.loader.get_ref().texture_path = "res://textures-other"
 	ui._process(0)
 	checks.check(ui.texture_root.text == "res://textures-other" and ui.preview_material("baseline/checker").albedo_texture.get_size() == Vector2(16, 128), "Inspector root change invalidates preview config")
@@ -922,6 +1065,57 @@ func precision_journey() -> void:
 	ui.set_tool("Brush")
 	ui.graph_a.grab_focus()
 
+func visibility_filter_journey() -> void:
+	print("TB_UI_STAGE: quick visibility filters")
+	var original = ui.session
+	var scratch = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	ui.set_session(scratch)
+	var graph = ui.graph_a
+	graph.orientation = 2
+	graph.origin = Vector3(256, 32, 0)
+	graph.zoom = 1
+	graph.grab_focus()
+	var doc = scratch.document
+	var caulk: int = doc.create_cuboid(Vector3(0, 0, 0), Vector3(64, 64, 64), "common/caulk").value
+	var clip: int = doc.create_cuboid(Vector3(128, 0, 0), Vector3(192, 64, 64), "common/playerclip").value
+	var visible: int = doc.create_cuboid(Vector3(256, 0, 0), Vector3(320, 64, 64), "baseline/checker").value
+	var mixed: int = doc.create_cuboid(Vector3(384, 0, 0), Vector3(448, 64, 64), "baseline/checker").value
+	var mixed_brush: Dictionary = scratch.brush(mixed)
+	doc.set_face_texture(mixed, 0, "common/caulk", mixed_brush.topology_revision)
+	var entity_brush: int = doc.create_cuboid(Vector3(512, 0, 0), Vector3(576, 64, 64), "baseline/checker").value
+	doc.group_brushes(PackedInt64Array([entity_brush]), "func_group")
+	var point: int = doc.create_point_entity("info_player_start", Vector3(640, 32, 0)).value
+	scratch.changed.emit()
+	checks.check(ui.camera_view.triangle_count == 60 and scratch.point_markers().size() == 1, "filter fixture renders five brushes and one point entity")
+	var canonical: String = text()
+	var revision: int = doc.get_revision()
+	var history_version: int = history.get_version()
+	scratch.select(PackedInt64Array([caulk]))
+	ui.visibility_buttons.caulk.pressed.emit()
+	checks.check(scratch.visibility_filters.caulk and ui.visibility_buttons.caulk.button_pressed, "Caulk quick toggle enables session filter")
+	checks.check(scratch.selected.is_empty() and graph.hit_brush(graph.project(Vector3(32, 32, 0))) == 0, "caulk filter clears hidden selection and graph picking")
+	checks.check(graph.hit_brush(graph.project(Vector3(416, 32, 0))) == mixed and ui.camera_view.triangle_count == 46, "mixed brush stays editable while its caulk face is camera-filtered")
+	scratch.select(PackedInt64Array([mixed]))
+	ui.set_tool("Face")
+	checks.check(camera_handle_count(Color("ffb657")) == 5, "camera omits the handle for a material-filtered face on a mixed brush")
+	ui.visibility_buttons.caulk.pressed.emit()
+	ui.visibility_buttons.clips.pressed.emit()
+	checks.check(graph.hit_brush(graph.project(Vector3(160, 32, 0))) == 0 and graph.hit_brush(graph.project(Vector3(288, 32, 0))) == visible, "clip filter hides clip brushes without affecting ordinary materials")
+	checks.check(ui.camera_view.triangle_count == 48, "clip filter removes matching camera triangles")
+	ui.visibility_buttons.clips.pressed.emit()
+	scratch.select(PackedInt64Array([entity_brush]), PackedInt64Array([point]))
+	ui.visibility_buttons.entities.pressed.emit()
+	checks.check(scratch.selected.is_empty() and scratch.points.is_empty(), "entity filter clears brush-entity and point-entity selection")
+	checks.check(graph.hit_brush(graph.project(Vector3(544, 32, 0))) == 0 and graph.hit_point(graph.project(Vector3(640, 32, 0))) == 0, "entity filter excludes entities from graph picking")
+	checks.check(ui.camera_view.triangle_count == 48 and ui.camera_view.overlays.get_child_count() == 0, "entity filter excludes brush geometry and point overlays from camera")
+	checks.check(text() == canonical and doc.get_revision() == revision and history.get_version() == history_version, "quick filters do not edit content or history")
+	ui.visibility_buttons.entities.pressed.emit()
+	checks.check(ui.camera_view.triangle_count == 60 and graph.hit_point(graph.project(Vector3(640, 32, 0))) == point, "quick toggles restore all filtered geometry without selecting it")
+	scratch.save_enabled = false
+	ui.set_session(original)
+	checks.check(ui.visibility_buttons.values().all(func(control): return not control.button_pressed), "visibility controls follow the active document session")
+	ui.graph_a.grab_focus()
+
 func click_component(graph: Control, position: Vector3, toggle = false) -> void:
 	mouse(graph, graph.project(position), true, MOUSE_BUTTON_LEFT, toggle)
 	mouse(graph, graph.project(position), false, MOUSE_BUTTON_LEFT, toggle)
@@ -948,6 +1142,13 @@ func solid_volume(b: Dictionary) -> float:
 	checks.check(valid and volume > 0, "UI result has bounded convex planar outward clockwise solid")
 	return volume
 
+func camera_handle_count(color := Color()) -> int:
+	var count = 0
+	for child in ui.camera_view.overlays.get_children():
+		if child is MeshInstance3D and child.mesh is SphereMesh and (color == Color() or child.material_override.albedo_color == color):
+			count += 1
+	return count
+
 func phase5_journey() -> void:
 	print("TB_UI_STAGE: Phase5 component batches, cap/clip direction and all prism axes")
 	var original = ui.session
@@ -962,7 +1163,23 @@ func phase5_journey() -> void:
 	var id: int = doc.create_cuboid(Vector3.ZERO, Vector3.ONE * 64, "baseline/checker").value
 	scratch.select(PackedInt64Array([id]))
 	var baseline: Dictionary = scratch.capture()
+	scratch.select(PackedInt64Array())
+	for component_tool in ["Face", "Edge"]:
+		ui.set_tool(component_tool)
+		drag(graph, Vector3(-128, -128, 32), Vector3(-64, -64, 32))
+		checks.check(doc.get_draw_data().size() == 1, "%s tool cannot fall through to box creation" % component_tool)
+	scratch.select(PackedInt64Array([id]))
 	ui.set_tool("Face")
+	checks.check(camera_handle_count() == 6, "camera shows face grab handles for selected brush")
+	ui.camera_view.apply_pick(id, 0, 0, false)
+	ui.camera_view.apply_pick(id, 0, 1, true)
+	checks.check(scratch.selected == PackedInt64Array([id]) and scratch.components.size() == 2, "camera Shift-click adds a face without deselecting its brush")
+	ui.camera_view.apply_pick(id, 0, 1, true)
+	checks.check(scratch.selected == PackedInt64Array([id]) and scratch.components.size() == 1 and scratch.components[0].index == 0, "camera Shift-click toggles only the face component")
+	mouse(graph, graph.project(Vector3(0, 32, 32)), true)
+	checks.check(graph.gesture == "component" and graph.drag_component.kind == "face", "face grab handle starts component edit, not box creation")
+	mouse(graph, graph.project(Vector3(0, 32, 32)), false)
+	checks.check(camera_handle_count(Color("ffe6a6")) == 1, "camera highlights selected face handle")
 	click_component(graph, Vector3(0, 32, 32))
 	click_component(graph, Vector3(64, 32, 32), true)
 	checks.check(scratch.components.size() == 2, "Shift adds second face")
@@ -1010,6 +1227,11 @@ func phase5_journey() -> void:
 	checks.check(text() == before and scratch.components.is_empty(), "unrelated edit undo never revives a stale component as a fresh index")
 	scratch.restore(baseline)
 	ui.set_tool("Edge")
+	checks.check(camera_handle_count() == 12, "camera shows edge grab handles for selected brush")
+	mouse(graph, graph.project(Vector3(64, 0, 32)), true)
+	checks.check(graph.gesture == "component" and graph.drag_component.kind == "edge", "edge grab handle starts component edit, not box creation")
+	mouse(graph, graph.project(Vector3(64, 0, 32)), false)
+	checks.check(camera_handle_count(Color("ffe6a6")) == 1, "camera highlights selected edge handle")
 	click_component(graph, Vector3(64, 0, 32))
 	click_component(graph, Vector3(64, 64, 32), true)
 	checks.check(scratch.components.size() == 2, "Shift adds second edge")

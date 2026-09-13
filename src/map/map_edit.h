@@ -27,12 +27,15 @@ struct LMEditEntity {
 struct LMMapEdit {
 	std::vector<LMEditEntity> entities;
 	explicit LMMapEdit(const LMMapData &map);
-	std::string text() const;
+	std::string text(size_t reserve = 0) const;
 	LMEditEntity *entity(int64_t id);
 	LMEditPrimitive *brush(int64_t id);
 	LMEditEntity &world();
 };
 LMEditPrimitive lm_edit_cuboid(vec3 mins, vec3 maxs, const std::string &texture);
+// Rotate only supporting-plane points; texture projection and surface metadata
+// remain byte-for-byte owned by their original faces.
+void lm_edit_rotate_brush(LMEditPrimitive &brush, vec3 pivot, int axis, double radians);
 // Remove redundant/empty supporting planes after a cut. Uses disposable geometry;
 // callers still validate the complete document before committing.
 bool lm_edit_prune_faces(LMEditPrimitive &brush);

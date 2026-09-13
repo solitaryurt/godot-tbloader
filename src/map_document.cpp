@@ -125,11 +125,13 @@ Dictionary TBMapDocument::failure(const StringName &code, const String &message,
 
 TBMapDocument::TBMapDocument() { new_map(); }
 
-Dictionary TBMapDocument::prepare(const std::string &text, std::shared_ptr<LMMapData> &candidate, const StringName &operation, const String &error_path) const {
+Dictionary TBMapDocument::prepare(const std::string &text, std::shared_ptr<LMMapData> &candidate, const StringName &operation, const String &error_path, std::string *normalized) const {
 	candidate = std::make_shared<LMMapData>();
 	LMMapParser parser(candidate);
 	if (!parser.load_from_text(text)) return failure(parser.error.code.c_str(), parser.error.message.c_str(), operation, error_path, parser.error.line, parser.error.column);
-	if (lm_write_map(*candidate).size() > LMMapParser::MAX_TEXT_BYTES) return failure("LIMIT_EXCEEDED", "Canonical map exceeds 16 MiB", operation, error_path);
+	std::string written = lm_write_map(*candidate);
+	if (written.size() > LMMapParser::MAX_TEXT_BYTES) return failure("LIMIT_EXCEEDED", "Canonical map exceeds 16 MiB", operation, error_path);
+	if (normalized) *normalized = std::move(written);
 	resolve_texture_sizes(*candidate, texture_sizes);
 	LMGeoGenerator(candidate).run();
 	if (!valid_geometry(*candidate)) return failure("INVALID_GEOMETRY", "Brush must be a finite, closed solid with nonempty faces", operation, error_path);
@@ -154,16 +156,16 @@ void TBMapDocument::commit(std::shared_ptr<LMMapData> candidate, const std::stri
 	++topology;
 	for (int i = 0; i < candidate->entity_count; ++i) for (int b = 0; b < candidate->entities[i].brush_count; ++b) candidate->entities[i].brushes[b].topology_revision = topology;
 	map = std::move(candidate);
-	canonical = text;
+	canonical = std::make_shared<const std::string>(text);
 	++revision;
 	emit_signal("map_changed", revision);
 	if (was_dirty != is_dirty()) emit_signal("dirty_changed", is_dirty());
 }
 Dictionary TBMapDocument::replace_text(const std::string &text, const StringName &operation, const String &new_path, bool saved) {
 	std::shared_ptr<LMMapData> candidate;
-	Dictionary result = prepare(text, candidate, operation, new_path);
+	std::string normalized;
+	Dictionary result = prepare(text, candidate, operation, new_path, &normalized);
 	if (!bool(result["ok"])) return result;
-	std::string normalized = lm_write_map(*candidate);
 	bool was_dirty = is_dirty();
 	assign_ids(*candidate);
 	epoch = ++epoch_counter;
@@ -208,8 +210,8 @@ Dictionary TBMapDocument::save_map(const String &target) {
 	struct stat info;
 	if (exists && stat(destination.c_str(), &info) == 0 && fchmod(fd, info.st_mode & 0777) != 0) written = false;
 	size_t offset = 0;
-	while (written && offset < canonical.size()) {
-		ssize_t count = write(fd, canonical.data() + offset, canonical.size() - offset);
+	while (written && offset < canonical->size()) {
+		ssize_t count = write(fd, canonical->data() + offset, canonical->size() - offset);
 		if (count < 0 && errno == EINTR) continue;
 		if (count <= 0) { written = false; break; }
 		offset += count;
@@ -228,13 +230,13 @@ Dictionary TBMapDocument::save_map(const String &target) {
 	bool changed = path != target || was_dirty;
 	path = target;
 	disk_path = absolute;
-	baseline = canonical; disk_bytes = canonical; has_baseline = true;
+	baseline = *canonical; disk_bytes = *canonical; has_baseline = true;
 	if (was_dirty) emit_signal("dirty_changed", false);
 	return success(changed);
 #endif
 }
 
-Dictionary TBMapDocument::export_text() const { return success(false, string(canonical)); }
+Dictionary TBMapDocument::export_text() const { return success(false, string(*canonical)); }
 Dictionary TBMapDocument::identities(const LMMapData &data) const {
 	Array entities;
 	for (int i = 0; i < data.entity_count; ++i) {
@@ -258,7 +260,7 @@ Dictionary TBMapDocument::identities(const LMMapData &data) const {
 }
 Dictionary TBMapDocument::snapshot() const {
 	Dictionary out;
-	out["schema"] = 1; out["epoch"] = epoch; out["text"] = string(canonical); out["identities"] = identities(*map);
+	out["schema"] = 1; out["epoch"] = epoch; out["text"] = string(*canonical); out["identities"] = identities(*map);
 	return success(false, out);
 }
 bool TBMapDocument::apply_identities(LMMapData &data, const Dictionary &ids) const {
@@ -299,17 +301,43 @@ Dictionary TBMapDocument::restore_snapshot(const Dictionary &saved) {
 		return failure("SNAPSHOT_MISMATCH", "Snapshot schema or document epoch mismatch", "restore_snapshot");
 	}
 	std::shared_ptr<LMMapData> candidate;
-	Dictionary result = prepare(utf8(saved["text"]), candidate, "restore_snapshot", path);
+	std::string normalized;
+	Dictionary result = prepare(utf8(saved["text"]), candidate, "restore_snapshot", path, &normalized);
 	if (!bool(result["ok"])) return result;
 	if (!apply_identities(*candidate, saved["identities"])) return failure("SNAPSHOT_MISMATCH", "Snapshot identity shape, kind or issued ID mismatch", "restore_snapshot");
-	std::string normalized = lm_write_map(*candidate);
-	if (normalized == canonical && identities(*candidate) == identities(*map)) return success();
+	if (normalized == *canonical && identities(*candidate) == identities(*map)) return success();
 	commit(candidate, normalized, is_dirty());
+	return success(true);
+}
+Ref<TBMapDocumentState> TBMapDocument::capture_history_state() const {
+	Ref<TBMapDocumentState> state;
+	state.instantiate();
+	state->map = map;
+	state->canonical = canonical;
+	state->texture_sizes = texture_sizes;
+	state->epoch = epoch;
+	return state;
+}
+bool TBMapDocument::is_history_state_current(const Ref<TBMapDocumentState> &state) const {
+	return state.is_valid() && state->epoch == epoch && state->map == map && state->canonical == canonical;
+}
+Dictionary TBMapDocument::restore_history_state(const Ref<TBMapDocumentState> &state) {
+	if (state.is_null() || state->epoch != epoch) return failure("SNAPSHOT_MISMATCH", "History state document epoch mismatch", "restore_history_state");
+	if (is_history_state_current(state)) return success();
+	std::shared_ptr<LMMapData> candidate;
+	if (state->texture_sizes == texture_sizes) {
+		candidate = state->map;
+	} else {
+		Dictionary result = prepare(*state->canonical, candidate, "restore_history_state", path);
+		if (!bool(result["ok"])) return result;
+		if (!apply_identities(*candidate, identities(*state->map))) return failure("SNAPSHOT_MISMATCH", "History state identities no longer match", "restore_history_state");
+	}
+	commit(candidate, *state->canonical, is_dirty());
 	return success(true);
 }
 Dictionary TBMapDocument::rebuild() {
 	std::shared_ptr<LMMapData> candidate;
-	Dictionary result = prepare(canonical, candidate, "rebuild", path);
+	Dictionary result = prepare(*canonical, candidate, "rebuild", path);
 	if (!bool(result["ok"])) return result;
 	apply_identities(*candidate, identities(*map));
 	++topology;
@@ -348,6 +376,9 @@ void TBMapDocument::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("export_text"), &TBMapDocument::export_text);
 	ClassDB::bind_method(D_METHOD("snapshot"), &TBMapDocument::snapshot);
 	ClassDB::bind_method(D_METHOD("restore_snapshot", "snapshot"), &TBMapDocument::restore_snapshot);
+	ClassDB::bind_method(D_METHOD("capture_history_state"), &TBMapDocument::capture_history_state);
+	ClassDB::bind_method(D_METHOD("restore_history_state", "state"), &TBMapDocument::restore_history_state);
+	ClassDB::bind_method(D_METHOD("is_history_state_current", "state"), &TBMapDocument::is_history_state_current);
 	ClassDB::bind_method(D_METHOD("rebuild"), &TBMapDocument::rebuild);
 	ClassDB::bind_method(D_METHOD("is_dirty"), &TBMapDocument::is_dirty);
 	ClassDB::bind_method(D_METHOD("get_path"), &TBMapDocument::get_path);
@@ -361,6 +392,7 @@ void TBMapDocument::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("duplicate_brushes", "ids"), &TBMapDocument::duplicate_brushes);
 	ClassDB::bind_method(D_METHOD("delete_brushes", "ids"), &TBMapDocument::delete_brushes);
 	ClassDB::bind_method(D_METHOD("translate_brushes", "ids", "delta"), &TBMapDocument::translate_brushes);
+	ClassDB::bind_method(D_METHOD("rotate_brushes", "ids", "pivot", "axis", "radians"), &TBMapDocument::rotate_brushes);
 	ClassDB::bind_method(D_METHOD("translate_face", "id", "face", "delta", "topology_revision"), &TBMapDocument::translate_face);
 	ClassDB::bind_method(D_METHOD("set_brush_texture", "ids", "name"), &TBMapDocument::set_brush_texture);
 	ClassDB::bind_method(D_METHOD("set_face_texture", "id", "face", "name", "topology_revision"), &TBMapDocument::set_face_texture);
@@ -383,4 +415,21 @@ void TBMapDocument::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("map_changed", PropertyInfo(Variant::INT, "revision")));
 	ADD_SIGNAL(MethodInfo("preview_changed"));
 	ADD_SIGNAL(MethodInfo("dirty_changed", PropertyInfo(Variant::BOOL, "dirty")));
+}
+
+void TBMapDocumentState::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("get_retained_bytes"), &TBMapDocumentState::get_retained_bytes);
+	ClassDB::bind_method(D_METHOD("get_additional_retained_bytes", "already_counted"), &TBMapDocumentState::get_additional_retained_bytes);
+}
+
+int64_t TBMapDocumentState::get_retained_bytes() const {
+	return sizeof(TBMapDocumentState) + (map ? map->retained_bytes() : 0) +
+		(canonical ? sizeof(std::string) + canonical->capacity() + 1 : 0);
+}
+
+int64_t TBMapDocumentState::get_additional_retained_bytes(const Ref<TBMapDocumentState> &other) const {
+	int64_t bytes = sizeof(TBMapDocumentState);
+	if (map && (other.is_null() || map != other->map)) bytes += map->retained_bytes();
+	if (canonical && (other.is_null() || canonical != other->canonical)) bytes += sizeof(std::string) + canonical->capacity() + 1;
+	return bytes;
 }

@@ -14,6 +14,7 @@ void register_tbloader_types(ModuleInitializationLevel p_level)
 		return;
 	}
 	ClassDB::register_class<TBLoader>();
+	ClassDB::register_class<TBMapDocumentState>();
 	ClassDB::register_class<TBMapDocument>();
 }
 

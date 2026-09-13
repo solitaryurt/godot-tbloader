@@ -171,5 +171,50 @@ int main() {
 		edit.world().primitives.pop_back();
 		assert(edit.text() == preserved);
 	}
+	{
+		auto cube = lm_edit_cuboid({0, 0, 0}, {16, 32, 8}, "rotate/material");
+		cube.faces[0].plane.is_valve_uv = true;
+		cube.faces[0].plane.uv_valve = {{{1, 2, 3}, 4}, {{5, 6, 7}, 8}};
+		cube.faces[0].plane.uv_extra = {33, .5, -2};
+		cube.faces[0].plane.surface_flags = {true, 1, 2, 3};
+		const auto before = cube.faces[0];
+		lm_edit_rotate_brush(cube, {8, 16, 4}, 2, 3.14159265358979323846 / 2);
+		const auto &after = cube.faces[0];
+		assert(after.texture == before.texture && after.plane.is_valve_uv == before.plane.is_valve_uv);
+		equal_vector(after.plane.uv_valve.u.axis, before.plane.uv_valve.u.axis);
+		equal_vector(after.plane.uv_valve.v.axis, before.plane.uv_valve.v.axis);
+		assert(after.plane.uv_valve.u.offset == before.plane.uv_valve.u.offset && after.plane.uv_valve.v.offset == before.plane.uv_valve.v.offset);
+		assert(after.plane.uv_extra.rot == before.plane.uv_extra.rot && after.plane.uv_extra.scale_x == before.plane.uv_extra.scale_x && after.plane.uv_extra.scale_y == before.plane.uv_extra.scale_y);
+		assert(after.plane.surface_flags.specified && after.plane.surface_flags.contents == 1 && after.plane.surface_flags.surface == 2 && after.plane.surface_flags.value == 3);
+		assert(std::abs(after.plane.plane_points.v0.x - (24 - before.plane.plane_points.v0.y)) < 1e-12);
+		assert(std::abs(after.plane.plane_points.v0.y - (8 + before.plane.plane_points.v0.x)) < 1e-12);
+		LMMapEdit edit(*std::make_shared<LMMapData>());
+		edit.world().primitives.push_back(cube);
+		auto rotated = std::make_shared<LMMapData>();
+		assert(LMMapParser(rotated).load_from_text(edit.text()));
+		LMGeoGenerator(rotated).run();
+		assert(rotated->entities[0].brush_count == 1 && rotated->entities[0].brushes[0].face_count == 6);
+		for (int face = 0; face < 6; ++face) assert(rotated->entity_geo[0].brushes[0].faces[face].vertex_count == 4);
+	}
+	{
+		const std::string source = fixture("tohunga");
+		assert(source.size() == 3195820);
+		auto map = std::make_shared<LMMapData>();
+		assert(LMMapParser(map).load_from_text(source));
+		assert(map->entity_count > 1 && map->entities[0].brush_count > 100);
+		const size_t parsed_bytes = map->retained_bytes();
+		LMGeoGenerator(map).run();
+		assert(parsed_bytes > source.size() && map->retained_bytes() > parsed_bytes);
+		for (int repeat = 0; repeat < 3; ++repeat) {
+			LMMapEdit edit(*map);
+			edit.world().primitives.push_back(lm_edit_cuboid({ -64, -64, -64 }, { 64, 64, 64 }, "common/caulk"));
+			const std::string changed = edit.text();
+			auto candidate = std::make_shared<LMMapData>();
+			assert(LMMapParser(candidate).load_from_text(changed));
+			LMGeoGenerator(candidate).run();
+			map = std::move(candidate);
+		}
+		std::cout << "NATIVE_TOHUNGA_PASS\n";
+	}
 	std::cout << "NATIVE_DOCUMENT_PASS: semantic roundtrips, truncation/mutation corpus, 500 reset/1000 rebuild cycles; 200 detached edit/copy/cuboid/clip/patch-preservation cycles\n";
 }

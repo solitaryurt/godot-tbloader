@@ -5,12 +5,12 @@
 #include "map/geo_generator.h"
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <algorithm>
+#include <charconv>
+#include <cctype>
 #include <cmath>
-#include <iomanip>
-#include <locale>
+#include <limits>
 #include <map>
 #include <set>
-#include <sstream>
 
 using namespace godot;
 namespace {
@@ -34,19 +34,32 @@ void move_face(LMEditFace &f, Vector3 delta) {
 	p.v0 = vec3_add(p.v0, native(delta)); p.v1 = vec3_add(p.v1, native(delta)); p.v2 = vec3_add(p.v2, native(delta));
 }
 std::string origin_text(Vector3 v) {
-	std::ostringstream out; out.imbue(std::locale::classic()); out << std::setprecision(17) << v.x << ' ' << v.y << ' ' << v.z; return out.str();
+	std::string out;
+	for (double value : { double(v.x), double(v.y), double(v.z) }) {
+		if (!out.empty()) out += ' ';
+		char buffer[64]; auto converted = std::to_chars(buffer, buffer + sizeof(buffer), value, std::chars_format::general, std::numeric_limits<double>::max_digits10);
+		out.append(buffer, converted.ptr);
+	}
+	return out;
 }
 bool read_origin(const std::string &s, Vector3 &v) {
 	if (s.empty()) { v = Vector3(); return true; }
-	std::istringstream in(s); in.imbue(std::locale::classic()); double x, y, z;
-	if (!(in >> x >> y >> z)) return false;
-	in >> std::ws; v = Vector3(x, y, z); return in.eof() && valid(v);
+	double values[3]; const char *next = s.data(), *last = next + s.size();
+	for (double &value : values) {
+		while (next != last && std::isspace(static_cast<unsigned char>(*next))) ++next;
+		auto parsed = std::from_chars(next, last, value, std::chars_format::general);
+		if (parsed.ec != std::errc() || parsed.ptr == next) return false;
+		next = parsed.ptr;
+	}
+	while (next != last && std::isspace(static_cast<unsigned char>(*next))) ++next;
+	v = Vector3(values[0], values[1], values[2]); return next == last && valid(v);
 }
 }
 
 Dictionary TBMapDocument::finish_edit(const LMMapEdit &edit, const StringName &operation, const Variant &value) {
 	std::shared_ptr<LMMapData> candidate;
-	Dictionary result = prepare(edit.text(), candidate, operation, path);
+	std::string normalized;
+	Dictionary result = prepare(edit.text(canonical->size() + 1024), candidate, operation, path, &normalized);
 	if (!bool(result["ok"])) return result;
 	// Reserve locally; failure/no-op never consumes handles or changes the live namespace.
 	int64_t high = next_id;
@@ -60,8 +73,7 @@ Dictionary TBMapDocument::finish_edit(const LMMapEdit &edit, const StringName &o
 			if (p.is_patch) e.patches[p.index].id = id; else e.brushes[p.index].id = id;
 		}
 	}
-	std::string normalized = lm_write_map(*candidate);
-	if (normalized == canonical && identities(*candidate) == identities(*map)) return success(false, value);
+	if (normalized == *canonical && identities(*candidate) == identities(*map)) return success(false, value);
 	next_id = high;
 	for (int i = 0; i < candidate->entity_count; ++i) {
 		const auto &e = candidate->entities[i]; issued_ids[e.id] = 'e';
@@ -112,6 +124,16 @@ Dictionary TBMapDocument::translate_brushes(const PackedInt64Array &ids, Vector3
 	if (!valid(delta)) return failure("INVALID_ARGUMENT", "Invalid translation", "translate_brushes");
 	LMMapEdit edit(*map); for (int64_t id : unique(ids)) for (auto &f : edit.brush(id)->faces) move_face(f, delta);
 	return finish_edit(edit, "translate_brushes");
+}
+Dictionary TBMapDocument::rotate_brushes(const PackedInt64Array &ids, Vector3 pivot, int axis, double radians) {
+	auto r = check_brushes(ids, "rotate_brushes"); if (!bool(r["ok"])) return r;
+	if (!valid(pivot) || axis < 0 || axis > 2 || !std::isfinite(radians) || std::abs(radians) > 1e9)
+		return failure("INVALID_ARGUMENT", "Expected a finite pivot, axis 0..2 and finite angle", "rotate_brushes");
+	radians = std::remainder(radians, 6.28318530717958647692);
+	if (ids.is_empty() || std::abs(radians) < 1e-12) return success();
+	LMMapEdit edit(*map);
+	for (int64_t id : unique(ids)) lm_edit_rotate_brush(*edit.brush(id), native(pivot), axis, radians);
+	return finish_edit(edit, "rotate_brushes");
 }
 Dictionary TBMapDocument::translate_face(int64_t id, int face, Vector3 delta, int64_t topology_revision) {
 	auto r = check_face(id, face, topology_revision, "translate_face"); if (!bool(r["ok"])) return r;
@@ -166,7 +188,7 @@ Dictionary TBMapDocument::set_texture_sizes(const Dictionary &sizes) {
 		normalized[name] = size;
 	}
 	if (normalized == texture_sizes) return success();
-	std::shared_ptr<LMMapData> candidate; auto r = prepare(canonical, candidate, "set_texture_sizes", path); if (!bool(r["ok"])) return r;
+	std::shared_ptr<LMMapData> candidate; auto r = prepare(*canonical, candidate, "set_texture_sizes", path); if (!bool(r["ok"])) return r;
 	resolve_texture_sizes(*candidate, normalized); LMGeoGenerator(candidate).run();
 	apply_identities(*candidate, identities(*map));
 	for (int e = 0; e < map->entity_count; ++e) for (int b = 0; b < map->entities[e].brush_count; ++b) candidate->entities[e].brushes[b].topology_revision = map->entities[e].brushes[b].topology_revision;

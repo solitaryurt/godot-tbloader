@@ -127,7 +127,9 @@ class Journey:
         self.check("rendered screenshot " + name, (self.project / "window-captures" / (name + ".png")).stat().st_size > 10000)
 
     def open_map(self, path):
-        self.click(self.control("Open…"))
+        state = self.request()
+        self.click(center(state["a"]["rect"]))
+        self.x.chord("o", "Control_L")
         state = self.wait("Open resolves through picker or dirty prompt", lambda s: s["file_dialog"] or s["dirty_dialog"])
         if state["dirty_dialog"]:
             self.check("only empty untitled map discarded", not state["brushes"] and not state["path"])
@@ -295,7 +297,7 @@ class Journey:
                     self.x.button(3, False)
                 state = self.wait(f"{exit_mode} releases captured fly", lambda s: not s["flying"] and s["mouse_mode"] == 0 and not s["held"])
 
-        self.click(self.control("Save As…"))
+        self.x.chord("s", "Control_L", "Shift_L")
         state = self.wait("Save As dialog is real and visible", lambda s: s["file_dialog"])
         path = self.project / "window-authored.map"
         self.field(state["file_name_rect"], str(path))
@@ -303,8 +305,9 @@ class Journey:
         state = self.wait("Save As writes canonical map and clears dirty", lambda s: not s["file_dialog"] and s["path"].endswith(path.name) and not s["dirty"])
         self.check("disk map exactly matches real native document", path.read_text() == canonical == state["text"], state)
         write_json(self.logs / "expected.json", state)
-        self.click(self.control("New"))
-        self.wait("New UI replaces saved document with empty worldspawn", lambda s: not s["brushes"] and not s["path"])
+        self.click(center(state["a"]["rect"]))
+        self.x.chord("n", "Control_L")
+        self.wait("Ctrl+N replaces saved document with empty worldspawn", lambda s: not s["brushes"] and not s["path"])
         state = self.open_map(path)
         self.check("same-process reopen exact document and bounds", state["text"] == canonical and state["brushes"][0]["min"] == [-32, -32, -64] and state["brushes"][0]["max"] == [96, 64, 64], state)
         self.click(self.control("Frame"))

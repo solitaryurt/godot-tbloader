@@ -6,8 +6,10 @@ var map_control: Control = null
 var editing_loader: WeakRef = weakref(null)
 var materials_panel: Control = null
 var materials_tree: Tree = null
+var materials_grid: ItemList = null
 var materials_button: Button = null
 var materials_count_label: Label = null
+var materials_preview_generation := 0
 var map_editor: Control = null
 
 func _enter_tree():
@@ -26,6 +28,7 @@ func _enter_tree():
 	spatial_selection_changed()
 
 func _exit_tree():
+	materials_preview_generation += 1
 	map_editor.store_recovery()
 	map_editor.shutdown()
 	get_editor_interface().get_selection().selection_changed.disconnect(spatial_selection_changed)
@@ -52,6 +55,8 @@ func _handles(_object):
 func _make_visible(visible: bool):
 	if map_editor != null:
 		map_editor.set_visible(visible)
+		if visible:
+			map_editor.open_scene_map()
 
 func _has_main_screen() -> bool:
 	return true
@@ -130,6 +135,11 @@ func create_materials_panel() -> Control:
 	refresh_button.text = "Refresh"
 	refresh_button.connect("pressed", Callable(self, "refresh_materials"))
 	header.add_child(refresh_button)
+	var view = OptionButton.new()
+	view.add_item("Grid")
+	view.add_item("List")
+	view.item_selected.connect(func(index: int): set_materials_grid_view(index == 0))
+	header.add_child(view)
 	panel.add_child(header)
 
 	materials_tree = Tree.new()
@@ -143,18 +153,37 @@ func create_materials_panel() -> Control:
 	materials_tree.set_column_expand(1, true)
 	materials_tree.connect("item_selected", Callable(self, "material_selected"))
 	panel.add_child(materials_tree)
+	materials_grid = ItemList.new()
+	materials_grid.name = "MaterialGrid"
+	materials_grid.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	materials_grid.icon_mode = ItemList.ICON_MODE_TOP
+	materials_grid.fixed_icon_size = Vector2i(112, 112)
+	materials_grid.fixed_column_width = 144
+	materials_grid.same_column_width = true
+	materials_grid.max_text_lines = 2
+	materials_grid.item_selected.connect(grid_material_selected)
+	panel.add_child(materials_grid)
+	set_materials_grid_view(true)
 
 	return panel
+
+func set_materials_grid_view(enabled: bool) -> void:
+	if materials_grid != null:
+		materials_grid.visible = enabled
+	if materials_tree != null:
+		materials_tree.visible = not enabled
 
 func show_materials():
 	refresh_materials()
 	make_bottom_panel_item_visible(materials_panel)
 
 func refresh_materials():
-	if materials_tree == null:
+	if materials_tree == null or materials_grid == null:
 		return
 
+	materials_preview_generation += 1
 	materials_tree.clear()
+	materials_grid.clear()
 	var root = materials_tree.create_item()
 	var loader = editing_loader.get_ref()
 	if loader == null:
@@ -181,6 +210,13 @@ func refresh_materials():
 		item.set_text(1, entry.path)
 		item.set_metadata(0, entry.material)
 		item.set_tooltip_text(0, "Show this material in the Inspector")
+		var index := materials_grid.add_item(entry.name)
+		materials_grid.set_item_metadata(index, entry.material)
+		materials_grid.set_item_tooltip(index, entry.path if not entry.path.is_empty() else entry.name)
+		EditorInterface.get_resource_previewer().queue_edited_resource_preview(
+			entry.material, self, "material_preview_ready",
+			{"generation": materials_preview_generation, "index": index,
+				"instance_id": entry.material.get_instance_id()})
 
 	var count = entries.size()
 	materials_count_label.text = "%d unique material%s" % [count, "" if count == 1 else "s"]
@@ -227,3 +263,21 @@ func material_selected():
 	var material = item.get_metadata(0)
 	if material is Material:
 		get_editor_interface().edit_resource(material)
+
+func grid_material_selected(index: int) -> void:
+	var material = materials_grid.get_item_metadata(index)
+	if material is Material:
+		get_editor_interface().edit_resource(material)
+
+func material_preview_ready(_path: String, preview: Texture2D, thumbnail: Texture2D, data: Variant) -> void:
+	if not data is Dictionary or data.get("generation", -1) != materials_preview_generation:
+		return
+	var index: int = data.get("index", -1)
+	if index < 0 or index >= materials_grid.item_count:
+		return
+	var material = materials_grid.get_item_metadata(index)
+	if not material is Material or material.get_instance_id() != data.get("instance_id", 0):
+		return
+	var image := preview if preview != null else thumbnail
+	if image != null:
+		materials_grid.set_item_icon(index, image)
