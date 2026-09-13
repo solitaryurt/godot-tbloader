@@ -7,5 +7,6 @@ TBLoader = "res://addons/tbloader/icons/tbloader.svg"
 
 [libraries]
 windows.x86_64 = "bin/tbloader.windows.x86_64.dll"
-linux.x86_64 = "bin/libtbloader.linux.x86_64.so"
+linux.debug.x86_64 = "bin/libtbloader.linux.template_debug.x86_64.so"
+linux.release.x86_64 = "bin/libtbloader.linux.template_release.x86_64.so"
 macos = "bin/libtbloader.macos.universal.dylib"

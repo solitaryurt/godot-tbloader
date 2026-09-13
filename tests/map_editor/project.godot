@@ -1,0 +1,13 @@
+config_version=5
+
+[application]
+config/name="TBLoader Phase 0 tests"
+
+[rendering]
+renderer/rendering_method="gl_compatibility"
+
+[audio]
+driver/driver="Dummy"
+
+[editor_plugins]
+enabled=PackedStringArray("res://addons/tbloader/plugin.cfg", "res://addons/map_editor_tests/plugin.cfg")

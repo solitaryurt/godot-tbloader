@@ -27,7 +27,15 @@ except AttributeError:
 if env["platform"] == "windows" and env["target"] == "template_debug":
 	env.Append(LINKFLAGS=["/DEBUG"])
 
-if env["platform"] == "osx":
+if env["platform"] == "linux":
+	# Keep test/debug artifacts separate from release builds.
+	library = env.SharedLibrary(
+		"addons/tbloader/bin/tbloader.linux.{}.{}{}".format(
+			env["target"], env["arch"], env["SHLIBSUFFIX"]
+		),
+		source=sources,
+	)
+elif env["platform"] == "osx":
 	library = env.SharedLibrary(
 		"addons/tbloader/bin/libtbloader.{}.framework/libtbloader.{}".format(
 			env["platform"], env["platform"]

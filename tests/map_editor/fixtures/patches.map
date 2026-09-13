@@ -1,0 +1,33 @@
+// Semantic preservation seed for Phase 1; not baked by the Phase 0 suite.
+{
+"classname" "worldspawn"
+{
+patchDef2
+{
+baseline/checker
+( 3 3 1 2 3 )
+(
+( ( -16.5 -16 0 0 0 ) ( -16.5 0 8 0 0.5 ) ( -16.5 16 0 0 1 ) )
+( ( 0 -16 0 0.5 0 ) ( 0 0 16 0.5 0.5 ) ( 0 16 0 0.5 1 ) )
+( ( 16 -16 0 1 0 ) ( 16 0 8 1 0.5 ) ( 16 16 0 1 1 ) )
+)
+}
+}
+{
+patchDef3
+{
+baseline/checker
+( 3 3 4 6 7 8 9 )
+(
+( ( -16 -16 32 0 0 ) ( -16 0 40 0 0.5 ) ( -16 16 32 0 1 ) )
+( ( 0 -16 32 0.5 0 ) ( 0 0 48 0.5 0.5 ) ( 0 16 32 0.5 1 ) )
+( ( 16 -16 32 1 0 ) ( 16 0 40 1 0.5 ) ( 16 16 32 1 1 ) )
+)
+}
+}
+}
+{
+"classname" "light"
+"origin" "-0.5 2 64"
+"light" "200"
+}

@@ -78,6 +78,10 @@ To see your textures in TrenchBroom, navigate to `Preferences` -> `Godot` -> `Ga
 On all platforms, the build process is the same. Make sure scons is installed, and then just run
 `scons target=template_release` to build.
 
+On Linux, debug/editor and release-export libraries now use separate filenames.
+Build `scons platform=linux target=template_debug arch=x86_64 -j2` for editor use;
+also build `target=template_release` and package both libraries for release exports.
+
 On Mac, the process is the same, but you will have to codesign and notarize your resulting binary as
 well if you want it to run on consumer hardware. To do this, you need to already have the notary
 tool configured on your machine (you need a keychain profile), and then run:
@@ -88,7 +92,14 @@ $ zip archive.zip libtbloader.macos.universal.dylib
 $ xcrun notarytool submit --keychain-profile "Profile Name" --wait archive.zip
 ```
 
+# Map editor development
+
+Map editor development: see [the specification](MAP_EDITOR_PRD.md),
+[implementation contract/progress](MAP_EDITOR_IMPLEMENTATION.md), and
+[first-party test harness](tests/map_editor/README.md).
+
 # Credits
+
 * [Qodot](https://github.com/QodotPlugin/qodot-plugin)
 * [Original libmap](https://github.com/QodotPlugin/libmap)
 * [EIRTeam libmap-cpp](https://github.com/EIRTeam/qodot/tree/4.0) (modified)

@@ -1,0 +1,13 @@
+// Asymmetric map-space bounds: (-16,-32,-8) to (48,32,24).
+{
+"classname" "worldspawn"
+"message" "Phase 0 classic cube"
+{
+( 48 -32 -8 ) ( 48 32 24 ) ( 48 32 -8 ) baseline/checker 0 0 0 1 1
+( -16 -32 24 ) ( -16 32 -8 ) ( -16 32 24 ) baseline/checker 0 0 0 1 1 0 0 0
+( -16 32 -8 ) ( 48 32 24 ) ( -16 32 24 ) baseline/checker 4 -2 90 0.5 2
+( -16 -32 24 ) ( 48 -32 -8 ) ( -16 -32 -8 ) baseline/checker 0 0 0 1 1
+( -16 -32 24 ) ( 48 32 24 ) ( 48 -32 24 ) baseline/checker 0 0 0 1 1
+( 48 -32 -8 ) ( -16 32 -8 ) ( -16 -32 -8 ) baseline/checker 0 0 0 1 1
+}
+}
