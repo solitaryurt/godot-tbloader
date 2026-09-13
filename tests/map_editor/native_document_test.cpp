@@ -3,6 +3,8 @@
 #include "map_writer.h"
 #include "geo_generator.h"
 #include "face.h"
+#include "map_edit.h"
+#include <cmath>
 #include <cassert>
 #include <cstring>
 #include <fstream>
@@ -66,6 +68,13 @@ int main() {
 		assert(LMMapParser(roundtrip).load_from_text(canonical));
 		equal_maps(*map, *roundtrip);
 		assert(lm_write_map(*roundtrip) == canonical);
+		// Edit staging owns values independently of both source allocations and caches.
+		LMMapEdit values(*map);
+		assert(values.text() == canonical);
+		auto value_copy = values;
+		roundtrip->map_data_reset();
+		assert(LMMapParser(roundtrip).load_from_text(value_copy.text()));
+		equal_maps(*map, *roundtrip);
 		// Inspect source semantics independently of serialization equality.
 		if (!strcmp(name, "patches")) {
 			const auto &p = map->entities[0].patches[1];
@@ -116,5 +125,51 @@ int main() {
 			}
 		}
 	}
-	std::cout << "NATIVE_DOCUMENT_PASS: semantic roundtrips, all-prefix truncation, mutation corpus, 500 load/reset and 1000 rebuild cycles\n";
+	for (int repeat = 0; repeat < 200; ++repeat) {
+		auto source = std::make_shared<LMMapData>();
+		assert(LMMapParser(source).load_from_text(fixture("patches")));
+		LMGeoGenerator(source).run();
+		LMMapEdit edit(*source);
+		const std::string preserved = edit.text();
+		source.reset(); // staged patches and epairs must survive source destruction
+		auto cube = lm_edit_cuboid({-16, -32, -8}, {48, 32, 24}, "baseline/checker");
+		cube.id = 123;
+		edit.world().primitives.push_back(cube);
+		auto copy = edit;
+		copy.world().primitives.back().faces[0].texture = "independent";
+		assert(edit.brush(123)->faces[0].texture == "baseline/checker");
+		auto map = std::make_shared<LMMapData>();
+		assert(LMMapParser(map).load_from_text(edit.text()));
+		LMGeoGenerator(map).run();
+		assert(map->entities[0].brush_count == 1 && map->entities[0].patch_count == 2);
+		assert(map->entities[0].primitive_count == 3 && !map->entities[0].primitives[2].is_patch);
+		const auto &brush = map->entities[0].brushes[0];
+		double volume = 0;
+		for (int f = 0; f < brush.face_count; ++f) {
+			const auto &face = map->entity_geo[0].brushes[0].faces[f];
+			assert(face.vertex_count == 4 && face.index_count == 6);
+			assert(std::abs(vec3_length(brush.faces[f].plane_normal) - 1) < 1e-10);
+			for (int i = 0; i < face.index_count; i += 3) {
+				vec3 a = vec3_sub(face.vertices[face.indices[i]].vertex, brush.center);
+				vec3 b = vec3_sub(face.vertices[face.indices[i + 1]].vertex, brush.center);
+				vec3 c = vec3_sub(face.vertices[face.indices[i + 2]].vertex, brush.center);
+				assert(vec3_dot(vec3_cross(vec3_sub(b, a), vec3_sub(c, a)), brush.faces[f].plane_normal) < 0);
+				volume -= vec3_dot(a, vec3_cross(b, c)) / 6;
+			}
+		}
+		assert(std::abs(volume - 64 * 64 * 32) < 1e-8);
+		// Slice at x=0; the old x-max plane becomes empty and must be pruned.
+		auto cut = cube.faces[0]; cut.plane.plane_points = {{0, 0, 0}, {0, 0, 1}, {0, 1, 0}};
+		cube.faces.push_back(cut);
+		assert(lm_edit_prune_faces(cube) && cube.faces.size() == 6);
+		*edit.brush(123) = cube;
+		assert(LMMapParser(map).load_from_text(edit.text())); LMGeoGenerator(map).run();
+		for (int f = 0; f < 6; ++f) {
+			const auto &face = map->entity_geo[0].brushes[0].faces[f]; assert(face.vertex_count == 4);
+			for (int v = 0; v < face.vertex_count; ++v) assert(face.vertices[v].vertex.x <= 0);
+		}
+		edit.world().primitives.pop_back();
+		assert(edit.text() == preserved);
+	}
+	std::cout << "NATIVE_DOCUMENT_PASS: semantic roundtrips, truncation/mutation corpus, 500 reset/1000 rebuild cycles; 200 detached edit/copy/cuboid/clip/patch-preservation cycles\n";
 }

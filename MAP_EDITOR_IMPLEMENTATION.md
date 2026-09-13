@@ -1,9 +1,9 @@
 # Map editor implementation contract and progress
 
-Phases 0–1, 2026-09-13. Specification: [MAP_EDITOR_PRD.md](MAP_EDITOR_PRD.md), especially
-§§6–8 and 14–16. **API v1 is frozen; the Phase 1 subset is implemented below.**
-Brush operations and draw/preview payloads remain Phase 2. Changes require updating
-this document and its consumers together.
+Phases 0–2 native, 2026-09-13. Specification: [MAP_EDITOR_PRD.md](MAP_EDITOR_PRD.md),
+especially §§6–8 and 14–16. **API v1 is frozen and the native operation/query surface
+is implemented.** The Phase 2 handoff below adds the N-inspector entity API.
+Changes require updating this document and its consumers together.
 
 ## Phase 0 gate / environment
 
@@ -15,7 +15,8 @@ this document and its consumers together.
 - [x] Document/editor ownership, API, identity, snapshots and preview contracts.
 - [x] Display feasibility established using existing X11 display `:0`.
 - [x] Phase 1: transactional document, semantic persistence, identity and ownership gate.
-- [ ] Phases 2–6: brush operations, authoring UI, integration and full acceptance.
+- [x] Phase 2 native: validated brush/entity operations, clipboard and draw/preview.
+- [ ] Remaining Phases 2–6: material-browser integration, authoring UI and acceptance.
 
 Supported **tested baseline**: Linux x86_64, Godot
 `4.8.dev.custom_build.3924ec46f`, executable
@@ -252,7 +253,7 @@ brushes; the UI filters by triangle IDs using its hidden set.
 Implemented at SCENE initialization: `TBMapDocument : RefCounted` in
 `src/map_document.{h,cpp}`. Construction creates an unsaved worldspawn.
 
-### Actual bound surface
+### Phase 1 bound surface (historical; Phase 2 additions below)
 
 - Result commands: `new_map`, `load_map`, `import_text`, `save_map`, `export_text`,
   `snapshot`, `restore_snapshot`, `rebuild`.
@@ -330,7 +331,7 @@ External-change checks detect changes before and during a save; there is no
 cross-process compare-and-swap filesystem primitive or cooperative editor locking.
 This is atomic replacement, not a claim of crash-durable parent-directory metadata.
 
-### Entity-authoring extension point (Phase 4)
+### Entity-authoring extension point (Phase 1 planning; implemented natively below)
 
 The N inspector must consume ordered epairs and stable entity IDs from
 `get_entities`, including owners of selected primitives; no selection targets
@@ -380,10 +381,132 @@ extended run detected empty-bake RID/ObjectDB leaks despite 552 successful check
 the strict runner rejected it, and the detached-mesh fix resolved it. No diagnostic
 was allowlisted. Release, Windows and macOS builds were not exercised.
 
-Next gate: Phase 2 validated brush operations and map-space draw/preview payloads.
+Phase 1's next gate was Phase 2 validated brush operations and draw/preview payloads.
 Start with `src/map_document.{h,cpp}`, `src/map/{map_data,map_parser,map_writer}.*`,
 `src/map/{entity,brush,patch,entity_geometry}.h`, and
 `tests/map_editor/{document_suite.gd,native_document_test.cpp}`. Keep issued IDs
 across deletion/restore and advance allocation high-water marks on every new
 primitive; keep cache-only changes out of geometry history. Full Phase 6 interaction
 and representative-map performance measurements remain incomplete.
+
+## Phase 2 native implementation / UI handoff
+
+Implemented in `src/map_document.h`, `src/map_document{,_ops,_draw}.cpp` and value-owned staging in
+`src/map/map_edit.{h,cpp}`. The full frozen brush, component, clipboard, texture,
+draw and preview API above is now bound, including `make_prism`, `clip_brushes`
+and constrained `translate_vertices`. All commands return the four-key Result;
+draw/preview/entities/texture-name queries return fresh copied containers.
+
+### Brush and material calls
+
+All positions/deltas are **map-space**. Batch handles are `PackedInt64Array`,
+component indices `PackedInt32Array`; deduplicate in first-occurrence order.
+Every selected handle is validated before committing any candidate.
+
+| Call | `Result.value` / behavior |
+|---|---|
+| `create_cuboid(mins:Vector3,maxs:Vector3,texture:String)` | New brush ID; increasing finite bounds; appends to first worldspawn, creating one if absent |
+| `duplicate_brushes(ids)` | Fresh brush IDs, in place, same owners; clones appended to each owner's primitive list |
+| `delete_brushes(ids)` | null; retains empty owner entities and their epairs |
+| `translate_brushes(ids,delta:Vector3)` | null; move all supporting plane points once; projection parameters retained (no texture lock) |
+| `translate_face(id,face:int,delta:Vector3,topology_revision:int)` | null; normal component of delta moves the plane; tangent-only motion is a no-op |
+| `translate_vertices(id,vertex_indices,delta,topology_revision)` | null; requires planar faces and exactly the requested closed convex hull; nonplanar/collapsed/unexpected hull changes reject atomically |
+| `make_prism(id,sides:int,axis:int)` | null; replaces hull inside current AABB, 3..62 sides, extrusion axis 0=X/1=Y/2=Z; elliptical cross-section for asymmetric bounds; inherits first face's material/UV/flags |
+| `clip_brushes(ids,p0,p1,p2,split:bool)` | Surviving result brush IDs in selection order; semantics below |
+| `export_selection(ids)` / `import_selection(text:String)` | Map String / fresh brush IDs; in-place paste, world brushes merge, other owners clone ordered epairs with new entity IDs |
+| `set_brush_texture(ids,name:String)` / `set_face_texture(id,face,name,topology_revision)` | null; exact shader name, UV/flags preserved |
+| `get_face_uv(id,face,topology_revision)` | Copied projection/shift/rotation/scale/axes dictionary specified above |
+| `set_face_uv(id,face,shift:Vector2,rotation:float,scale:Vector2,topology_revision)` | null; classic only; finite bounded values and nonzero scale; Valve returns `UNSUPPORTED_PROJECTION` |
+| `set_texture_sizes(sizes:Dictionary)` | null; replaces complete name→positive `Vector2i` lookup, copies input; cache-only, dimensions resolved before UV generation |
+
+Clip normal is `normalize((p2-p0).cross(p1-p0))`, matching map plane syntax.
+One-sided clipping keeps `normal.dot(vertex-p0) <= 0`: intersected brushes retain
+their ID, fully discarded brushes disappear. Split allocates **two fresh IDs**
+only for intersected brushes (negative half first), and retains original IDs for
+uncut brushes. Tangency is a no-op; classification tolerance is 1e-5 map units.
+Cut faces inherit the first source face's material/UV/flags. Empty old planes are
+pruned on a disposable candidate before whole-document validation. A 64-plane
+source that needs another plane returns `LIMIT_EXCEEDED`; no partial batch edit.
+
+Empty selection exports `""`; empty/whitespace clipboard imports no-op. Clipboard
+patch primitives reject with `UNSUPPORTED_SYNTAX`; point-only clipboard entities
+are ignored. Source patches, unknown epairs, duplicate epairs, projection/flags,
+and interleaved primitive order survive unrelated edits. Missing textures use 1x1.
+
+### Foundational N-inspector entity API
+
+Entity IDs share the stable lifetime allocator with brush/patch IDs. Resolve
+selected owners through `get_draw_data()[i].entity_id` and properties/ownership
+through `get_entities()`; its ordered schema remains unchanged. No selected
+brushes means the UI may explicitly target worldspawn for property inspection.
+
+| Call | `Result.value` / behavior |
+|---|---|
+| `create_point_entity(classname:String,origin:Vector3)` | New entity ID; appends ordered `classname`, `origin`; rejects empty/worldspawn class |
+| `set_entity_property(id:int,key:String,value:String)` | null; replaces **first** matching epair in place, preserves later duplicates, appends absent key; unknown/empty values preserved |
+| `remove_entity_property(id:int,key:String)` | null; removes **all** occurrences of key, preserving remaining order; absent key is a no-op |
+| `translate_point_entities(ids:PackedInt64Array,delta:Vector3)` | null; point entities only, deduplicated atomic batch; updates first `origin` in place or appends it; absent/empty origin reads as zero, malformed origin rejects |
+| `group_brushes(ids,classname:String)` | New brush-entity ID (null for empty selection); moves brushes in selection order, keeps brush IDs, retains source entities/unknown epairs/patches |
+| `return_brushes_to_worldspawn(ids)` | null; appends non-world brushes in selection order to first worldspawn; already-world brushes stay in place; retains emptied owners |
+| `delete_entities(ids:PackedInt64Array,delete_owned_brushes:bool)` | null; **true deletes owned brushes**, **false returns them to worldspawn with original IDs**; removes selected point/brush entities |
+
+Worldspawn cannot be deleted, its classname cannot be changed, and another entity
+cannot be converted to worldspawn by setting classname. Classname removal and
+empty class assignments reject. Explicit `origin` assignment requires exactly
+three finite bounded coordinates. Moving a brush/patch-owning entity rejects;
+move its brushes through the brush API. Deleting a patch-owning entity rejects
+`UNSUPPORTED_SYNTAX` (patch authoring is not supported). No automatic empty-owner
+deletion or unknown-property rewriting occurs. Mixed-value inspector aggregation,
+marker rendering, N routing and history gestures are UI integration work.
+
+### Validation, ownership, caches and identity
+
+- Staging owns vectors/strings/face values, never aliases native owning arrays.
+  Patches are copied as canonical primitive text through the shared writer. A full
+  parse/geometry/validation pass succeeds before IDs, content, revision or caches
+  change. Failed candidates do not consume IDs; issued deleted IDs remain available
+  only for same-epoch snapshot restoration. Undo never lowers the high-water mark.
+- Validation checks finite/bounded positions and UVs, nonempty faces, paired edges,
+  positive volume and clockwise winding against outward supporting-plane normals.
+  Collapsed/inverted resize candidates reject without any signal or history change.
+- Content commits regenerate all brush topology tokens, including material/epair
+  changes; UI consumers must refresh component handles after every map signal.
+  Restore/rebuild also refresh tokens. Texture-size changes preserve tokens,
+  content revision, path, baseline and dirty state; emit only `preview_changed`.
+- Draw returns unique vertices, paired edges, indexed face windings, bounds,
+  outward normals, exact texture names, brush/owner IDs and topology tokens.
+  Preview groups indexed clockwise triangles by exact shader, records each owning
+  brush/face, and uses classic/Valve UV functions with actual texture dimensions.
+  Preview uses flat outward plane normals even for `_phong` entities. No map-to-Godot
+  conversion occurs here. Patch drawing remains explicitly unsupported; patch
+  persistence/native tessellation continues. Hidden-ID filtering belongs to UI.
+- Whole-document staging/rebuild is the blockout-scale implementation. No large-map
+  latency claim or incremental-geometry cache is introduced.
+
+### Phase 2 verification
+
+Pinned engine: `/mnt/data/code/godot/bin/godot.linuxbsd.editor.x86_64`.
+Full logs are `/tmp/opencode/tbloader-phase2-{build,document,editor,native}.log`.
+Commands use repository root and retain runtime input/library hashes in artifacts.
+
+- Bounded `timeout 600s scons platform=linux target=template_debug arch=x86_64 -j2`:
+  PASS; no compiler warnings in the final build.
+- `python tests/map_editor/run_tests.py --godot <absolute-engine> --suite document`:
+  PASS, **1,859 checks**, `artifacts/document-g0u73d7k/`;
+  real geometry/IDs/atomic failure/save/undo, copied draw and preview, analytic
+  classic and Valve UVs, ordered entity edits/ownership/deletion, clipboard, patch
+  preservation, prism on all axes, vertex constraints and axial/diagonal clipping.
+- Same runner `--suite editor`: PASS, **19 checks**, `artifacts/editor-so3e2tlb/`.
+- `timeout 180s bash tests/map_editor/run_native_tests.sh`: PASS, production
+  parser/writer/model/geometry/**edit staging** under ASan+UBSan+LSan, no suppressions.
+  Adds 200 detached-source edit/copy/cuboid/clip/patch-preservation cycles to Phase 1's
+  truncation corpus and 500 reset/1,000 rebuild cycles. The engine/RefCounted wrapper
+  is exercised by the runtime suite, not sanitizer-instrumented.
+- Initial diagonal-cut test incorrectly used AABB center as an interior point (it
+  lies on the diagonal face of a triangular prism). Corrected the test to use the
+  convex hull's mean vertex position; positive volumes and outward windings pass.
+
+Next native/UI integration gate: material browser consumes the texture APIs;
+authoring views consume copied draw/preview data and use snapshots for gestures.
+Phase 4 inspector/bake integration, Phase 5 interaction tools, full Phase 6 UI
+acceptance and representative-map performance measurement remain pending.

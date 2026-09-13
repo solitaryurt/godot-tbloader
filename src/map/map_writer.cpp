@@ -21,16 +21,7 @@ void point(std::ostream &out, const vec3 &v) { out << "( "; vector(out, v); out 
 void brush(std::ostream &out, const LMMapData &map, const LMBrush &b) {
 	out << "{\n";
 	for (int i = 0; i < b.face_count; ++i) {
-		const auto &f = b.faces[i];
-		point(out, f.plane_points.v0); point(out, f.plane_points.v1); point(out, f.plane_points.v2);
-		out << quote(map.textures[f.texture_idx].name) << ' ';
-		if (f.is_valve_uv) {
-			out << "[ "; vector(out, f.uv_valve.u.axis); out << ' ' << f.uv_valve.u.offset << " ] [ ";
-			vector(out, f.uv_valve.v.axis); out << ' ' << f.uv_valve.v.offset << " ] ";
-		} else out << f.uv_standard.u << ' ' << f.uv_standard.v << ' ';
-		out << f.uv_extra.rot << ' ' << f.uv_extra.scale_x << ' ' << f.uv_extra.scale_y;
-		if (f.surface_flags.specified) out << ' ' << f.surface_flags.contents << ' ' << f.surface_flags.surface << ' ' << f.surface_flags.value;
-		out << '\n';
+		out << lm_write_face(b.faces[i], map.textures[b.faces[i].texture_idx].name);
 	}
 	out << "}\n";
 }
@@ -66,5 +57,29 @@ std::string lm_write_map(const LMMapData &map) {
 		}
 		out << "}\n";
 	}
+	return out.str();
+}
+
+std::string lm_quote(const std::string &text) { return quote(text.c_str()); }
+std::string lm_write_face(const LMFace &f, const std::string &texture) {
+	std::ostringstream out;
+	out.imbue(std::locale::classic());
+	out << std::setprecision(std::numeric_limits<double>::max_digits10);
+	point(out, f.plane_points.v0); point(out, f.plane_points.v1); point(out, f.plane_points.v2);
+	out << lm_quote(texture) << ' ';
+	if (f.is_valve_uv) {
+		out << "[ "; vector(out, f.uv_valve.u.axis); out << ' ' << f.uv_valve.u.offset << " ] [ ";
+		vector(out, f.uv_valve.v.axis); out << ' ' << f.uv_valve.v.offset << " ] ";
+	} else out << f.uv_standard.u << ' ' << f.uv_standard.v << ' ';
+	out << f.uv_extra.rot << ' ' << f.uv_extra.scale_x << ' ' << f.uv_extra.scale_y;
+	if (f.surface_flags.specified) out << ' ' << f.surface_flags.contents << ' ' << f.surface_flags.surface << ' ' << f.surface_flags.value;
+	out << '\n';
+	return out.str();
+}
+std::string lm_write_patch(const LMMapData &map, const LMPatch &p) {
+	std::ostringstream out;
+	out.imbue(std::locale::classic());
+	out << std::setprecision(std::numeric_limits<double>::max_digits10);
+	patch(out, map, p);
 	return out.str();
 }

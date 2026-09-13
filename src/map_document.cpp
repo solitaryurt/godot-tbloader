@@ -73,6 +73,7 @@ bool valid_geometry(const LMMapData &map) {
 					const auto &vertex = face.vertices[v];
 					const auto &p = vertex.vertex;
 					if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z) || !std::isfinite(vertex.uv.u) || !std::isfinite(vertex.uv.v)) return false;
+					if (std::abs(p.x) > 1e9 || std::abs(p.y) > 1e9 || std::abs(p.z) > 1e9) return false;
 					int index = 0;
 					for (; index < static_cast<int>(points.size()); ++index) {
 						vec3 delta = vec3_sub(points[index], p);
@@ -90,6 +91,7 @@ bool valid_geometry(const LMMapData &map) {
 					vec3 a = vec3_sub(face.vertices[0].vertex, brush.center);
 					vec3 c = vec3_sub(face.vertices[v].vertex, brush.center);
 					vec3 d = vec3_sub(face.vertices[v + 1].vertex, brush.center);
+					if (vec3_dot(vec3_cross(vec3_sub(c, a), vec3_sub(d, a)), brush.faces[f].plane_normal) >= -1e-10) return false;
 					volume += std::abs(vec3_dot(a, vec3_cross(c, d))) / 6.0;
 				}
 			}
@@ -128,6 +130,7 @@ Dictionary TBMapDocument::prepare(const std::string &text, std::shared_ptr<LMMap
 	LMMapParser parser(candidate);
 	if (!parser.load_from_text(text)) return failure(parser.error.code.c_str(), parser.error.message.c_str(), operation, error_path, parser.error.line, parser.error.column);
 	if (lm_write_map(*candidate).size() > LMMapParser::MAX_TEXT_BYTES) return failure("LIMIT_EXCEEDED", "Canonical map exceeds 16 MiB", operation, error_path);
+	resolve_texture_sizes(*candidate, texture_sizes);
 	LMGeoGenerator(candidate).run();
 	if (!valid_geometry(*candidate)) return failure("INVALID_GEOMETRY", "Brush must be a finite, closed solid with nonempty faces", operation, error_path);
 	return success();
@@ -352,6 +355,30 @@ void TBMapDocument::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_epoch"), &TBMapDocument::get_epoch);
 	ClassDB::bind_method(D_METHOD("get_texture_names"), &TBMapDocument::get_texture_names);
 	ClassDB::bind_method(D_METHOD("get_entities"), &TBMapDocument::get_entities);
+	ClassDB::bind_method(D_METHOD("get_draw_data"), &TBMapDocument::get_draw_data);
+	ClassDB::bind_method(D_METHOD("get_preview_data"), &TBMapDocument::get_preview_data);
+	ClassDB::bind_method(D_METHOD("create_cuboid", "mins", "maxs", "texture"), &TBMapDocument::create_cuboid);
+	ClassDB::bind_method(D_METHOD("duplicate_brushes", "ids"), &TBMapDocument::duplicate_brushes);
+	ClassDB::bind_method(D_METHOD("delete_brushes", "ids"), &TBMapDocument::delete_brushes);
+	ClassDB::bind_method(D_METHOD("translate_brushes", "ids", "delta"), &TBMapDocument::translate_brushes);
+	ClassDB::bind_method(D_METHOD("translate_face", "id", "face", "delta", "topology_revision"), &TBMapDocument::translate_face);
+	ClassDB::bind_method(D_METHOD("set_brush_texture", "ids", "name"), &TBMapDocument::set_brush_texture);
+	ClassDB::bind_method(D_METHOD("set_face_texture", "id", "face", "name", "topology_revision"), &TBMapDocument::set_face_texture);
+	ClassDB::bind_method(D_METHOD("get_face_uv", "id", "face", "topology_revision"), &TBMapDocument::get_face_uv);
+	ClassDB::bind_method(D_METHOD("set_face_uv", "id", "face", "shift", "rotation", "scale", "topology_revision"), &TBMapDocument::set_face_uv);
+	ClassDB::bind_method(D_METHOD("set_texture_sizes", "sizes"), &TBMapDocument::set_texture_sizes);
+	ClassDB::bind_method(D_METHOD("export_selection", "ids"), &TBMapDocument::export_selection);
+	ClassDB::bind_method(D_METHOD("import_selection", "text"), &TBMapDocument::import_selection);
+	ClassDB::bind_method(D_METHOD("create_point_entity", "classname", "origin"), &TBMapDocument::create_point_entity);
+	ClassDB::bind_method(D_METHOD("set_entity_property", "id", "key", "value"), &TBMapDocument::set_entity_property);
+	ClassDB::bind_method(D_METHOD("remove_entity_property", "id", "key"), &TBMapDocument::remove_entity_property);
+	ClassDB::bind_method(D_METHOD("translate_point_entities", "ids", "delta"), &TBMapDocument::translate_point_entities);
+	ClassDB::bind_method(D_METHOD("group_brushes", "ids", "classname"), &TBMapDocument::group_brushes);
+	ClassDB::bind_method(D_METHOD("return_brushes_to_worldspawn", "ids"), &TBMapDocument::return_brushes_to_worldspawn);
+	ClassDB::bind_method(D_METHOD("delete_entities", "ids", "delete_owned_brushes"), &TBMapDocument::delete_entities);
+	ClassDB::bind_method(D_METHOD("make_prism", "id", "sides", "axis"), &TBMapDocument::make_prism);
+	ClassDB::bind_method(D_METHOD("translate_vertices", "id", "vertex_indices", "delta", "topology_revision"), &TBMapDocument::translate_vertices);
+	ClassDB::bind_method(D_METHOD("clip_brushes", "ids", "p0", "p1", "p2", "split"), &TBMapDocument::clip_brushes);
 	ADD_SIGNAL(MethodInfo("map_changed", PropertyInfo(Variant::INT, "revision")));
 	ADD_SIGNAL(MethodInfo("preview_changed"));
 	ADD_SIGNAL(MethodInfo("dirty_changed", PropertyInfo(Variant::BOOL, "dirty")));
