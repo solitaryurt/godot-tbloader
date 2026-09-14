@@ -37,10 +37,18 @@ var visibility_buttons: Dictionary = {}
 var tokens: Array = []
 var material_cache: Dictionary = {}
 var texture_sizes: Dictionary = {}
+var material_generation = 0
 var rebuild_on_save: CheckBox
 var texture_root: LineEdit
 var session_picker: OptionButton
+var scene_tabs: TabBar
 var sessions: Array[RefCounted] = [] # Documents outlive expirable history payloads.
+var scene_sessions: Dictionary = {}
+var watched_loaders: Dictionary = {}
+var scene_active = false
+var discovery_queued = false
+var changing_scene_tabs = false
+var last_standalone: WeakRef = weakref(null)
 var discard_on_replace: RefCounted
 var history_total_budget = 128 * 1024 * 1024
 var history_session_budget = 64 * 1024 * 1024
@@ -54,6 +62,11 @@ var scan_delay = -1.0
 func _ready() -> void:
 	size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	size_flags_vertical = Control.SIZE_EXPAND_FILL
+	scene_tabs = TabBar.new()
+	scene_tabs.name = "SceneLoaderTabs"
+	scene_tabs.tab_changed.connect(scene_tab_changed)
+	scene_tabs.hide()
+	add_child(scene_tabs)
 	var toolbar = HFlowContainer.new()
 	add_child(toolbar)
 	for mode in ["Select", "Brush", "Cut", "Rotate", "Face", "Edge", "Vertex", "Texture"]:
@@ -67,7 +80,7 @@ func _ready() -> void:
 	button(toolbar, "Bake saved map", bake)
 	rebuild_on_save = CheckBox.new()
 	rebuild_on_save.text = "Bake on save"
-	rebuild_on_save.button_pressed = true
+	rebuild_on_save.button_pressed = false
 	toolbar.add_child(rebuild_on_save)
 	session_picker = OptionButton.new()
 	session_picker.tooltip_text = "Open and unresolved Map documents"
@@ -200,10 +213,12 @@ func button(parent: Node, text: String, callback: Callable) -> Button:
 func set_session(value: RefCounted) -> void:
 	cancel_interaction()
 	session = value
+	if not session.scene_managed:
+		last_standalone = weakref(session)
 	session.save_enabled = true
 	session.manager = plugin.get_undo_redo()
-	if not session.changed.is_connected(refresh):
-		session.changed.connect(refresh)
+	if not sessions.has(session):
+		session.changed.connect(_session_changed.bind(session))
 		session.message.connect(set_status)
 		session.action_recorded.connect(retain_action)
 		sessions.append(session)
@@ -212,6 +227,13 @@ func set_session(value: RefCounted) -> void:
 	texture_field.text = session.texture
 	sync_resolver()
 	refresh()
+
+func _session_changed(origin: RefCounted) -> void:
+	if origin == session:
+		refresh()
+	else:
+		# Global undo can dirty a retained document without changing the active view.
+		refresh_status()
 
 func retain_action(token: RefCounted) -> void:
 	token.reporter = Callable(self, "set_status")
@@ -256,6 +278,8 @@ func refresh_status() -> void:
 	binding_label.text = "Bound: %s — %s" % [loader.name, loader.map_resource] if is_instance_valid(loader) else "Standalone document • Select a TBLoader, then explicitly Bind"
 	session_picker.clear()
 	for origin in sessions:
+		if origin.scene_managed and origin.scene.get_ref() == null:
+			continue
 		var filename: String = origin.document.get_path().get_file()
 		if not origin.recovery_source.is_empty():
 			filename = "Recovered " + origin.recovery_source.get_file()
@@ -465,10 +489,14 @@ func material_selected(_resource: Resource, path: String, token: String, mapping
 	session.texture = token
 	set_status("%s → %s • Assign applies to the selection" % [path, token])
 
-func preview_material(token: String) -> Material:
+func preview_opacity(render_category: String) -> float:
+	return {"caulk": 0.26, "clip": 0.36, "entity": 0.48}.get(render_category, 1.0)
+
+func preview_material(token: String, render_category := "opaque") -> Material:
 	sync_resolver()
-	if material_cache.has(token):
-		return material_cache[token]
+	var cache_key := token if render_category == "opaque" else token + "|" + render_category
+	if material_cache.has(cache_key):
+		return material_cache[cache_key]
 	var material: Material
 	var resolved = resolve_token(token)
 	texture_sizes[token] = resolved.get("texture_size", Vector2i.ONE)
@@ -479,12 +507,17 @@ func preview_material(token: String) -> Material:
 		material.albedo_color = Color("8ba4b6")
 	if material is BaseMaterial3D:
 		material.vertex_color_use_as_albedo = true
-	material_cache[token] = material
+		if render_category != "opaque":
+			material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			material.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_ALWAYS
+			material.albedo_color.a *= preview_opacity(render_category)
+	material_cache[cache_key] = material
 	return material
 
 func refresh_materials() -> void:
 	material_cache.clear()
 	texture_sizes.clear()
+	material_generation += 1
 	if session == null:
 		return
 	sync_texture_sizes()
@@ -778,41 +811,133 @@ func open_path(path: String) -> bool:
 	set_status("Opened %s" % path)
 	return true
 
-func open_scene_map() -> void:
-	if shutting_down or session == null or pending.is_valid() or dirty_dialog.visible:
+func set_scene_active(active: bool) -> void:
+	scene_active = active
+	if active:
+		queue_scene_discovery()
+
+func queue_scene_discovery() -> void:
+	if not scene_active or shutting_down or discovery_queued:
+		return
+	discovery_queued = true
+	call_deferred("discover_scene_loaders")
+
+func discover_scene_loaders() -> void:
+	if not discovery_queued:
+		return
+	discovery_queued = false
+	if not scene_active or shutting_down or session == null:
 		return
 	var root = EditorInterface.get_edited_scene_root()
-	if root == null:
+	var all_loaders: Array[Node] = []
+	if root is TBLoader:
+		all_loaders.append(root)
+	if root != null:
+		all_loaders.append_array(root.find_children("*", "TBLoader", true, false))
+	watch_scene_loaders(all_loaders)
+	var mapped: Array[Node] = all_loaders.filter(func(loader): return not loader.map_resource.is_empty())
+	var previous_loader = session.loader.get_ref()
+	var next_sessions: Dictionary = {}
+	for loader in mapped:
+		var id = loader.get_instance_id()
+		var origin: RefCounted = scene_sessions.get(id)
+		if origin == null or origin.loader.get_ref() != loader or not same_path(origin.document.get_path(), loader.map_resource):
+			if origin != null:
+				retire_scene_session(origin)
+			origin = create_scene_session(loader, root)
+		if origin != null:
+			next_sessions[id] = origin
+	for id in scene_sessions:
+		if not next_sessions.has(id):
+			retire_scene_session(scene_sessions[id])
+	scene_sessions = next_sessions
+	if previous_loader != null and scene_sessions.has(previous_loader.get_instance_id()):
+		if session != scene_sessions[previous_loader.get_instance_id()]:
+			set_session(scene_sessions[previous_loader.get_instance_id()])
+	elif not mapped.is_empty() and scene_sessions.has(mapped[0].get_instance_id()):
+		if session != scene_sessions[mapped[0].get_instance_id()]:
+			set_session(scene_sessions[mapped[0].get_instance_id()])
+	elif session.scene_managed:
+		var standalone = last_standalone.get_ref()
+		if standalone == null:
+			standalone = Session.new()
+		set_session(standalone)
+	rebuild_scene_tabs(root, mapped)
+
+func watch_scene_loaders(loaders: Array[Node]) -> void:
+	var current: Dictionary = {}
+	for loader in loaders:
+		var id = loader.get_instance_id()
+		current[id] = weakref(loader)
+		if not loader.map_resource_changed.is_connected(loader_map_changed):
+			loader.map_resource_changed.connect(loader_map_changed)
+		if not loader.renamed.is_connected(loader_renamed):
+			loader.renamed.connect(loader_renamed)
+	for id in watched_loaders:
+		if current.has(id):
+			continue
+		var loader = watched_loaders[id].get_ref()
+		if is_instance_valid(loader):
+			if loader.map_resource_changed.is_connected(loader_map_changed):
+				loader.map_resource_changed.disconnect(loader_map_changed)
+			if loader.renamed.is_connected(loader_renamed):
+				loader.renamed.disconnect(loader_renamed)
+	watched_loaders = current
+
+func loader_map_changed(_path: String) -> void:
+	queue_scene_discovery()
+
+func loader_renamed() -> void:
+	queue_scene_discovery()
+
+func create_scene_session(loader: Node, root: Node) -> RefCounted:
+	var candidate = Session.new()
+	var result: Dictionary = candidate.document.load_map(loader.map_resource)
+	if not session.report(result):
+		candidate.dispose()
+		return null
+	candidate.loader = weakref(loader)
+	candidate.scene = weakref(root)
+	candidate.was_bound = true
+	candidate.scene_managed = true
+	return candidate
+
+func retire_scene_session(origin: RefCounted) -> void:
+	origin.loader = weakref(null)
+	origin.scene = weakref(null)
+	origin.was_bound = false
+
+func rebuild_scene_tabs(root: Node, loaders: Array[Node]) -> void:
+	changing_scene_tabs = true
+	scene_tabs.clear_tabs()
+	for loader in loaders:
+		var id = loader.get_instance_id()
+		if not scene_sessions.has(id):
+			continue
+		var relative = str(root.get_path_to(loader))
+		var label = str(root.name) if relative == "." else relative
+		scene_tabs.add_tab(label)
+		var index = scene_tabs.tab_count - 1
+		scene_tabs.set_tab_metadata(index, weakref(scene_sessions[id]))
+		scene_tabs.set_tab_tooltip(index, "%s — %s" % [label, loader.map_resource])
+		if scene_sessions[id] == session:
+			scene_tabs.current_tab = index
+	scene_tabs.visible = scene_tabs.tab_count >= 2
+	changing_scene_tabs = false
+
+func scene_tab_changed(index: int) -> void:
+	if changing_scene_tabs or index < 0 or index >= scene_tabs.tab_count:
 		return
-	var loaders: Array[Node] = []
-	if root is TBLoader and not root.map_resource.is_empty():
-		loaders.append(root)
-	for node in root.find_children("*", "TBLoader", true, false):
-		if not node.map_resource.is_empty():
-			loaders.append(node)
-	if loaders.size() != 1:
-		return
-	var loader = loaders[0]
-	var target = weakref(loader)
-	var target_scene = weakref(root)
-	var path: String = loader.map_resource
-	var apply = func():
-		var node = target.get_ref()
-		if not is_instance_valid(node) or target_scene.get_ref() != EditorInterface.get_edited_scene_root() or node.map_resource != path:
-			set_status("Scene map open cancelled: loader or scene changed.")
-			return
-		if not same_path(session.document.get_path(), path) and not open_path(path):
-			return
-		session.loader = target
-		session.scene = target_scene
-		session.was_bound = true
-		configure_browser(node.texture_path)
-		refresh()
-	var untouched = session.document.get_path().is_empty() and session.recovery_source.is_empty() and session.document.get_revision() == 1
-	if untouched or same_path(session.document.get_path(), path):
-		apply.call()
-	else:
-		request_replace(apply)
+	if scene_tabs.current_tab != index:
+		changing_scene_tabs = true
+		scene_tabs.current_tab = index
+		changing_scene_tabs = false
+	var origin = scene_tabs.get_tab_metadata(index).get_ref()
+	if origin != null and origin != session:
+		set_session(origin)
+
+func open_scene_map() -> void:
+	queue_scene_discovery()
 
 func replace_session(candidate: RefCounted) -> void:
 	if discard_on_replace != null and discard_on_replace == session:
@@ -849,6 +974,10 @@ func bind_selected() -> void:
 	var root = EditorInterface.get_edited_scene_root()
 	if not is_instance_valid(loader) or root == null or not root.is_ancestor_of(loader) and root != loader:
 		set_status("Select exactly one TBLoader in the current scene before binding.")
+		return
+	var id = loader.get_instance_id()
+	if scene_sessions.has(id) and scene_sessions[id].loader.get_ref() == loader:
+		set_session(scene_sessions[id])
 		return
 	var target = weakref(loader)
 	var target_scene = weakref(root)

@@ -17,6 +17,7 @@ var yaw = 0.65
 var triangle_count = 0
 var hint: Label
 var rendered_key = ""
+var rendered_material_key = ""
 var geometry_chunks: Dictionary = {}
 var lighting_key: Array = []
 var lighting_initialized = false
@@ -97,6 +98,12 @@ func camera_map_direction() -> Vector3:
 	var direction := -camera.global_basis.z
 	return Vector3(direction.z, direction.x, direction.y).normalized()
 
+func preview_to_map(point: Vector3, scale_value := map_scale()) -> Vector3:
+	return Vector3(point.z, point.x, point.y) * scale_value
+
+func preview_direction_to_map(direction: Vector3) -> Vector3:
+	return Vector3(direction.z, direction.x, direction.y).normalized()
+
 func sync_camera_marker(force = false) -> void:
 	if camera == null or host == null or host.session == null:
 		return
@@ -134,10 +141,14 @@ func refresh() -> void:
 	var scale_value := map_scale()
 	var loader = host.session.loader.get_ref()
 	var visual_layer: int = loader.option_visual_layer_mask if is_instance_valid(loader) else 1
-	var key := "%d:%d:%s:%s:%s:%d" % [host.session.preview_generation, host.session.visibility_generation, str(hidden_ids), scale_value, str(host.resolver_config), visual_layer]
+	var key := "%d:%d:%d:%s:%s" % [host.session.document.get_instance_id(), host.session.preview_generation, host.session.visibility_generation, str(hidden_ids), scale_value]
 	if key != rendered_key:
 		rendered_key = key
 		rebuild_geometry(scale_value)
+	var material_key := "%d:%d:%d" % [host.session.document.get_instance_id(), host.material_generation, visual_layer]
+	if material_key != rendered_material_key:
+		rendered_material_key = material_key
+		refresh_chunk_materials(visual_layer)
 	for child in overlays.get_children():
 		overlays.remove_child(child)
 		child.queue_free()
@@ -161,6 +172,11 @@ func add_preview_mesh(vertices: PackedVector3Array, normals: PackedVector3Array,
 		instance.layers = loader.option_visual_layer_mask
 	map_geometry.add_child(instance)
 	return instance
+
+func apply_preview_material(instance: MeshInstance3D, material: Material, category: String) -> void:
+	instance.material_override = material
+	# ShaderMaterial has no generic alpha parameter; GeometryInstance3D provides the fallback.
+	instance.transparency = 1.0 - host.preview_opacity(category) if category != "opaque" and not material is BaseMaterial3D else 0.0
 
 func scene_directional_lights() -> Array[DirectionalLight3D]:
 	var result: Array[DirectionalLight3D] = []
@@ -209,55 +225,44 @@ func sync_scene_lighting(force = false) -> void:
 		light.global_transform = source.global_transform
 
 func rebuild_geometry(scale_value: float) -> void:
-	triangle_count = 0
+	var manifest: Dictionary = host.session.document.prepare_preview_chunks(scale_value,
+		host.session.hidden_brush_ids(), host.session.visibility_filter_mask(), CHUNK_TRIANGLES, CHUNK_SIZE)
+	triangle_count = manifest.get("triangle_count", 0)
 	var retained: Dictionary = {}
-	for group in host.session.preview_data():
-		var chunks: Dictionary = {}
-		for triangle in group.triangle_brush_ids.size():
-			var id: int = group.triangle_brush_ids[triangle]
-			if not host.session.triangle_visible(id, group.texture):
-				continue
-			triangle_count += 1
-			var first: int = group.indices[triangle * 3]
-			var center: Vector3 = (group.vertices[first] + group.vertices[group.indices[triangle * 3 + 1]] + group.vertices[group.indices[triangle * 3 + 2]]) / 3.0
-			var chunk_key = Vector3i.ZERO
-			if group.triangle_brush_ids.size() > CHUNK_TRIANGLES:
-				var transformed_center := transform_map_scaled(center, scale_value)
-				chunk_key = Vector3i(floori(transformed_center.x / CHUNK_SIZE), floori(transformed_center.y / CHUNK_SIZE), floori(transformed_center.z / CHUNK_SIZE))
-			if not chunks.has(chunk_key):
-				chunks[chunk_key] = {"vertices": [], "normals": [], "uvs": []}
-			var chunk: Dictionary = chunks[chunk_key]
-			for corner in 3:
-				var index: int = group.indices[triangle * 3 + corner]
-				chunk.vertices.append(transform_map_scaled(group.vertices[index], scale_value))
-				var normal: Vector3 = group.normals[index]
-				chunk.normals.append(Vector3(normal.y, normal.z, normal.x))
-				chunk.uvs.append(group.uvs[index])
-		var material: Material = host.preview_material(group.texture)
-		for chunk_key in chunks:
-			var key := "%s|%d,%d,%d" % [group.texture, chunk_key.x, chunk_key.y, chunk_key.z]
-			var chunk: Dictionary = chunks[chunk_key]
-			var vertices := PackedVector3Array(chunk.vertices)
-			var normals := PackedVector3Array(chunk.normals)
-			var uvs := PackedVector2Array(chunk.uvs)
-			var cached: Dictionary = geometry_chunks.get(key, {})
-			if not cached.is_empty() and cached.vertices == vertices and cached.normals == normals and cached.uvs == uvs:
-				cached.instance.material_override = material
-				var loader = host.session.loader.get_ref()
-				cached.instance.layers = loader.option_visual_layer_mask if is_instance_valid(loader) else 1
-				retained[key] = cached
-			else:
-				if not cached.is_empty():
-					map_geometry.remove_child(cached.instance)
-					cached.instance.queue_free()
-				var instance := add_preview_mesh(vertices, normals, uvs, material)
-				retained[key] = {"instance": instance, "vertices": vertices, "normals": normals, "uvs": uvs}
+	for entry in manifest.get("chunks", []):
+		var key: String = entry.chunk_id
+		var category: String = entry.get("render_category", "opaque")
+		var material: Material = host.preview_material(entry.texture, category)
+		var cached: Dictionary = geometry_chunks.get(key, {})
+		if not cached.is_empty() and cached.get("geometry_hash") == entry.geometry_hash and cached.get("geometry_version") == entry.geometry_version:
+			apply_preview_material(cached.instance, material, category)
+			var loader = host.session.loader.get_ref()
+			cached.instance.layers = loader.option_visual_layer_mask if is_instance_valid(loader) else 1
+			cached.texture = entry.texture
+			cached.render_category = category
+			retained[key] = cached
+			continue
+		if not cached.is_empty():
+			map_geometry.remove_child(cached.instance)
+			cached.instance.queue_free()
+		var chunk: Dictionary = host.session.document.get_preview_chunk(key)
+		if chunk.is_empty() or chunk.geometry_hash != entry.geometry_hash:
+			continue
+		var instance := add_preview_mesh(chunk.vertices, chunk.normals, chunk.uvs, material)
+		apply_preview_material(instance, material, category)
+		retained[key] = {"instance": instance, "texture": entry.texture, "render_category": category, "geometry_hash": entry.geometry_hash, "geometry_version": entry.geometry_version}
 	for key in geometry_chunks:
 		if not retained.has(key):
 			var stale: Dictionary = geometry_chunks[key]
 			map_geometry.remove_child(stale.instance)
 			stale.instance.queue_free()
 	geometry_chunks = retained
+
+func refresh_chunk_materials(visual_layer: int) -> void:
+	for cached in geometry_chunks.values():
+		var category: String = cached.get("render_category", "opaque")
+		apply_preview_material(cached.instance, host.preview_material(cached.texture, category), category)
+		cached.instance.layers = visual_layer
 
 func build_overlays(scale_value: float) -> void:
 	for marker in host.session.point_markers():
@@ -337,6 +342,10 @@ func _gui_input(event: InputEvent) -> void:
 		accept_event()
 
 func pick(position: Vector2, additive: bool) -> void:
+	var scale_value := map_scale()
+	var ray := camera.project_ray_origin(position)
+	var direction := camera.project_ray_normal(position)
+	var map_ray := preview_to_map(ray, scale_value)
 	var nearest = INF
 	var point_id = 0
 	for marker in host.session.point_markers():
@@ -344,39 +353,21 @@ func pick(position: Vector2, additive: bool) -> void:
 			continue
 		var p = transform_map(marker.origin)
 		if not camera.is_position_behind(p) and camera.unproject_position(p).distance_to(position) < 14:
-			var distance = camera.global_position.distance_to(p)
+			var distance = map_ray.distance_to(marker.origin)
 			if distance < nearest:
 				nearest = distance
 				point_id = marker.id
-	var ray = camera.project_ray_origin(position)
-	var direction = camera.project_ray_normal(position)
-	var scale_value := map_scale()
-	var candidates: Dictionary = {}
-	for brush in host.session.draw_data():
-		if not host.session.brush_visible(brush):
-			continue
-		var box := AABB(transform_map_scaled(brush.aabb_min, scale_value), transform_map_scaled(brush.aabb_max - brush.aabb_min, scale_value))
-		if box.intersects_ray(ray, direction) != null:
-			candidates[brush.id] = true
 	var id = 0
 	var face_index = -1
-	for group in host.session.preview_data():
-		for triangle in group.triangle_brush_ids.size():
-			var brush_id: int = group.triangle_brush_ids[triangle]
-			if not candidates.has(brush_id) or not host.session.triangle_visible(brush_id, group.texture):
-				continue
-			var p = transform_map_scaled(group.vertices[group.indices[triangle * 3]], scale_value)
-			var q = transform_map_scaled(group.vertices[group.indices[triangle * 3 + 1]], scale_value)
-			var r = transform_map_scaled(group.vertices[group.indices[triangle * 3 + 2]], scale_value)
-			var intersection = Geometry3D.ray_intersects_triangle(ray, direction, p, q, r)
-			if intersection != null:
-				var distance := ray.distance_to(intersection)
-				if distance >= nearest:
-					continue
-				nearest = distance
-				id = brush_id
-				point_id = 0
-				face_index = group.triangle_face_indices[triangle]
+	var max_distance: float = nearest if is_finite(nearest) else 1e30
+	for hit in host.session.visible_ray_hits(map_ray, preview_direction_to_map(direction), max_distance):
+		if hit.distance >= nearest:
+			continue
+		nearest = hit.distance
+		id = hit.brush_id
+		point_id = 0
+		face_index = hit.face_index
+		break
 	apply_pick(id, point_id, face_index, additive)
 
 func apply_pick(id: int, point_id: int, face_index: int, additive: bool) -> void:

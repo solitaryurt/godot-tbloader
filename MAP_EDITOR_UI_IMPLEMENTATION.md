@@ -244,9 +244,9 @@ XTest feasibility is now established by this live-server run.
 
 1. Use the pinned editor and the built addon containing
    `addons/tbloader/bin/libtbloader.linux.template_debug.x86_64.so`. For another
-   project, copy the complete `addons/tbloader` directory, including its
-   `.gdextension` and debug library; enable **TBLoader** in Project → Project
-   Settings → Plugins and restart if Godot requests it.
+   project, run `python install_addon.py /path/to/project`; this installs the
+   complete addon without overwriting a loaded library inode. Enable **TBLoader**
+   in Project → Project Settings → Plugins and restart if Godot requests it.
 2. Click **Map** in the top main-screen row next to 2D/3D/Script (toward the right
    after Asset Store on this 4.8 pin). This is the authoring workspace; the spatial
    Build Meshes/Map Materials controls are separate.

@@ -5,6 +5,7 @@
 #include "map/map_parser.h"
 #include "map/map_writer.h"
 #include "map/geo_generator.h"
+#include "map/brush_topology.h"
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/core/class_db.hpp>
@@ -13,6 +14,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cmath>
+#include <map>
 #include <set>
 #include <vector>
 #ifndef _WIN32
@@ -63,29 +65,16 @@ bool valid_geometry(const LMMapData &map) {
 			const auto &brush = map.entities[e].brushes[b];
 			const auto &geo = map.entity_geo[e].brushes[b];
 			double volume = 0;
-			std::vector<vec3> points;
-			std::vector<std::pair<int, int>> edges;
+			const auto topology = lm_extract_brush_topology(brush, geo);
 			for (int f = 0; f < brush.face_count; ++f) {
 				const auto &face = geo.faces[f];
 				if (face.vertex_count < 3) return false;
-				std::vector<int> winding;
 				for (int v = 0; v < face.vertex_count; ++v) {
 					const auto &vertex = face.vertices[v];
 					const auto &p = vertex.vertex;
 					if (!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z) || !std::isfinite(vertex.uv.u) || !std::isfinite(vertex.uv.v)) return false;
 					if (std::abs(p.x) > 1e9 || std::abs(p.y) > 1e9 || std::abs(p.z) > 1e9) return false;
-					int index = 0;
-					for (; index < static_cast<int>(points.size()); ++index) {
-						vec3 delta = vec3_sub(points[index], p);
-						if (vec3_dot(delta, delta) < 1e-10) break;
-					}
-					if (index == static_cast<int>(points.size())) points.push_back(p);
-					winding.push_back(index);
-				}
-				for (int v = 0; v < face.vertex_count; ++v) {
-					int a = winding[v], b = winding[(v + 1) % face.vertex_count];
-					if (a == b) return false;
-					edges.emplace_back(std::min(a, b), std::max(a, b));
+					if (topology.faces[f].vertex_indices[v] == topology.faces[f].vertex_indices[(v + 1) % face.vertex_count]) return false;
 				}
 				for (int v = 1; v + 1 < face.vertex_count; ++v) {
 					vec3 a = vec3_sub(face.vertices[0].vertex, brush.center);
@@ -96,13 +85,13 @@ bool valid_geometry(const LMMapData &map) {
 				}
 			}
 			if (!std::isfinite(volume) || volume <= 1e-9) return false;
-			std::sort(edges.begin(), edges.end());
-			for (size_t i = 0; i < edges.size();) {
-				size_t end = i + 1;
-				while (end < edges.size() && edges[end] == edges[i]) ++end;
-				if (end - i != 2) return false;
-				i = end;
+			std::map<std::pair<int, int>, int> edge_uses;
+			for (const auto &face : topology.faces) for (size_t v = 0; v < face.vertex_indices.size(); ++v) {
+				int a = face.vertex_indices[v], b = face.vertex_indices[(v + 1) % face.vertex_indices.size()];
+				if (a > b) std::swap(a, b);
+				++edge_uses[{a, b}];
 			}
+			for (const auto &edge : edge_uses) if (edge.second != 2) return false;
 		}
 	}
 	return true;
@@ -152,10 +141,39 @@ void TBMapDocument::assign_ids(LMMapData &candidate) {
 		}
 	}
 }
+void TBMapDocument::rebuild_live_index() {
+	live_ids.clear();
+	for (int e = 0; e < map->entity_count; ++e) {
+		const auto &entity = map->entities[e];
+		live_ids[entity.id] = {'e', e, -1, -1};
+		for (int p = 0; p < entity.primitive_count; ++p) {
+			const auto &primitive = entity.primitives[p];
+			const int64_t id = primitive.is_patch ? entity.patches[primitive.index].id : entity.brushes[primitive.index].id;
+			live_ids[id] = {primitive.is_patch ? 'p' : 'b', e, primitive.index, p};
+		}
+	}
+}
+const TBMapDocument::LiveLocation *TBMapDocument::live_location(int64_t id, char kind) const {
+	auto found = live_ids.find(id);
+	return found != live_ids.end() && found->second.kind == kind ? &found->second : nullptr;
+}
+LMEditEntity *TBMapDocument::edit_entity(LMMapEdit &edit, int64_t id) const {
+	const auto *location = live_location(id, 'e');
+	return location && location->entity < static_cast<int>(edit.entities.size()) && edit.entities[location->entity].id == id ? &edit.entities[location->entity] : nullptr;
+}
+LMEditPrimitive *TBMapDocument::edit_brush(LMMapEdit &edit, int64_t id) const {
+	const auto *location = live_location(id, 'b');
+	if (!location || location->entity >= static_cast<int>(edit.entities.size())) return nullptr;
+	auto &primitives = edit.entities[location->entity].primitives;
+	return location->primitive < static_cast<int>(primitives.size()) && !primitives[location->primitive].patch && primitives[location->primitive].id == id ? &primitives[location->primitive] : nullptr;
+}
 void TBMapDocument::commit(std::shared_ptr<LMMapData> candidate, const std::string &text, bool was_dirty) {
 	++topology;
 	for (int i = 0; i < candidate->entity_count; ++i) for (int b = 0; b < candidate->entities[i].brush_count; ++b) candidate->entities[i].brushes[b].topology_revision = topology;
 	map = std::move(candidate);
+	rebuild_live_index();
+	invalidate_spatial_index();
+	invalidate_preview_cache();
 	canonical = std::make_shared<const std::string>(text);
 	++revision;
 	emit_signal("map_changed", revision);
@@ -343,6 +361,9 @@ Dictionary TBMapDocument::rebuild() {
 	++topology;
 	for (int i = 0; i < candidate->entity_count; ++i) for (int b = 0; b < candidate->entities[i].brush_count; ++b) candidate->entities[i].brushes[b].topology_revision = topology;
 	map = candidate;
+	rebuild_live_index();
+	invalidate_spatial_index();
+	invalidate_preview_cache();
 	emit_signal("preview_changed");
 	return success(true);
 }
@@ -388,6 +409,10 @@ void TBMapDocument::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_entities"), &TBMapDocument::get_entities);
 	ClassDB::bind_method(D_METHOD("get_draw_data"), &TBMapDocument::get_draw_data);
 	ClassDB::bind_method(D_METHOD("get_preview_data"), &TBMapDocument::get_preview_data);
+	ClassDB::bind_method(D_METHOD("prepare_preview_chunks", "scale", "hidden_ids", "filter_mask", "chunk_triangles", "chunk_size"), &TBMapDocument::prepare_preview_chunks, DEFVAL(2048), DEFVAL(64.0));
+	ClassDB::bind_method(D_METHOD("get_preview_chunk", "chunk_id"), &TBMapDocument::get_preview_chunk);
+	ClassDB::bind_method(D_METHOD("query_brushes_2d", "hidden_axis", "mins", "maxs"), &TBMapDocument::query_brushes_2d);
+	ClassDB::bind_method(D_METHOD("query_ray", "origin", "direction", "max_distance"), &TBMapDocument::query_ray, DEFVAL(1e30));
 	ClassDB::bind_method(D_METHOD("create_cuboid", "mins", "maxs", "texture"), &TBMapDocument::create_cuboid);
 	ClassDB::bind_method(D_METHOD("duplicate_brushes", "ids"), &TBMapDocument::duplicate_brushes);
 	ClassDB::bind_method(D_METHOD("delete_brushes", "ids"), &TBMapDocument::delete_brushes);

@@ -4,6 +4,7 @@
 #include "geo_generator.h"
 #include "face.h"
 #include "map_edit.h"
+#include "brush_topology.h"
 #include <cmath>
 #include <cassert>
 #include <cstring>
@@ -11,6 +12,7 @@
 #include <iostream>
 #include <iterator>
 #include <string>
+#include <set>
 
 static std::string fixture(const std::string &name) {
 	std::ifstream file("tests/map_editor/fixtures/" + name + ".map");
@@ -57,6 +59,36 @@ static void equal_maps(const LMMapData &a, const LMMapData &b) {
 	}
 }
 
+static void check_topology_order(const LMBrush &brush, const LMBrushGeometry &geometry) {
+	const auto topology = lm_extract_brush_topology(brush, geometry);
+	std::vector<vec3> vertices;
+	std::vector<std::pair<int, int>> edges;
+	std::set<std::pair<int, int>> seen;
+	assert(topology.faces.size() == static_cast<size_t>(brush.face_count));
+	for (int f = 0; f < brush.face_count; ++f) {
+		const auto &source = geometry.faces[f];
+		assert(topology.faces[f].winding.size() == static_cast<size_t>(source.vertex_count));
+		for (int v = 0; v < source.vertex_count; ++v) {
+			const vec3 point = source.vertices[v].vertex;
+			equal_vector(topology.faces[f].winding[v], point);
+			int index = 0;
+			for (; index < static_cast<int>(vertices.size()); ++index) {
+				const vec3 delta = vec3_sub(vertices[index], point);
+				if (vec3_dot(delta, delta) < 1e-10) break;
+			}
+			if (index == static_cast<int>(vertices.size())) vertices.push_back(point);
+			assert(topology.faces[f].vertex_indices[v] == index);
+		}
+		for (int v = 0; v < source.vertex_count; ++v) {
+			int a = topology.faces[f].vertex_indices[v], b = topology.faces[f].vertex_indices[(v + 1) % source.vertex_count];
+			if (a > b) std::swap(a, b);
+			if (seen.emplace(a, b).second) edges.emplace_back(a, b);
+		}
+	}
+	assert(topology.vertices.size() == vertices.size() && topology.edges == edges);
+	for (size_t i = 0; i < vertices.size(); ++i) equal_vector(topology.vertices[i], vertices[i]);
+}
+
 int main() {
 	for (const auto *name : { "empty", "classic_cube", "valve_cube", "patches", "ownership" }) {
 		const std::string source = fixture(name);
@@ -90,6 +122,8 @@ int main() {
 		}
 		LMGeoGenerator geo(map);
 		geo.run();
+		for (int e = 0; e < map->entity_count; ++e) for (int b = 0; b < map->entities[e].brush_count; ++b)
+			check_topology_order(map->entities[e].brushes[b], map->entity_geo[e].brushes[b]);
 		if (!strcmp(name, "patches")) {
 			assert(map->entity_geo[0].patches[0].vertex_count == 25);
 			assert(map->entity_geo[0].patches[1].vertex_count == 35);

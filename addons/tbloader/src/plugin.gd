@@ -11,6 +11,7 @@ var materials_button: Button = null
 var materials_count_label: Label = null
 var materials_preview_generation := 0
 var map_editor: Control = null
+var map_screen_active = false
 
 func _enter_tree():
 	map_control = create_map_control()
@@ -24,6 +25,10 @@ func _enter_tree():
 	get_editor_interface().get_editor_main_screen().add_child(map_editor)
 	map_editor.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	map_editor.hide()
+	scene_changed.connect(edited_scene_changed)
+	get_tree().node_added.connect(scene_tree_changed)
+	get_tree().node_removed.connect(scene_tree_changed)
+	get_tree().node_renamed.connect(scene_node_renamed)
 	get_editor_interface().get_selection().selection_changed.connect(spatial_selection_changed)
 	spatial_selection_changed()
 
@@ -31,6 +36,14 @@ func _exit_tree():
 	materials_preview_generation += 1
 	map_editor.store_recovery()
 	map_editor.shutdown()
+	if scene_changed.is_connected(edited_scene_changed):
+		scene_changed.disconnect(edited_scene_changed)
+	if get_tree().node_added.is_connected(scene_tree_changed):
+		get_tree().node_added.disconnect(scene_tree_changed)
+	if get_tree().node_removed.is_connected(scene_tree_changed):
+		get_tree().node_removed.disconnect(scene_tree_changed)
+	if get_tree().node_renamed.is_connected(scene_node_renamed):
+		get_tree().node_renamed.disconnect(scene_node_renamed)
 	get_editor_interface().get_selection().selection_changed.disconnect(spatial_selection_changed)
 	# Pinned 4.8's legacy main-screen adapter detaches its generated EditorDock
 	# on plugin disable without freeing it. Dispose only that detached wrapper.
@@ -53,10 +66,28 @@ func _handles(_object):
 	return false
 
 func _make_visible(visible: bool):
+	map_screen_active = visible
 	if map_editor != null:
 		map_editor.set_visible(visible)
-		if visible:
-			map_editor.open_scene_map()
+		map_editor.set_scene_active(visible)
+
+func edited_scene_changed(_root: Node) -> void:
+	if map_screen_active and map_editor != null:
+		map_editor.queue_scene_discovery()
+
+func scene_tree_changed(node: Node) -> void:
+	if not map_screen_active or map_editor == null:
+		return
+	var root = get_editor_interface().get_edited_scene_root()
+	if root != null and node is TBLoader:
+		map_editor.queue_scene_discovery()
+
+func scene_node_renamed(node: Node) -> void:
+	if not map_screen_active or map_editor == null:
+		return
+	var root = get_editor_interface().get_edited_scene_root()
+	if root != null and (node == root or root.is_ancestor_of(node)):
+		map_editor.queue_scene_discovery()
 
 func _has_main_screen() -> bool:
 	return true

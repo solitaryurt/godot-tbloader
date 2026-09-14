@@ -23,17 +23,16 @@ var recovery_source = ""
 var manager: EditorUndoRedoManager
 var save_enabled = true # Successful Discard replacement suppresses Save All until resume/edit/undo.
 var was_bound = false
+var scene_managed = false
 var preview_generation = 0
 var visibility_generation = 0
 var _draw_cache: Array = []
 var _draw_index: Dictionary = {}
 var _entity_cache: Array = []
 var _brush_entity_ids: Dictionary = {}
-var _preview_cache: Array = []
 var _marker_cache: Array = []
 var _draw_valid = false
 var _entity_valid = false
-var _preview_valid = false
 var _marker_valid = false
 
 func _init() -> void:
@@ -45,14 +44,12 @@ func _map_changed(_revision: int) -> void:
 	_entity_valid = false
 	_brush_entity_ids.clear()
 	_marker_valid = false
-	_preview_valid = false
 	preview_generation += 1
 
 func _preview_changed() -> void:
 	# Rebuilds can replace topology caches without changing canonical map text.
 	_draw_valid = false
 	_draw_index.clear()
-	_preview_valid = false
 	preview_generation += 1
 
 func dispose() -> void:
@@ -64,7 +61,6 @@ func dispose() -> void:
 	_draw_index.clear()
 	_entity_cache.clear()
 	_brush_entity_ids.clear()
-	_preview_cache.clear()
 	_marker_cache.clear()
 
 func draw_data() -> Array:
@@ -90,12 +86,6 @@ func entity_data() -> Array:
 				_brush_entity_ids[entity.id] = true
 		_entity_valid = true
 	return _entity_cache
-
-func preview_data() -> Array:
-	if not _preview_valid:
-		_preview_cache = document.get_preview_data()
-		_preview_valid = true
-	return _preview_cache
 
 func capture() -> Dictionary:
 	return {"native": document.capture_history_state(), "selected_brush_ids": selected.duplicate(),
@@ -159,6 +149,30 @@ func transact(label: String, operation: Callable) -> bool:
 func brush(id: int) -> Dictionary:
 	draw_data()
 	return _draw_index.get(id, {})
+
+func visible_brushes_2d(hidden_axis: int, mins: Vector3, maxs: Vector3) -> Array:
+	var result: Array = []
+	for id in document.query_brushes_2d(hidden_axis, mins, maxs):
+		var item := brush(id)
+		if brush_visible(item):
+			result.append(item)
+	return result
+
+func visible_ray_hits(origin: Vector3, direction: Vector3, max_distance: float = 1e30) -> Array:
+	var result: Array = []
+	for hit in document.query_ray(origin, direction, max_distance):
+		if triangle_visible(hit.brush_id, hit.texture):
+			result.append(hit)
+	return result
+
+func hidden_brush_ids() -> PackedInt64Array:
+	var result := PackedInt64Array()
+	for id in hidden:
+		result.append(id)
+	return result
+
+func visibility_filter_mask() -> int:
+	return int(visibility_filters.entities) | int(visibility_filters.caulk) << 1 | int(visibility_filters.clips) << 2
 
 func component_valid(component: Dictionary, item: Dictionary) -> bool:
 	if item.is_empty() or not selected.has(component.brush_id) or not brush_visible(item):

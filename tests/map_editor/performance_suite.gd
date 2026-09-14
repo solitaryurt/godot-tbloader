@@ -116,6 +116,7 @@ func run() -> void:
 	operations.snapshot = measure(func(): return doc.snapshot(), warmups, samples)
 	operations.export_text = measure(func(): return doc.export_text(), warmups, samples)
 	operations.get_draw_data = measure(func(): return doc.get_draw_data(), warmups, samples, false)
+	# This suite intentionally retains a baseline for the public compatibility API.
 	operations.get_preview_data = measure(func(): return doc.get_preview_data(), warmups, samples, false)
 	for selection in ["one", "all"]:
 		var selected = PackedInt64Array([ids[0]]) if selection == "one" else ids

@@ -8,6 +8,7 @@ export GODOT_BIN=/mnt/data/code/godot/bin/godot.linuxbsd.editor.x86_64
 timeout 900s scons platform=linux target=template_debug arch=x86_64 -j2
 python tests/map_editor/run_tests.py --godot "$GODOT_BIN" --suite document
 python tests/map_editor/run_tests.py --godot "$GODOT_BIN" --suite editor
+python tests/map_editor/current_editor_performance_runner.py --godot "$GODOT_BIN" --samples 31
 python -m unittest discover -s tests/map_editor -p test_harness.py -v
 # Existing local X11/Xwayland display; no installation or system changes needed:
 DISPLAY=:0 python tests/map_editor/run_tests.py --godot "$GODOT_BIN" --suite ui
@@ -25,8 +26,9 @@ normals, collision and imported texture checks, and adds empty-worldspawn bake.
 
 `editor` runs an actual `@tool EditorPlugin` inside `--editor`: real graph handlers,
 component groups, clip/flip/split, all 21 prism combinations, material/UV and entity
-editing, persistence, originating-session global history, scene bake history and
-addon disable/re-enable with released controls.
+editing, persistence, originating-session global history, background dirty refresh
+isolation, material-only camera chunk reuse, scene bake history, Bake on save default
+off, and addon disable/re-enable with released controls.
 
 `ui` runs the editor acceptance with a display, adding rendered intermediate
 face/edge/vertex/split captures and a main-screen screenshot. It requires a display
@@ -41,6 +43,7 @@ The runner selects X11 when `DISPLAY` is set, otherwise Wayland.
 Here X11 `:0` works; Wayland `wayland-1` produces engine GLES3 errors/crash.
 
 See [window-input protocol, results and timing limitations](window_input.md),
+[CURRENT-editor Tohunga performance and memory baseline](current_editor_performance.md),
 [native performance baseline](../../MAP_EDITOR_PERFORMANCE.md), and
 [opening the actual Map tab / retained demo](../../MAP_EDITOR_UI_IMPLEMENTATION.md#open-the-actual-map-editor).
 P0/P1 functional implementation is delivered on the pinned Linux debug addon;

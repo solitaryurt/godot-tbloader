@@ -3,6 +3,7 @@
 #include "map/patch.h"
 #include "map/map_writer.h"
 #include "map/geo_generator.h"
+#include "map/brush_topology.h"
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <algorithm>
 #include <charconv>
@@ -83,16 +84,14 @@ Dictionary TBMapDocument::finish_edit(const LMMapEdit &edit, const StringName &o
 	return success(true, value);
 }
 Dictionary TBMapDocument::check_brushes(const PackedInt64Array &ids, const StringName &operation) const {
-	std::set<int64_t> live;
-	for (int e = 0; e < map->entity_count; ++e) for (int b = 0; b < map->entities[e].brush_count; ++b) live.insert(map->entities[e].brushes[b].id);
-	for (int64_t id : ids) if (!live.count(id)) {
+	for (int64_t id : ids) if (!live_location(id, 'b')) {
 		Dictionary r = failure("INVALID_ID", "Unknown brush handle", operation); Dictionary error = r["error"]; error["brush_id"] = id; return r;
 	}
 	return success();
 }
 Dictionary TBMapDocument::check_face(int64_t id, int face, int64_t token, const StringName &operation) const {
-	for (int e = 0; e < map->entity_count; ++e) for (int b = 0; b < map->entities[e].brush_count; ++b) {
-		const auto &brush = map->entities[e].brushes[b]; if (brush.id != id) continue;
+	if (const auto *location = live_location(id, 'b')) {
+		const auto &brush = map->entities[location->entity].brushes[location->index];
 		if (brush.topology_revision == token && face >= 0 && face < brush.face_count) return success();
 		Dictionary r = failure(brush.topology_revision != token ? "STALE_COMPONENT" : "INVALID_ARGUMENT", "Stale topology token or invalid face index", operation);
 		Dictionary error = r["error"]; error["brush_id"] = id; error["face"] = face; return r;
@@ -107,9 +106,10 @@ Dictionary TBMapDocument::create_cuboid(Vector3 mins, Vector3 maxs, const String
 Dictionary TBMapDocument::duplicate_brushes(const PackedInt64Array &ids) {
 	auto r = check_brushes(ids, "duplicate_brushes"); if (!bool(r["ok"])) return r;
 	LMMapEdit edit(*map); PackedInt64Array out; int64_t id = next_id;
-	for (int64_t source : unique(ids)) for (auto &e : edit.entities) {
-		auto it = std::find_if(e.primitives.begin(), e.primitives.end(), [&](const LMEditPrimitive &p) { return p.id == source; });
-		if (it != e.primitives.end()) { auto copy = *it; copy.id = id++; out.push_back(copy.id); e.primitives.push_back(std::move(copy)); break; }
+	for (int64_t source : unique(ids)) {
+		const auto *location = live_location(source, 'b');
+		auto &primitives = edit.entities[location->entity].primitives;
+		auto copy = primitives[location->primitive]; copy.id = id++; out.push_back(copy.id); primitives.push_back(std::move(copy));
 	}
 	return finish_edit(edit, "duplicate_brushes", out);
 }
@@ -122,7 +122,7 @@ Dictionary TBMapDocument::delete_brushes(const PackedInt64Array &ids) {
 Dictionary TBMapDocument::translate_brushes(const PackedInt64Array &ids, Vector3 delta) {
 	auto r = check_brushes(ids, "translate_brushes"); if (!bool(r["ok"])) return r;
 	if (!valid(delta)) return failure("INVALID_ARGUMENT", "Invalid translation", "translate_brushes");
-	LMMapEdit edit(*map); for (int64_t id : unique(ids)) for (auto &f : edit.brush(id)->faces) move_face(f, delta);
+	LMMapEdit edit(*map); for (int64_t id : unique(ids)) for (auto &f : edit_brush(edit, id)->faces) move_face(f, delta);
 	return finish_edit(edit, "translate_brushes");
 }
 Dictionary TBMapDocument::rotate_brushes(const PackedInt64Array &ids, Vector3 pivot, int axis, double radians) {
@@ -132,13 +132,13 @@ Dictionary TBMapDocument::rotate_brushes(const PackedInt64Array &ids, Vector3 pi
 	radians = std::remainder(radians, 6.28318530717958647692);
 	if (ids.is_empty() || std::abs(radians) < 1e-12) return success();
 	LMMapEdit edit(*map);
-	for (int64_t id : unique(ids)) lm_edit_rotate_brush(*edit.brush(id), native(pivot), axis, radians);
+	for (int64_t id : unique(ids)) lm_edit_rotate_brush(*edit_brush(edit, id), native(pivot), axis, radians);
 	return finish_edit(edit, "rotate_brushes");
 }
 Dictionary TBMapDocument::translate_face(int64_t id, int face, Vector3 delta, int64_t topology_revision) {
 	auto r = check_face(id, face, topology_revision, "translate_face"); if (!bool(r["ok"])) return r;
 	if (!valid(delta)) return failure("INVALID_ARGUMENT", "Invalid translation", "translate_face");
-	LMMapEdit edit(*map); auto &f = edit.brush(id)->faces[face];
+	LMMapEdit edit(*map); auto &f = edit_brush(edit, id)->faces[face];
 	// Tangential motion does not resize the supporting plane or create history.
 	Vector3 n = vector(f.plane.plane_normal); move_face(f, n * n.dot(delta));
 	return finish_edit(edit, "translate_face");
@@ -146,21 +146,18 @@ Dictionary TBMapDocument::translate_face(int64_t id, int face, Vector3 delta, in
 Dictionary TBMapDocument::set_brush_texture(const PackedInt64Array &ids, const String &name) {
 	auto r = check_brushes(ids, "set_brush_texture"); if (!bool(r["ok"])) return r;
 	if (!token(name)) return failure("INVALID_ARGUMENT", "Invalid texture name", "set_brush_texture");
-	LMMapEdit edit(*map); for (int64_t id : unique(ids)) for (auto &f : edit.brush(id)->faces) f.texture = bytes(name);
+	LMMapEdit edit(*map); for (int64_t id : unique(ids)) for (auto &f : edit_brush(edit, id)->faces) f.texture = bytes(name);
 	return finish_edit(edit, "set_brush_texture");
 }
 Dictionary TBMapDocument::set_face_texture(int64_t id, int face, const String &name, int64_t topology_revision) {
 	auto r = check_face(id, face, topology_revision, "set_face_texture"); if (!bool(r["ok"])) return r;
 	if (!token(name)) return failure("INVALID_ARGUMENT", "Invalid texture name", "set_face_texture");
-	LMMapEdit edit(*map); edit.brush(id)->faces[face].texture = bytes(name); return finish_edit(edit, "set_face_texture");
+	LMMapEdit edit(*map); edit_brush(edit, id)->faces[face].texture = bytes(name); return finish_edit(edit, "set_face_texture");
 }
 Dictionary TBMapDocument::get_face_uv(int64_t id, int face, int64_t topology_revision) const {
 	auto r = check_face(id, face, topology_revision, "get_face_uv"); if (!bool(r["ok"])) return r;
-	const LMFace *source = nullptr;
-	for (int e = 0; e < map->entity_count; ++e) for (int b = 0; b < map->entities[e].brush_count; ++b) {
-		const auto &brush = map->entities[e].brushes[b]; if (brush.id == id) source = &brush.faces[face];
-	}
-	const auto &f = *source; Dictionary uv;
+	const auto *location = live_location(id, 'b');
+	const auto &f = map->entities[location->entity].brushes[location->index].faces[face]; Dictionary uv;
 	uv["projection"] = f.is_valve_uv ? "valve" : "classic";
 	uv["shift"] = f.is_valve_uv ? Vector2(f.uv_valve.u.offset, f.uv_valve.v.offset) : Vector2(f.uv_standard.u, f.uv_standard.v);
 	uv["rotation"] = f.uv_extra.rot; uv["scale"] = Vector2(f.uv_extra.scale_x, f.uv_extra.scale_y);
@@ -169,7 +166,7 @@ Dictionary TBMapDocument::get_face_uv(int64_t id, int face, int64_t topology_rev
 Dictionary TBMapDocument::set_face_uv(int64_t id, int face, Vector2 shift, double rotation, Vector2 scale, int64_t topology_revision) {
 	auto r = check_face(id, face, topology_revision, "set_face_uv"); if (!bool(r["ok"])) return r;
 	if (!shift.is_finite() || !scale.is_finite() || !std::isfinite(rotation) || std::abs(rotation) > 1e9 || std::abs(shift.x) > 1e9 || std::abs(shift.y) > 1e9 || std::abs(scale.x) < 1e-9 || std::abs(scale.y) < 1e-9 || std::abs(scale.x) > 1e9 || std::abs(scale.y) > 1e9) return failure("INVALID_ARGUMENT", "Invalid UV transform", "set_face_uv");
-	LMMapEdit edit(*map); auto &f = edit.brush(id)->faces[face].plane;
+	LMMapEdit edit(*map); auto &f = edit_brush(edit, id)->faces[face].plane;
 	if (f.is_valve_uv) return failure("UNSUPPORTED_PROJECTION", "Valve projection is read-only", "set_face_uv");
 	f.uv_standard = {shift.x, shift.y}; f.uv_extra = {rotation, scale.x, scale.y}; return finish_edit(edit, "set_face_uv");
 }
@@ -192,7 +189,7 @@ Dictionary TBMapDocument::set_texture_sizes(const Dictionary &sizes) {
 	resolve_texture_sizes(*candidate, normalized); LMGeoGenerator(candidate).run();
 	apply_identities(*candidate, identities(*map));
 	for (int e = 0; e < map->entity_count; ++e) for (int b = 0; b < map->entities[e].brush_count; ++b) candidate->entities[e].brushes[b].topology_revision = map->entities[e].brushes[b].topology_revision;
-	map = candidate; texture_sizes = normalized; emit_signal("preview_changed"); return success(true);
+	map = candidate; rebuild_live_index(); invalidate_preview_cache(); texture_sizes = normalized; emit_signal("preview_changed"); return success(true);
 }
 Dictionary TBMapDocument::export_selection(const PackedInt64Array &ids) const {
 	auto r = check_brushes(ids, "export_selection"); if (!bool(r["ok"])) return r;
@@ -219,14 +216,14 @@ Dictionary TBMapDocument::create_point_entity(const String &classname, Vector3 o
 	return finish_edit(edit, "create_point_entity", e.id);
 }
 Dictionary TBMapDocument::set_entity_property(int64_t id, const String &key, const String &value) {
-	LMMapEdit edit(*map); auto e = edit.entity(id); if (!e) return failure("INVALID_ID", "Unknown entity handle", "set_entity_property");
+	LMMapEdit edit(*map); auto e = edit_entity(edit, id); if (!e) return failure("INVALID_ID", "Unknown entity handle", "set_entity_property");
 	if (!token(key) || !token(value, true)) return failure("INVALID_ARGUMENT", "Invalid epair", "set_entity_property");
 	if (key == "classname" && (value.is_empty() || (e->property("classname") == "worldspawn") != (value == "worldspawn"))) return failure("INVALID_ARGUMENT", "Cannot change worldspawn identity or empty classname", "set_entity_property");
 	Vector3 origin; if (key == "origin" && (value.is_empty() || !read_origin(bytes(value), origin))) return failure("INVALID_ARGUMENT", "Origin must contain three finite coordinates", "set_entity_property");
 	e->set_property(bytes(key), bytes(value)); return finish_edit(edit, "set_entity_property");
 }
 Dictionary TBMapDocument::remove_entity_property(int64_t id, const String &key) {
-	LMMapEdit edit(*map); auto e = edit.entity(id); if (!e) return failure("INVALID_ID", "Unknown entity handle", "remove_entity_property");
+	LMMapEdit edit(*map); auto e = edit_entity(edit, id); if (!e) return failure("INVALID_ID", "Unknown entity handle", "remove_entity_property");
 	if (!token(key) || key == "classname") return failure("INVALID_ARGUMENT", "Cannot remove classname or use an invalid key", "remove_entity_property");
 	e->epairs.erase(std::remove_if(e->epairs.begin(), e->epairs.end(), [&](const auto &p) { return p.first == bytes(key); }), e->epairs.end());
 	return finish_edit(edit, "remove_entity_property");
@@ -235,7 +232,7 @@ Dictionary TBMapDocument::translate_point_entities(const PackedInt64Array &ids, 
 	if (!valid(delta)) return failure("INVALID_ARGUMENT", "Invalid translation", "translate_point_entities");
 	LMMapEdit edit(*map);
 	for (int64_t id : unique(ids)) {
-		auto e = edit.entity(id); if (!e) return failure("INVALID_ID", "Unknown entity handle", "translate_point_entities");
+		auto e = edit_entity(edit, id); if (!e) return failure("INVALID_ID", "Unknown entity handle", "translate_point_entities");
 		Vector3 origin;
 		if (!e->primitives.empty() || e->property("classname") == "worldspawn" || !read_origin(e->property("origin"), origin) || !valid(origin + delta)) return failure("INVALID_ARGUMENT", "Expected point entity with a valid origin", "translate_point_entities");
 		if (delta != Vector3()) e->set_property("origin", origin_text(origin + delta));
@@ -247,7 +244,7 @@ Dictionary TBMapDocument::group_brushes(const PackedInt64Array &ids, const Strin
 	if (!token(classname) || classname == "worldspawn") return failure("INVALID_ARGUMENT", "Expected non-world classname", "group_brushes");
 	if (ids.is_empty()) return success();
 	LMMapEdit edit(*map); LMEditEntity group; group.id = next_id; group.epairs.emplace_back("classname", bytes(classname));
-	for (int64_t id : unique(ids)) group.primitives.push_back(*edit.brush(id));
+	for (int64_t id : unique(ids)) group.primitives.push_back(*edit_brush(edit, id));
 	for (auto &e : edit.entities) e.primitives.erase(std::remove_if(e.primitives.begin(), e.primitives.end(), [&](const LMEditPrimitive &p) { return ids.has(p.id); }), e.primitives.end());
 	edit.entities.push_back(group); return finish_edit(edit, "group_brushes", group.id);
 }
@@ -265,7 +262,7 @@ Dictionary TBMapDocument::return_brushes_to_worldspawn(const PackedInt64Array &i
 Dictionary TBMapDocument::delete_entities(const PackedInt64Array &ids, bool delete_owned_brushes) {
 	LMMapEdit edit(*map); std::vector<LMEditPrimitive> moved;
 	for (int64_t id : unique(ids)) {
-		auto e = edit.entity(id); if (!e) return failure("INVALID_ID", "Unknown entity handle", "delete_entities");
+		auto e = edit_entity(edit, id); if (!e) return failure("INVALID_ID", "Unknown entity handle", "delete_entities");
 		if (e->property("classname") == "worldspawn") return failure("INVALID_ARGUMENT", "Cannot delete worldspawn", "delete_entities");
 		for (const auto &p : e->primitives) if (p.patch) return failure("UNSUPPORTED_SYNTAX", "Cannot delete patch-owning entities", "delete_entities");
 		if (!delete_owned_brushes) moved.insert(moved.end(), e->primitives.begin(), e->primitives.end());
@@ -277,9 +274,10 @@ Dictionary TBMapDocument::delete_entities(const PackedInt64Array &ids, bool dele
 Dictionary TBMapDocument::make_prism(int64_t id, int sides, int axis) {
 	PackedInt64Array ids; ids.push_back(id); auto r = check_brushes(ids, "make_prism"); if (!bool(r["ok"])) return r;
 	if (sides < 3 || sides > 62 || axis < 0 || axis > 2) return failure("INVALID_ARGUMENT", "Expected 3..62 sides and axis 0..2", "make_prism");
-	Vector3 lo, hi; Array draw = get_draw_data();
-	for (int i = 0; i < draw.size(); ++i) { Dictionary b = draw[i]; if (int64_t(b["id"]) == id) { lo = b["aabb_min"]; hi = b["aabb_max"]; break; } }
-	LMMapEdit edit(*map); auto &brush = *edit.brush(id); auto prototype = brush.faces.front();
+	const auto *location = live_location(id, 'b');
+	const auto bounds = lm_extract_brush_topology(map->entities[location->entity].brushes[location->index], map->entity_geo[location->entity].brushes[location->index]);
+	Vector3 lo = vector(bounds.mins), hi = vector(bounds.maxs);
+	LMMapEdit edit(*map); auto &brush = *edit_brush(edit, id); auto prototype = brush.faces.front();
 	auto box = lm_edit_cuboid(native(lo), native(hi), prototype.texture);
 	brush.faces.clear();
 	for (int side = 0; side < 2; ++side) { auto f = prototype; f.plane.plane_points = box.faces[axis * 2 + side].plane.plane_points; brush.faces.push_back(f); }
@@ -308,9 +306,7 @@ Dictionary TBMapDocument::translate_components(const Array &components, Vector3 
 
 Dictionary TBMapDocument::move_components(const Array &components, Vector3 delta, const StringName &operation) {
 	if (!valid(delta)) return failure("INVALID_ARGUMENT", "Invalid translation", operation);
-	std::map<int64_t, Dictionary> brushes;
-	Array draw = get_draw_data();
-	for (int i = 0; i < draw.size(); ++i) { Dictionary b = draw[i]; brushes[int64_t(b["id"])] = b; }
+	std::map<int64_t, LMBrushTopology> brushes;
 	std::map<int64_t, std::set<int>> selected_vertices, selected_faces;
 	for (int i = 0; i < components.size(); ++i) {
 		Variant item = components[i];
@@ -322,12 +318,16 @@ Dictionary TBMapDocument::move_components(const Array &components, Vector3 delta
 			return failure("INVALID_ARGUMENT", "Invalid component schema", operation);
 		int64_t id = c["brush_id"], index = c["index"]; String kind = c["kind"];
 		auto r = check_face(id, 0, c["topology_revision"], operation); if (!bool(r["ok"])) return r;
-		Dictionary b = brushes.at(id); PackedVector3Array vertices = b["vertices"]; PackedInt32Array edges = b["edge_vertex_indices"]; Array faces = b["faces"];
-		int count = kind == "vertex" ? vertices.size() : kind == "edge" ? edges.size() / 2 : kind == "face" ? faces.size() : 0;
+		if (!brushes.count(id)) {
+			const auto *location = live_location(id, 'b');
+			brushes.emplace(id, lm_extract_brush_topology(map->entities[location->entity].brushes[location->index], map->entity_geo[location->entity].brushes[location->index]));
+		}
+		const auto &brush = brushes.at(id);
+		int count = kind == "vertex" ? brush.vertices.size() : kind == "edge" ? brush.edges.size() : kind == "face" ? brush.faces.size() : 0;
 		if (index < 0 || index >= count) return failure("INVALID_ARGUMENT", "Invalid component kind or index", operation);
 		if (kind == "face") selected_faces[id].insert(index);
 		else if (kind == "vertex") selected_vertices[id].insert(index);
-		else { selected_vertices[id].insert(edges[index * 2]); selected_vertices[id].insert(edges[index * 2 + 1]); }
+		else { selected_vertices[id].insert(brush.edges[index].first); selected_vertices[id].insert(brush.edges[index].second); }
 	}
 	// Face mode moves supporting planes; vertex/edge mode moves incident vertices.
 	// Mixing these semantics in one brush is ambiguous and must never drop handles.
@@ -335,27 +335,27 @@ Dictionary TBMapDocument::move_components(const Array &components, Vector3 delta
 	if (components.is_empty() || delta == Vector3()) return success();
 	LMMapEdit edit(*map);
 	for (const auto &group : selected_faces) for (int index : group.second) {
-		auto &f = edit.brush(group.first)->faces[index]; Vector3 n = vector(f.plane.plane_normal); move_face(f, n * n.dot(delta));
+		auto &f = edit_brush(edit, group.first)->faces[index]; Vector3 n = vector(f.plane.plane_normal); move_face(f, n * n.dot(delta));
 	}
-	std::map<int64_t, PackedVector3Array> expected;
+	std::map<int64_t, std::vector<vec3>> expected;
 	for (const auto &group : selected_vertices) {
 		int64_t id = group.first; const auto &selected = group.second;
-		Dictionary brush = brushes.at(id); PackedVector3Array vertices = brush["vertices"];
-		for (int index : selected) { vertices.set(index, vertices[index] + delta); if (!valid(vertices[index])) return failure("INVALID_ARGUMENT", "Vertex exceeds coordinate bounds", operation); }
+		auto vertices = brushes.at(id).vertices;
+		for (int index : selected) { vertices[index] = vec3_add(vertices[index], native(delta)); if (!valid(vector(vertices[index]))) return failure("INVALID_ARGUMENT", "Vertex exceeds coordinate bounds", operation); }
 		expected[id] = vertices;
-		auto &target = *edit.brush(id); Array faces = brush["faces"];
-		for (int f = 0; f < faces.size(); ++f) {
-			Dictionary face = faces[f]; PackedInt32Array indices = face["vertex_indices"];
+		auto &target = *edit_brush(edit, id); const auto &faces = brushes.at(id).faces;
+		for (int f = 0; f < static_cast<int>(faces.size()); ++f) {
+			const auto &indices = faces[f].vertex_indices;
 			bool affected = false; for (int index : indices) if (selected.count(index)) affected = true;
 			if (!affected) continue;
-			Vector3 a = vertices[indices[0]], b, c, n;
-			for (int i = 1; i + 1 < indices.size(); ++i) {
-				b = vertices[indices[i]]; c = vertices[indices[i + 1]]; n = (c - a).cross(b - a);
+			Vector3 a = vector(vertices[indices[0]]), b, c, n;
+			for (int i = 1; i + 1 < static_cast<int>(indices.size()); ++i) {
+				b = vector(vertices[indices[i]]); c = vector(vertices[indices[i + 1]]); n = (c - a).cross(b - a);
 				if (n.length_squared() > 1e-10) break;
 			}
 			if (n.length_squared() <= 1e-10) return failure("INVALID_GEOMETRY", "Vertex edit collapses a face", operation);
 			n.normalize();
-			for (int index : indices) if (std::abs(n.dot(vertices[index] - a)) > 1e-5) return failure("INVALID_GEOMETRY", "Vertex edit makes a nonplanar face", operation);
+			for (int index : indices) if (std::abs(n.dot(vector(vertices[index]) - a)) > 1e-5) return failure("INVALID_GEOMETRY", "Vertex edit makes a nonplanar face", operation);
 			target.faces[f].plane.plane_points = {native(a), native(b), native(c)};
 		}
 	}
@@ -367,9 +367,9 @@ Dictionary TBMapDocument::move_components(const Array &components, Vector3 delta
 		const auto &vertices = found->second;
 		std::set<int> matched; const auto &geo = candidate->entity_geo[e].brushes[b];
 		for (int f = 0; f < geo.face_count; ++f) for (int v = 0; v < geo.faces[f].vertex_count; ++v) {
-			Vector3 p = vector(geo.faces[f].vertices[v].vertex); int index = 0;
-			for (; index < vertices.size(); ++index) if (p.distance_squared_to(vertices[index]) < 1e-8) break;
-			if (index == vertices.size()) return failure("INVALID_GEOMETRY", "Vertex edit changes the convex hull unexpectedly", operation);
+			const vec3 p = geo.faces[f].vertices[v].vertex; int index = 0;
+			for (; index < static_cast<int>(vertices.size()); ++index) { const vec3 d = vec3_sub(p, vertices[index]); if (vec3_dot(d, d) < 1e-8) break; }
+			if (index == static_cast<int>(vertices.size())) return failure("INVALID_GEOMETRY", "Vertex edit changes the convex hull unexpectedly", operation);
 			matched.insert(index);
 		}
 		if (matched.size() != size_t(vertices.size())) return failure("INVALID_GEOMETRY", "Vertex edit removes a hull vertex", operation);
@@ -382,16 +382,16 @@ Dictionary TBMapDocument::clip_brushes(const PackedInt64Array &ids, Vector3 p0, 
 	Vector3 normal = (p2 - p0).cross(p1 - p0);
 	if (!valid(p0) || !valid(p1) || !valid(p2) || !normal.is_finite() || normal.length_squared() < 1e-10) return failure("INVALID_ARGUMENT", "Clip points must define a finite nondegenerate plane", "clip_brushes");
 	normal.normalize();
-	LMMapEdit edit(*map); Array draw = get_draw_data(); PackedInt64Array out; int64_t fresh = next_id;
+	LMMapEdit edit(*map); PackedInt64Array out; int64_t fresh = next_id;
 	for (int64_t id : unique(ids)) {
-		PackedVector3Array vertices;
-		for (int i = 0; i < draw.size(); ++i) { Dictionary b = draw[i]; if (int64_t(b["id"]) == id) { vertices = b["vertices"]; break; } }
+		const auto *location = live_location(id, 'b');
+		const auto topology = lm_extract_brush_topology(map->entities[location->entity].brushes[location->index], map->entity_geo[location->entity].brushes[location->index]);
 		bool front = false, back = false;
-		for (Vector3 v : vertices) { double d = normal.dot(v - p0); if (d > 1e-5) front = true; if (d < -1e-5) back = true; }
+		for (const vec3 point : topology.vertices) { double d = normal.dot(vector(point) - p0); if (d > 1e-5) front = true; if (d < -1e-5) back = true; }
 		if (!front || (split && !back)) { out.push_back(id); continue; }
 		std::vector<LMEditPrimitive> pieces;
 		if (back) {
-			auto source = *edit.brush(id);
+			auto source = *edit_brush(edit, id);
 			if (source.faces.size() >= 64) return failure("LIMIT_EXCEEDED", "Clip candidate exceeds 64 supporting planes", "clip_brushes");
 			for (int side = 0; side < (split ? 2 : 1); ++side) {
 				auto piece = source; LMEditFace cut{};

@@ -93,14 +93,35 @@ func run() -> void:
 	checks.check(plugin.materials_panel.is_inside_tree(), "legacy materials panel retained")
 	checks.check(plugin.materials_grid is ItemList and plugin.materials_grid.icon_mode == ItemList.ICON_MODE_TOP and plugin.materials_grid.visible, "materials panel defaults to rendered grid")
 	checks.check(plugin.map_control.get_child(0).text == "Build Meshes", "legacy build toolbar retained")
-	var map_toolbar: Control = ui.get_child(0)
+	var map_toolbar: Control
+	for child in ui.get_children():
+		if child is HFlowContainer:
+			map_toolbar = child
+			break
 	var toolbar_labels: Array[String] = []
 	for child in map_toolbar.get_children():
 		if child is Button:
 			toolbar_labels.append(child.text)
 	checks.check(["Select", "Brush", "Cut", "Rotate", "Face", "Edge", "Vertex", "Texture"].all(func(mode): return toolbar_labels.count(mode) == 1 and ui.tool_buttons[mode].get_parent() == map_toolbar), "map toolbar exposes each established editing mode once")
 	checks.check(["New", "Open…", "Save", "Save As…"].all(func(command): return not toolbar_labels.has(command)), "map toolbar omits redundant document controls")
+	checks.check(not ui.rebuild_on_save.button_pressed, "Bake on save defaults off")
 	checks.check((ui.status.text.begins_with("UNSAVED •") or ui.status.text.begins_with("saved •")) and ui.status.text.contains("baked") and ui.status.text.contains("grid") and ui.status.text.contains("selected") and ui.status.text.contains("hidden"), "bottom status omits map title and retains editing state")
+	var active_session = ui.session
+	var background = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	checks.check(background.document.save_map("user://background-refresh.map").ok, "background refresh fixture starts clean")
+	ui.set_session(background)
+	ui.set_session(active_session)
+	ui.camera_view.rendered_key = "background-refresh-sentinel"
+	background.document.create_cuboid(Vector3.ZERO, Vector3.ONE * 8, "background/material")
+	background.changed.emit()
+	var background_label_found := false
+	for index in ui.session_picker.item_count:
+		background_label_found = background_label_found or ui.session_picker.get_item_text(index) == "background-refresh.map *"
+	checks.check(ui.camera_view.rendered_key == "background-refresh-sentinel", "background session change skips active graphs and camera refresh")
+	checks.check(background_label_found, "background session change still refreshes picker dirty status")
+	background.save_enabled = false
+	ui.camera_view.rendered_key = ""
+	ui.refresh()
 	camera_marker_regression()
 	if suite == "toolbar":
 		var graph = ui.graph_a
@@ -175,6 +196,13 @@ func run() -> void:
 	checks.check(manager.get_object_history_id(ui.session) == EditorUndoRedoManager.GLOBAL_HISTORY, "map session uses real global editor history")
 	checks.check(ui.camera_view.triangle_count == 12, "camera generated from native preview")
 	var preview_nodes: Array[Node] = ui.camera_view.map_geometry.get_children()
+	var caulk_preview: BaseMaterial3D = preview_nodes[0].material_override
+	checks.check(caulk_preview.transparency == BaseMaterial3D.TRANSPARENCY_ALPHA and caulk_preview.depth_draw_mode == BaseMaterial3D.DEPTH_DRAW_ALWAYS and is_equal_approx(caulk_preview.albedo_color.a, 0.26), "camera caulk preview uses depth-writing alpha transparency")
+	checks.check(ui.preview_material("common/caulk", "caulk") == caulk_preview and ui.preview_material("common/caulk") != caulk_preview, "camera reuses category material cache without changing opaque variant")
+	var shader_instance := MeshInstance3D.new()
+	ui.camera_view.apply_preview_material(shader_instance, ShaderMaterial.new(), "entity")
+	checks.check(is_equal_approx(shader_instance.transparency, 0.52), "camera applies entity transparency to custom shader materials")
+	shader_instance.free()
 	ui.camera_view.camera.position.x += 1
 	ui.camera_view._process(0)
 	checks.check(ui.camera_view.map_geometry.get_children() == preview_nodes, "camera marker update does not rebuild preview geometry")
@@ -312,7 +340,7 @@ func run() -> void:
 	ui.assign_texture()
 	brush = ui.session.brush(id)
 	checks.check(brush.faces.all(func(face): return face.texture == "baseline/checker"), "UI assigns every brush face")
-	checks.check(ui.session.document.get_preview_data()[0].texture_size == Vector2i(64, 32), "preview uses actual asymmetric texture dimensions")
+	checks.check(ui.texture_sizes.get("baseline/checker") == Vector2i(64, 32), "production preview resolver uses actual asymmetric texture dimensions")
 	ui.uv_fields[0].value = 7
 	ui.uv_fields[1].value = -3
 	ui.uv_fields[2].value = 30
@@ -459,11 +487,15 @@ func run() -> void:
 	plugin._edit(null)
 	loader.free()
 	await binding_journey(plugin)
+	ui.set_scene_active(false)
 	precision_journey()
 	visibility_filter_journey()
+	await grid_draw_batch_regression()
+	step5_native_editor_journey()
 	await phase5_journey()
 	await review_regressions(plugin)
 	await tohunga_editor_journey()
+	ui.set_scene_active(true)
 	await automatic_scene_journey(plugin)
 	if suite == "ui":
 		print("TB_UI_STAGE: capturing rendered quad")
@@ -619,6 +651,7 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	EditorInterface.save_scene_as("res://journey-scene.tscn", false)
 	checks.check(not ui.session.document.is_dirty() and mesh_signature(loader) == old_signature, "external save writes map but defers bake beyond enclosing scene save")
 	var saving_origin = ui.session
+	ui.discover_scene_loaders()
 	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
 	ui.session.save_enabled = false
 	for frame in 3:
@@ -644,12 +677,15 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	await get_tree().process_frame
 	await get_tree().process_frame
 	ui._process(0)
-	checks.check(not ui.valid_binding() and ui.session == kept_session and text() == kept_text, "deleted loader detaches and preserves map")
-	checks.check(not ui.bake() and other.has_node("PreviousOutput"), "deleted binding never rebuilds selected other loader")
+	checks.check(ui.session != kept_session and ui.session.loader.get_ref() == other and ui.valid_binding(), "deleted loader removes its tab and selects the remaining mapped loader")
+	checks.check(ui.scene_tabs.tab_count == 1 and not ui.scene_tabs.visible, "single remaining loader opens directly without a switcher")
 	plugin._edit(other)
 	plugin.build_meshes()
 	checks.check(not other.find_children("*", "MeshInstance3D", true, false).is_empty(), "legacy Build Meshes uses explicitly selected loader")
-	checks.check(scene_history.undo() and other.has_node("PreviousOutput"), "legacy Build Meshes also uses scene undo history")
+	checks.check(scene_history.undo(), "legacy Build Meshes also uses scene undo history")
+	checks.check(ui.open_path("res://journey-bound.map"), "standalone scene-switch fixture opens")
+	ui.detach()
+	var retained_standalone = ui.session
 	var second = Node3D.new()
 	second.name = "OtherScene"
 	packed = PackedScene.new()
@@ -659,33 +695,75 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	EditorInterface.open_scene_from_path("res://other-scene.tscn")
 	for frame in 5:
 		await get_tree().process_frame
-	checks.check(ui.session == kept_session and text() == kept_text and not ui.valid_binding(), "scene switch preserves document and detaches")
+	checks.check(ui.scene_tabs.tab_count == 0 and not ui.scene_tabs.visible and ui.session == retained_standalone, "scene switch removes stale loader tabs and preserves the intentional standalone session")
 	EditorInterface.set_main_screen_editor("Map")
 	ui.graph_a.grab_focus()
 
 func automatic_scene_journey(plugin: EditorPlugin) -> void:
+	print("TB_UI_STAGE: automatic scene-loader sessions")
 	var automatic = Node3D.new()
 	automatic.name = "AutomaticMapJourney"
+	var branch = Node3D.new()
+	branch.name = "Maps"
+	automatic.add_child(branch)
+	branch.owner = automatic
 	var automatic_loader = ClassDB.instantiate("TBLoader")
 	automatic_loader.name = "OnlyLoader"
 	automatic_loader.map_resource = "res://journey-copy.map"
 	automatic_loader.texture_path = "res://textures-other"
-	automatic.add_child(automatic_loader)
+	branch.add_child(automatic_loader)
 	automatic_loader.owner = automatic
+	var empty_loader = ClassDB.instantiate("TBLoader")
+	empty_loader.name = "EmptyLoader"
+	branch.add_child(empty_loader)
+	empty_loader.owner = automatic
 	var automatic_scene = PackedScene.new()
 	checks.check(automatic_scene.pack(automatic) == OK and ResourceSaver.save(automatic_scene, "res://automatic-scene.tscn") == OK, "single-loader scene persisted")
 	automatic.free()
+	var standalone = ui.session
+	checks.check(not standalone.scene_managed, "zero-loader scene keeps an intentional standalone session")
 	EditorInterface.open_scene_from_path("res://automatic-scene.tscn")
-	for frame in 5:
+	for frame in 8:
 		await get_tree().process_frame
-	var previous_session = ui.session
-	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
-	plugin._make_visible(true)
 	var automatic_root = EditorInterface.get_edited_scene_root()
+	var nested = automatic_root.get_node("Maps/OnlyLoader")
+	var empty = automatic_root.get_node("Maps/EmptyLoader")
 	checks.check(ui.same_path(ui.session.document.get_path(), "res://journey-copy.map"), "Map tab opens the only TBLoader map in the current scene")
-	checks.check(ui.session.loader.get_ref() == automatic_root.get_node("OnlyLoader") and ui.valid_binding(), "automatic scene map binds its discovered TBLoader")
+	checks.check(ui.session.loader.get_ref() == nested and ui.valid_binding(), "automatic discovery includes nested TBLoader nodes")
 	checks.check(ui.browser._texture_root == "res://textures-other", "automatic scene map parses textures from its TBLoader Texture Path")
-	ui.set_session(previous_session)
+	checks.check(ui.scene_tabs.tab_count == 1 and not ui.scene_tabs.visible and not ui.scene_sessions.has(empty.get_instance_id()), "empty map resources are ignored and one mapped loader opens directly")
+	var first_session = ui.session
+	empty.map_resource = "res://journey-bound.map"
+	for frame in 3:
+		await get_tree().process_frame
+	checks.check(ui.scene_tabs.visible and ui.scene_tabs.tab_count == 2, "map property signal exposes a switcher when a second loader becomes mapped")
+	checks.check(ui.scene_tabs.get_tab_title(0) == "Maps/OnlyLoader" and ui.scene_tabs.get_tab_title(1) == "Maps/EmptyLoader", "loader tabs use unambiguous scene-relative node paths")
+	ui.session.grid = 8
+	ui.scene_tab_changed(1)
+	var second_session = ui.session
+	checks.check(second_session != first_session and second_session.loader.get_ref() == empty and ui.same_path(second_session.document.get_path(), empty.map_resource), "second loader owns a separate bound map session")
+	ui.session.grid = 32
+	ui.scene_tab_changed(0)
+	checks.check(ui.session == first_session and ui.session.grid == 8 and second_session.grid == 32, "tab switching preserves independent loader editing state")
+	ui.scene_tab_changed(1)
+	ui.queue_scene_discovery()
+	await get_tree().process_frame
+	checks.check(ui.session == second_session and ui.scene_tabs.current_tab == 1, "rediscovery preserves the selected loader tab")
+	checks.check(ui.scene_sessions.size() == 2 and ui.scene_sessions.values().count(first_session) == 1 and ui.scene_sessions.values().count(second_session) == 1, "rediscovery creates no duplicate loader sessions")
+	var replaced_session = ui.session
+	empty.map_resource = "res://journey-copy.map"
+	for frame in 3:
+		await get_tree().process_frame
+	checks.check(ui.session != replaced_session and ui.session.loader.get_ref() == empty and ui.same_path(ui.session.document.get_path(), empty.map_resource), "mapped loader path changes reopen only that loader session")
+	checks.check(ui.scene_tabs.current_tab == 1 and not ui.scene_sessions.values().has(replaced_session), "loader path replacement preserves the selected tab without duplicate scene sessions")
+	automatic_root.get_node("Maps").name = "RenamedMaps"
+	for frame in 3:
+		await get_tree().process_frame
+	checks.check(ui.scene_tabs.get_tab_title(0) == "RenamedMaps/OnlyLoader" and ui.scene_tabs.get_tab_title(1) == "RenamedMaps/EmptyLoader", "scene ancestor renames refresh node-identifying loader labels")
+	EditorInterface.open_scene_from_path("res://other-scene.tscn")
+	for frame in 6:
+		await get_tree().process_frame
+	checks.check(ui.scene_tabs.tab_count == 0 and ui.session == standalone, "switching to a zero-loader scene removes stale tabs and restores the intentional standalone session")
 
 func tohunga_editor_journey() -> void:
 	print("TB_UI_STAGE: local Tohunga editor regression")
@@ -705,6 +783,7 @@ func tohunga_editor_journey() -> void:
 		ui.clone_selection(0)
 		checks.check(ui.session.document.get_draw_data().size() == brushes.size() + 1 and text() != canonical, "editor transaction edits Tohunga with native snapshots")
 		var edited_preview_nodes: Array[Node] = ui.camera_view.map_geometry.get_children()
+		print("TB_TOHUNGA_CHUNKS:%d:%d:%d" % [preview_nodes.size(), edited_preview_nodes.size(), preview_nodes.filter(func(node): return edited_preview_nodes.has(node)).size()])
 		checks.check(preview_nodes.any(func(node): return edited_preview_nodes.has(node)), "localized Tohunga edit retains unaffected camera preview chunks")
 		checks.check(history.undo() and text() == canonical, "editor undo restores exact Tohunga document")
 	ui.set_session(previous_session)
@@ -887,7 +966,7 @@ func resolver_regression(plugin: EditorPlugin) -> void:
 		var preview: Material = ui.preview_material("baseline/checker")
 		var size_value = Vector2i(64, 32) if index == 0 else Vector2i(16, 128)
 		checks.check(ui.texture_root.text == loader.texture_path and ui.browser._texture_root == loader.texture_path, "session switch synchronizes root field and browser %d" % index)
-		checks.check(ui.session.document.get_preview_data()[0].texture_size == size_value and preview.albedo_texture == native.texture, "A-B-A preview uses exact native texture and dimensions %d" % index)
+		checks.check(ui.texture_sizes.get("baseline/checker") == size_value and preview.albedo_texture == native.texture, "A-B-A production preview uses exact native texture and dimensions %d" % index)
 		var image = preview.albedo_texture.get_image()
 		if image.is_compressed():
 			image.decompress()
@@ -1114,6 +1193,139 @@ func visibility_filter_journey() -> void:
 	scratch.save_enabled = false
 	ui.set_session(original)
 	checks.check(ui.visibility_buttons.values().all(func(control): return not control.button_pressed), "visibility controls follow the active document session")
+	ui.graph_a.grab_focus()
+
+func step5_native_editor_journey() -> void:
+	print("TB_UI_STAGE: native spatial and preview editor integration")
+	var original = ui.session
+	var scratch = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	ui.set_session(scratch)
+	var graph = ui.graph_a
+	graph.orientation = 2
+	graph.origin = Vector3(150, 0, 0)
+	graph.zoom = 1
+	graph.grab_focus()
+	var doc = scratch.document
+	var first: int = doc.create_cuboid(Vector3.ZERO, Vector3.ONE * 64, "baseline/checker").value
+	var second: int = doc.create_cuboid(Vector3.ZERO, Vector3.ONE * 64, "baseline/checker").value
+	var contained: int = doc.create_cuboid(Vector3(200, 0, 0), Vector3(240, 40, 40), "baseline/checker").value
+	doc.create_cuboid(Vector3(230, 0, 0), Vector3(300, 40, 40), "baseline/checker")
+	scratch.changed.emit()
+	var overlap_position: Vector2 = graph.project(Vector3(32, 32, 0))
+	checks.check(graph.hit_brush(overlap_position) == second, "native 2D candidates retain reverse-source overlap pick order")
+	scratch.select(PackedInt64Array([first]))
+	ui.set_tool("Brush")
+	mouse(graph, overlap_position, true)
+	checks.check(graph.gesture == "move" and scratch.selected == PackedInt64Array([first]), "selected overlapping brush retains direct-manipulation priority")
+	graph.cancel()
+	scratch.hidden[second] = true
+	checks.check(graph.hit_brush(overlap_position) == first, "hidden broad-phase hit passes through to the next visible brush")
+	scratch.hidden.clear()
+	doc.group_brushes(PackedInt64Array([second]), "func_group")
+	scratch.set_visibility_filter("entities", true)
+	checks.check(graph.hit_brush(overlap_position) == first, "entity-filtered broad-phase hit passes through to the next visible brush")
+	scratch.set_visibility_filter("entities", false)
+	scratch.select(PackedInt64Array())
+	graph.start = graph.project(Vector3(190, -10, 0))
+	graph.box_select(graph.project(Vector3(270, 70, 0)))
+	checks.check(scratch.selected == PackedInt64Array([contained]), "native box broad phase retains exact all-vertices containment")
+
+	var ray_front: int = doc.create_cuboid(Vector3(400, -16, -16), Vector3(420, 16, 16), "common/caulk").value
+	var ray_back: int = doc.create_cuboid(Vector3(440, -16, -16), Vector3(460, 16, 16), "baseline/checker").value
+	var ray_origin := Vector3(350, 0, 0)
+	scratch.hidden[ray_front] = true
+	var hits: Array = scratch.visible_ray_hits(ray_origin, Vector3.RIGHT)
+	checks.check(not hits.is_empty() and hits[0].brush_id == ray_back, "ordered native ray passes through a hidden front brush")
+	scratch.hidden.clear()
+	scratch.set_visibility_filter("caulk", true)
+	hits = scratch.visible_ray_hits(ray_origin, Vector3.RIGHT)
+	checks.check(not hits.is_empty() and hits[0].brush_id == ray_back, "ordered native ray passes through a filtered front face")
+	scratch.set_visibility_filter("caulk", false)
+
+	var marker_session = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	ui.set_session(marker_session)
+	var marker_doc = marker_session.document
+	var marker: int = marker_doc.create_point_entity("info_player_start", Vector3(350, 0, 0)).value
+	var target: int = marker_doc.create_cuboid(Vector3(400, -16, -16), Vector3(420, 16, 16), "baseline/checker").value
+	var loader = ClassDB.instantiate("TBLoader")
+	loader.map_inverse_scale = 10.0
+	marker_session.loader = weakref(loader)
+	marker_session.changed.emit()
+	ui.camera_view.camera.position = ui.camera_view.transform_map(Vector3(300, 0, 0))
+	ui.camera_view.camera.look_at(ui.camera_view.transform_map(Vector3(450, 0, 0)))
+	ui.camera_view.sync_camera_marker(true)
+	checks.check(ui.camera_view.preview_to_map(ui.camera_view.camera.position).is_equal_approx(Vector3(300, 0, 0)), "camera ray origin converts through non-default map scale")
+	var pick_position: Vector2 = ui.camera_view.camera.unproject_position(ui.camera_view.transform_map(Vector3(350, 0, 0)))
+	ui.camera_view.pick(pick_position, false)
+	checks.check(marker_session.points == PackedInt64Array([marker]) and marker_session.selected.is_empty(), "nearer marker has priority over an ordered native brush hit")
+	marker_session.set_visibility_filter("entities", true)
+	ui.camera_view.pick(pick_position, false)
+	checks.check(marker_session.selected.has(target) and marker_session.points.is_empty(), "filtered marker passes through to native map-space ray hit")
+	marker_session.set_visibility_filter("entities", false)
+	ui.camera_view.rendered_key = ""
+	ui.camera_view.refresh()
+	var instances: Array = ui.camera_view.geometry_chunks.values().map(func(chunk): return chunk.instance)
+	ui.camera_view.rendered_key = ""
+	ui.camera_view.refresh()
+	checks.check(not instances.is_empty() and ui.camera_view.geometry_chunks.values().all(func(chunk): return instances.has(chunk.instance)), "unchanged preview manifest reuses MeshInstances")
+	checks.check(ui.camera_view.geometry_chunks.values().all(func(chunk): return not chunk.has("vertices") and not chunk.has("normals") and not chunk.has("uvs")), "integrated preview chunks retain no packed geometry arrays in GDScript")
+	var replacement_material = StandardMaterial3D.new()
+	replacement_material.albedo_color = Color("e34f4f")
+	ui.material_cache["baseline/checker"] = replacement_material
+	ui.material_generation += 1
+	ui.camera_view.refresh()
+	checks.check(ui.camera_view.geometry_chunks.values().all(func(chunk): return instances.has(chunk.instance)), "material-only camera refresh preserves MeshInstance identity")
+	checks.check(ui.camera_view.geometry_chunks.values().all(func(chunk): return chunk.instance.material_override == replacement_material), "material-only camera refresh changes material overrides")
+	scratch.save_enabled = false
+	marker_session.save_enabled = false
+	ui.set_session(original)
+	loader.free()
+	ui.graph_a.grab_focus()
+
+func grid_draw_batch_regression() -> void:
+	var original = ui.session
+	var scratch = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	ui.set_session(scratch)
+	var graph = ui.graph_a
+	graph.orientation = 2
+	graph.origin = Vector3.ZERO
+	graph.zoom = 1
+	var selected: int = scratch.document.create_cuboid(Vector3(-48, -32, -16), Vector3(-16, 32, 16), "selected/material").value
+	scratch.document.create_cuboid(Vector3(16, -32, -16), Vector3(48, 32, 16), "unselected/material")
+	scratch.changed.emit()
+	scratch.select(PackedInt64Array([selected]))
+	graph.rebuild_dense_edge_cache()
+	checks.check(graph.dense_selected_edges.size() == 24 and graph.dense_unselected_edges.size() == 24, "dense grid cache separates selected and unselected cube edges")
+	var dense_key: String = graph.dense_edge_cache_key
+	graph.origin = Vector3(100, 200, 0)
+	graph.zoom = 0.25
+	checks.check(graph.current_dense_edge_key() == dense_key, "dense grid cache survives pan and zoom changes")
+	scratch.hidden[selected] = true
+	checks.check(graph.current_dense_edge_key() != dense_key, "dense grid cache invalidates when hidden brushes change")
+	scratch.hidden.clear()
+	graph.origin = Vector3.ZERO
+	graph.zoom = 1
+	graph.gesture = ""
+	graph.queue_redraw()
+	await get_tree().process_frame
+	RenderingServer.force_draw()
+	checks.check(graph.gesture == "" and scratch.selected == PackedInt64Array([selected]), "selected and unselected static grid edges redraw together")
+	graph.gesture = "move"
+	graph.delta = Vector3(16, 0, 0)
+	graph.queue_redraw()
+	await get_tree().process_frame
+	RenderingServer.force_draw()
+	checks.check(graph.gesture == "move" and graph.delta == Vector3(16, 0, 0), "move preview redraws with batched ordinary edges")
+	graph.gesture = "rotate"
+	graph.rotation_pivot = graph.selection_center()
+	graph.rotation_angle = deg_to_rad(45)
+	graph.queue_redraw()
+	await get_tree().process_frame
+	RenderingServer.force_draw()
+	checks.check(graph.gesture == "rotate" and is_equal_approx(graph.rotation_angle, deg_to_rad(45)), "rotate preview redraws with batched ordinary edges")
+	graph.cancel()
+	scratch.save_enabled = false
+	ui.set_session(original)
 	ui.graph_a.grab_focus()
 
 func click_component(graph: Control, position: Vector3, toggle = false) -> void:

@@ -56,6 +56,7 @@ void TBLoader::_bind_methods()
 	ClassDB::bind_method(D_METHOD("build_meshes"), &TBLoader::build_meshes);
 	ClassDB::bind_method(D_METHOD("build_meshes_checked"), &TBLoader::build_meshes_checked);
 	ClassDB::bind_method(D_METHOD("resolve_material", "token"), &TBLoader::resolve_material);
+	ADD_SIGNAL(MethodInfo("map_resource_changed", PropertyInfo(Variant::STRING, "path")));
 
 	ADD_GROUP("Map", "map_");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "map_resource", PROPERTY_HINT_FILE, "*.map"), "set_map", "get_map");
@@ -97,7 +98,9 @@ TBLoader::~TBLoader()
 
 void TBLoader::set_map(const String& map)
 {
+	if (m_map_path == map) return;
 	m_map_path = map;
+	emit_signal("map_resource_changed", m_map_path);
 }
 
 String TBLoader::get_map() const

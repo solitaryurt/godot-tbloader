@@ -82,6 +82,11 @@ On Linux, debug/editor and release-export libraries now use separate filenames.
 Build `scons platform=linux target=template_debug arch=x86_64 -j2` for editor use;
 also build `target=template_release` and package both libraries for release exports.
 
+When updating a development project, use `python install_addon.py /path/to/project`.
+The installer atomically replaces each file. Do not use `cp` to overwrite a loaded
+GDExtension library in place: its relocated executable and vtable pages may be
+replaced underneath the running editor and cause a delayed crash.
+
 On Mac, the process is the same, but you will have to codesign and notarize your resulting binary as
 well if you want it to run on consumer hardware. To do this, you need to already have the notary
 tool configured on your machine (you need a keychain profile), and then run:

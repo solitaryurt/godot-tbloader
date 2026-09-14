@@ -11,6 +11,7 @@
 #include <godot_cpp/variant/packed_int32_array.hpp>
 #include <memory>
 #include <unordered_map>
+#include <vector>
 
 namespace godot {
 
@@ -40,7 +41,25 @@ class TBMapDocument : public RefCounted {
 	bool has_baseline = false;
 	int64_t epoch = 0, revision = 0, next_id = 1, topology = 0;
 	std::unordered_map<int64_t, char> issued_ids;
+	struct LiveLocation {
+		char kind;
+		int entity;
+		int index;
+		int primitive;
+	};
+	std::unordered_map<int64_t, LiveLocation> live_ids;
+	struct SpatialIndex;
+	mutable std::shared_ptr<SpatialIndex> spatial_index;
+	struct PreviewCache;
+	std::shared_ptr<PreviewCache> preview_cache;
 	Dictionary texture_sizes;
+	void rebuild_live_index();
+	void invalidate_spatial_index();
+	void invalidate_preview_cache();
+	const SpatialIndex &get_spatial_index() const;
+	const LiveLocation *live_location(int64_t id, char kind) const;
+	LMEditEntity *edit_entity(LMMapEdit &edit, int64_t id) const;
+	LMEditPrimitive *edit_brush(LMMapEdit &edit, int64_t id) const;
 	Dictionary finish_edit(const LMMapEdit &edit, const StringName &operation, const Variant &value = Variant());
 	Dictionary check_brushes(const PackedInt64Array &ids, const StringName &operation) const;
 	Dictionary check_face(int64_t id, int face, int64_t token, const StringName &operation) const;
@@ -82,6 +101,10 @@ public:
 	Array get_entities() const;
 	Array get_draw_data() const;
 	Array get_preview_data() const;
+	Dictionary prepare_preview_chunks(double scale, const PackedInt64Array &hidden_ids, int filter_mask, int chunk_triangles = 2048, double chunk_size = 64.0);
+	Dictionary get_preview_chunk(const String &chunk_id) const;
+	PackedInt64Array query_brushes_2d(int hidden_axis, Vector3 mins, Vector3 maxs) const;
+	Array query_ray(Vector3 origin, Vector3 direction, double max_distance = 1e30) const;
 	Dictionary create_cuboid(Vector3 mins, Vector3 maxs, const String &texture);
 	Dictionary duplicate_brushes(const PackedInt64Array &ids);
 	Dictionary delete_brushes(const PackedInt64Array &ids);

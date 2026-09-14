@@ -1,0 +1,31 @@
+{
+"classname" "worldspawn"
+{
+( 16 0 0 ) ( 16 16 16 ) ( 16 16 0 ) baseline/checker 0 0 0 1 1
+( 0 0 16 ) ( 0 16 0 ) ( 0 16 16 ) baseline/checker 0 0 0 1 1
+( 0 16 0 ) ( 16 16 16 ) ( 0 16 16 ) baseline/checker 0 0 0 1 1
+( 0 0 16 ) ( 16 0 0 ) ( 0 0 0 ) baseline/checker 0 0 0 1 1
+( 0 0 16 ) ( 16 16 16 ) ( 16 0 16 ) baseline/checker 0 0 0 1 1
+( 16 0 0 ) ( 0 16 0 ) ( 0 0 0 ) baseline/checker 0 0 0 1 1
+}
+{
+patchDef2
+{
+baseline/checker
+( 3 3 0 0 0 )
+(
+( ( 24 0 0 0 0 ) ( 24 8 4 0 0.5 ) ( 24 16 0 0 1 ) )
+( ( 32 0 0 0.5 0 ) ( 32 8 8 0.5 0.5 ) ( 32 16 0 0.5 1 ) )
+( ( 40 0 0 1 0 ) ( 40 8 4 1 0.5 ) ( 40 16 0 1 1 ) )
+)
+}
+}
+{
+( 64 0 0 ) ( 64 16 16 ) ( 64 16 0 ) baseline/checker 0 0 0 1 1
+( 48 0 16 ) ( 48 16 0 ) ( 48 16 16 ) baseline/checker 0 0 0 1 1
+( 48 16 0 ) ( 64 16 16 ) ( 48 16 16 ) baseline/checker 0 0 0 1 1
+( 48 0 16 ) ( 64 0 0 ) ( 48 0 0 ) baseline/checker 0 0 0 1 1
+( 48 0 16 ) ( 64 16 16 ) ( 64 0 16 ) baseline/checker 0 0 0 1 1
+( 64 0 0 ) ( 48 16 0 ) ( 48 0 0 ) baseline/checker 0 0 0 1 1
+}
+}

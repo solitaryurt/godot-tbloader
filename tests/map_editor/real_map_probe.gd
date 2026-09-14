@@ -50,6 +50,7 @@ func _initialize() -> void:
 	var draw_measure := measured(func(): return document.get_draw_data())
 	timings.draw = draw_measure.us
 	var preview_measure := measured(func(): return document.get_preview_data())
+	# Explicit compatibility API measurement; production camera uses native chunks.
 	timings.preview = preview_measure.us
 	var undo_measure := measured(func(): return document.restore_history_state(history_before))
 	timings.undo = undo_measure.us

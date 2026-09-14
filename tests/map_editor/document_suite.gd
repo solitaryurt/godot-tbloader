@@ -11,6 +11,9 @@ func run() -> void:
 		checks.finish(self, "document")
 		return
 	test_document()
+	test_native_lookup_and_draw_schema()
+	test_spatial_queries()
+	test_preview_chunks()
 	test_tohunga_fixture()
 	test_operations()
 	test_rotation()
@@ -24,8 +27,12 @@ func run() -> void:
 	var checker = load("res://textures/baseline/checker.png") as Texture2D
 	checks.check(checker != null and checker.get_size() == Vector2(64, 32), "asymmetric checker imported")
 	root.add_child(loader)
+	var map_changes: Array[String] = []
+	loader.map_resource_changed.connect(func(path: String): map_changes.append(path))
 	loader.map_resource = "res://fixtures/classic_cube.map"
 	checks.check(loader.get_map() == loader.map_resource, "map property round trip")
+	loader.map_resource = loader.map_resource
+	checks.check(map_changes == ["res://fixtures/classic_cube.map"], "map property emits one precise change signal")
 	loader.build_meshes()
 	await process_frame
 	var meshes = loader.find_children("*", "MeshInstance3D", true, false)
@@ -97,6 +104,217 @@ func run() -> void:
 
 func state(doc) -> Dictionary:
 	return {"snapshot": doc.snapshot().value, "path": doc.get_path(), "dirty": doc.is_dirty(), "revision": doc.get_revision(), "epoch": doc.get_epoch(), "entities": doc.get_entities()}
+
+func test_native_lookup_and_draw_schema() -> void:
+	var doc = ClassDB.instantiate("TBMapDocument")
+	if not expect_ok(doc.load_map("res://fixtures/interleaved.map"), "load interleaved native-index fixture"):
+		return
+	var entity: Dictionary = doc.get_entities()[0]
+	checks.check(entity.primitives.map(func(p): return p.kind) == [StringName("brush"), StringName("patch"), StringName("brush")], "source order interleaves brush and patch indices")
+	var first: int = entity.primitives[0].id
+	var patch: int = entity.primitives[1].id
+	var second: int = entity.primitives[2].id
+	var draw: Array = doc.get_draw_data()
+	checks.check(draw.map(func(b): return b.id) == [first, second], "draw order follows native brush order across interleaved primitives")
+	for brush in draw:
+		checks.check(brush.size() == 9 and brush.has_all(["id", "entity_id", "topology_revision", "aabb_min", "aabb_max", "vertices", "edges", "edge_vertex_indices", "faces"]), "draw brush schema parity")
+		checks.check(brush.faces.all(func(face): return face.size() == 6 and face.has_all(["index", "winding", "vertex_indices", "center", "normal", "texture"])), "draw face schema parity")
+		var ordered_edges := PackedInt32Array()
+		for face in brush.faces:
+			for i in face.vertex_indices.size():
+				var a: int = face.vertex_indices[i]
+				var b: int = face.vertex_indices[(i + 1) % face.vertex_indices.size()]
+				if a > b:
+					var swap := a; a = b; b = swap
+				var found := false
+				for edge in range(0, ordered_edges.size(), 2):
+					if ordered_edges[edge] == a and ordered_edges[edge + 1] == b: found = true
+				if not found: ordered_edges.append_array(PackedInt32Array([a, b]))
+		checks.check(brush.edge_vertex_indices == ordered_edges, "draw edge order remains first face-winding occurrence")
+	var before := state(doc)
+	expect_failure(doc, doc.make_prism(entity.id, 6, 2), before, "INVALID_ID", "make_prism")
+	expect_failure(doc, doc.make_prism(patch, 6, 2), before, "INVALID_ID", "make_prism")
+	var saved: Dictionary = doc.snapshot().value
+	var history = doc.capture_history_state()
+	expect_ok(doc.rebuild(), "rebuild interleaved lookup index")
+	var rebuilt_second: Dictionary = brush_data(doc, second)
+	expect_ok(doc.get_face_uv(second, 0, rebuilt_second.topology_revision), "face lookup after rebuild")
+	expect_ok(doc.make_prism(second, 5, 2), "edit second brush by primitive/native split index")
+	expect_ok(doc.restore_snapshot(saved), "restore interleaved snapshot lookup index")
+	var restored_first: Dictionary = brush_data(doc, first)
+	expect_ok(doc.translate_face(first, 0, Vector3(-1, 0, 0), restored_first.topology_revision), "brush lookup after snapshot restore")
+	expect_ok(doc.restore_history_state(history), "restore interleaved native history lookup index")
+	var history_second: Dictionary = brush_data(doc, second)
+	expect_ok(doc.get_face_uv(second, 0, history_second.topology_revision), "face lookup after native history restore")
+
+func test_spatial_queries() -> void:
+	var doc = ClassDB.instantiate("TBMapDocument")
+	var first: int = doc.create_cuboid(Vector3.ZERO, Vector3.ONE * 10, "first/texture").value
+	var second: int = doc.create_cuboid(Vector3.ONE * 20, Vector3.ONE * 30, "second/texture").value
+	var third: int = doc.create_cuboid(Vector3.ONE * 40, Vector3.ONE * 50, "third/texture").value
+	for hidden_axis in 3:
+		var mins := Vector3.ONE * 19
+		var maxs := Vector3.ONE * 31
+		mins[hidden_axis] = -1000000
+		maxs[hidden_axis] = 1000000
+		checks.check(doc.query_brushes_2d(hidden_axis, mins, maxs) == PackedInt64Array([second]), "2D BVH projection on hidden axis %d" % hidden_axis)
+		mins = Vector3.ONE * 10
+		maxs = Vector3.ONE * 20
+		checks.check(doc.query_brushes_2d(hidden_axis, mins, maxs) == PackedInt64Array([first, second]), "2D BVH includes touching boundaries on axis %d" % hidden_axis)
+	checks.check(doc.query_brushes_2d(2, Vector3(-100, -100, -100), Vector3(100, 100, 100)) == PackedInt64Array([first, second, third]), "2D broad phase returns source order")
+	checks.check(doc.query_brushes_2d(-1, Vector3.ZERO, Vector3.ONE).is_empty(), "2D query rejects negative hidden axis")
+	checks.check(doc.query_brushes_2d(3, Vector3.ZERO, Vector3.ONE).is_empty(), "2D query rejects out-of-range hidden axis")
+	checks.check(doc.query_brushes_2d(2, Vector3(2, 0, 0), Vector3(1, 1, 1)).is_empty(), "2D query rejects reversed visible bounds")
+	checks.check(doc.query_brushes_2d(2, Vector3(NAN, 0, 0), Vector3.ONE).is_empty(), "2D query rejects non-finite bounds")
+
+	var ray_doc = ClassDB.instantiate("TBMapDocument")
+	var ray_first: int = ray_doc.create_cuboid(Vector3.ZERO, Vector3(10, 10, 10), "first/texture").value
+	var ray_second: int = ray_doc.create_cuboid(Vector3(20, 0, 0), Vector3(30, 10, 10), "second/texture").value
+	var ray_third: int = ray_doc.create_cuboid(Vector3(40, 0, 0), Vector3(50, 10, 10), "third/texture").value
+	var rays: Array = ray_doc.query_ray(Vector3(-10, 5, 5), Vector3(2, 0, 0))
+	checks.check(rays.size() == 6, "ray deduplicates each quad's two triangles into one face hit")
+	if rays.size() == 6:
+		checks.check(rays.map(func(hit): return hit.brush_id) == [ray_first, ray_first, ray_second, ray_second, ray_third, ray_third], "ray hits are nearest-first with stable source ties")
+		checks.check(rays.map(func(hit): return hit.distance) == [10.0, 20.0, 30.0, 40.0, 50.0, 60.0], "ray direction is normalized and distances are map-space")
+		checks.check(rays[0].position == Vector3(0, 5, 5) and rays[0].normal == Vector3(-1, 0, 0), "ray reports exact map-space position and outward normal")
+		checks.check(rays[0].entity_id == ray_doc.get_entities()[0].id and rays[0].texture == "first/texture" and rays[0].face_index >= 0, "ray reports entity face and texture provenance")
+		var provenance := {}
+		for hit in rays:
+			provenance[Vector2i(hit.brush_id, hit.face_index)] = true
+		checks.check(provenance.size() == rays.size(), "ray emits no duplicate brush-face provenance")
+	checks.check(ray_doc.query_ray(Vector3(-10, 5, 5), Vector3.RIGHT, 10).size() == 1, "ray max distance includes its boundary")
+	checks.check(ray_doc.query_ray(Vector3(-10, 5, 5), Vector3.RIGHT, 9.999).is_empty(), "ray max distance excludes farther hits")
+	checks.check(ray_doc.query_ray(Vector3(-10, 5, 5), Vector3.ZERO).is_empty(), "ray rejects zero direction")
+	checks.check(ray_doc.query_ray(Vector3(INF, 0, 0), Vector3.RIGHT).is_empty(), "ray rejects non-finite origin")
+	checks.check(ray_doc.query_ray(Vector3.ZERO, Vector3(NAN, 0, 0)).is_empty(), "ray rejects non-finite direction")
+	checks.check(ray_doc.query_ray(Vector3.ZERO, Vector3.RIGHT, -1).is_empty(), "ray rejects negative max distance")
+	checks.check(ray_doc.query_ray(Vector3.ZERO, Vector3.RIGHT, INF).is_empty(), "ray rejects non-finite max distance")
+
+	# Warm the lazy index, then exercise every geometry-cache replacement path.
+	var original = doc.capture_history_state()
+	expect_ok(doc.translate_brushes(PackedInt64Array([first]), Vector3(100, 0, 0)), "spatial invalidation after edit")
+	checks.check(not doc.query_brushes_2d(2, Vector3.ZERO, Vector3.ONE * 10).has(first), "edited BVH does not retain stale bounds")
+	expect_ok(doc.delete_brushes(PackedInt64Array([second])), "spatial invalidation after delete")
+	checks.check(not doc.query_brushes_2d(2, Vector3.ONE * 20, Vector3.ONE * 30).has(second), "deleted BVH does not retain stale index")
+	expect_ok(doc.restore_history_state(original), "spatial invalidation after history restore")
+	checks.check(doc.query_brushes_2d(2, Vector3.ONE * 20, Vector3.ONE * 30).has(second), "history restore rebuilds spatial index lazily")
+	expect_ok(doc.rebuild(), "spatial invalidation after explicit rebuild")
+	checks.check(doc.query_ray(Vector3(-10, 5, 5), Vector3.RIGHT, 10).size() == 1, "ray remains valid after rebuild")
+	expect_ok(doc.set_texture_sizes({"first/texture": Vector2i(64, 32)}), "preview-only invalidation after texture-size regeneration")
+	checks.check(doc.query_brushes_2d(2, Vector3.ZERO, Vector3.ONE * 10) == PackedInt64Array([first]), "warm BVH remains valid after texture-size-only regeneration")
+	var warm: PackedInt64Array = doc.query_brushes_2d(2, Vector3.ZERO, Vector3.ONE * 10)
+	checks.check(not doc.translate_brushes(PackedInt64Array([first]), Vector3.ZERO).changed and doc.query_brushes_2d(2, Vector3.ZERO, Vector3.ONE * 10) == warm, "no-op action preserves warm spatial results")
+	checks.check(not doc.translate_brushes(PackedInt64Array([999999]), Vector3.ONE).ok and doc.query_brushes_2d(2, Vector3.ZERO, Vector3.ONE * 10) == warm, "failed action preserves warm spatial results")
+
+	var interleaved = ClassDB.instantiate("TBMapDocument")
+	expect_ok(interleaved.load_map("res://fixtures/interleaved.map"), "load spatial patch omission fixture")
+	var primitive_ids: Array = interleaved.get_entities()[0].primitives
+	checks.check(interleaved.query_brushes_2d(2, Vector3(-100, -100, 0), Vector3(100, 100, 0)) == PackedInt64Array([primitive_ids[0].id, primitive_ids[2].id]), "BVH omits patches and preserves interleaved source order")
+
+func test_preview_chunks() -> void:
+	var doc = ClassDB.instantiate("TBMapDocument")
+	if not expect_ok(doc.load_map("res://fixtures/classic_cube.map"), "load preview chunk transform fixture"):
+		return
+	var manifest: Dictionary = doc.prepare_preview_chunks(38.0, PackedInt64Array(), 0)
+	checks.check(manifest.schema == 1 and manifest.triangle_count == 12 and manifest.chunks.size() == 1, "preview manifest schema and cube counts")
+	var repeated: Dictionary = doc.prepare_preview_chunks(38.0, PackedInt64Array(), 0)
+	checks.check(repeated == manifest, "preview manifest IDs, ordering and hashes are deterministic")
+	var entry: Dictionary = manifest.chunks[0]
+	var chunk: Dictionary = doc.get_preview_chunk(entry.chunk_id)
+	checks.check(chunk.schema == 1 and chunk.texture == entry.texture and chunk.triangle_count == 12 and chunk.geometry_hash == entry.geometry_hash and chunk.geometry_version == 1, "materialized chunk matches manifest metadata")
+	checks.check(chunk.vertices.size() == 36 and chunk.normals.size() == 36 and chunk.uvs.size() == 36, "materialized chunk packs three corners per triangle")
+	var source: Dictionary = doc.get_preview_data()[0]
+	var packed_index := 0
+	for triangle in source.triangle_brush_ids.size():
+		for corner in 3:
+			var index: int = source.indices[triangle * 3 + corner]
+			var point: Vector3 = source.vertices[index]
+			var normal: Vector3 = source.normals[index]
+			checks.check(chunk.vertices[packed_index].is_equal_approx(Vector3(point.y, point.z, point.x) / 38.0), "preview chunk map-to-Godot vertex transform")
+			checks.check(chunk.normals[packed_index].is_equal_approx(Vector3(normal.y, normal.z, normal.x)), "preview chunk normal transform")
+			checks.check(chunk.uvs[packed_index].is_equal_approx(source.uvs[index]), "preview chunk preserves UV")
+			packed_index += 1
+
+	var brush_id: int = doc.get_draw_data()[0].id
+	checks.check(doc.prepare_preview_chunks(38.0, PackedInt64Array([brush_id]), 0).triangle_count == 0, "preview explicitly hides brush IDs")
+	var mixed = ClassDB.instantiate("TBMapDocument")
+	var mixed_id: int = mixed.create_cuboid(Vector3.ZERO, Vector3.ONE * 64, "visible/stone").value
+	var mixed_brush: Dictionary = brush_data(mixed, mixed_id)
+	expect_ok(mixed.set_face_texture(mixed_id, 0, "TOOLS/CAULK.TGA", mixed_brush.topology_revision), "set mixed caulk face")
+	mixed_brush = brush_data(mixed, mixed_id)
+	expect_ok(mixed.set_face_texture(mixed_id, 1, "common/player_clip", mixed_brush.topology_revision), "set mixed clip face")
+	var mixed_source: String = mixed.export_text().value
+	var mixed_manifest: Dictionary = mixed.prepare_preview_chunks(1.0, PackedInt64Array(), 0)
+	var mixed_categories: Dictionary = {}
+	for mixed_chunk in mixed_manifest.chunks:
+		mixed_categories[mixed_chunk.render_category] = mixed_categories.get(mixed_chunk.render_category, 0) + mixed_chunk.triangle_count
+	checks.check(mixed_categories == {"opaque": 8, "caulk": 2, "clip": 2}, "mixed-material preview classifies only matching faces as translucent")
+	checks.check(mixed.export_text().value == mixed_source, "preview transparency classification does not modify source map data")
+	checks.check(mixed.prepare_preview_chunks(1.0, PackedInt64Array(), 2).triangle_count == 10, "caulk basename filter removes only matching mixed-material face")
+	checks.check(mixed.prepare_preview_chunks(1.0, PackedInt64Array(), 4).triangle_count == 10, "clip suffix basename filter removes only matching mixed-material face")
+	checks.check(mixed.prepare_preview_chunks(1.0, PackedInt64Array(), 6).triangle_count == 8, "combined material filters retain visible mixed-material faces")
+
+	var owned = ClassDB.instantiate("TBMapDocument")
+	var owned_id: int = owned.create_cuboid(Vector3.ZERO, Vector3.ONE * 16, "visible/stone").value
+	expect_ok(owned.group_brushes(PackedInt64Array([owned_id]), "func_detail"), "create entity-owned preview brush")
+	var owned_manifest: Dictionary = owned.prepare_preview_chunks(1.0, PackedInt64Array(), 0)
+	checks.check(owned_manifest.chunks.size() == 1 and owned_manifest.chunks[0].render_category == "entity", "entity-owned preview geometry is translucent regardless of material")
+	checks.check(owned.prepare_preview_chunks(1.0, PackedInt64Array(), 0).triangle_count == 12 and owned.prepare_preview_chunks(1.0, PackedInt64Array(), 1).triangle_count == 0, "entity filter uses brush ownership")
+
+	var chunked = ClassDB.instantiate("TBMapDocument")
+	chunked.create_cuboid(Vector3.ZERO, Vector3.ONE * 8, "shared/material")
+	chunked.create_cuboid(Vector3(256, 0, 0), Vector3(264, 8, 8), "shared/material")
+	checks.check(chunked.prepare_preview_chunks(1.0, PackedInt64Array(), 0, 24, 64.0).chunks.size() == 1, "texture group at threshold remains one chunk")
+	var spatial: Dictionary = chunked.prepare_preview_chunks(1.0, PackedInt64Array(), 0, 23, 64.0)
+	checks.check(spatial.triangle_count == 24 and spatial.chunks.size() > 1, "texture group above threshold uses centroid spatial chunks")
+	var spatial_sum := 0
+	for spatial_chunk in spatial.chunks:
+		spatial_sum += spatial_chunk.triangle_count
+	checks.check(spatial_sum == 24, "spatial chunk manifest preserves triangle counts")
+	var dense = ClassDB.instantiate("TBMapDocument")
+	for offset in [0, 16, 32]:
+		dense.create_cuboid(Vector3(offset, 0, 0), Vector3(offset + 8, 8, 8), "dense/material")
+	var dense_manifest: Dictionary = dense.prepare_preview_chunks(1.0, PackedInt64Array(), 0, 10, 100000.0)
+	var dense_sizes: Array = dense_manifest.chunks.map(func(value: Dictionary): return value.triangle_count)
+	checks.check(dense_manifest.triangle_count == 36 and dense_sizes == [10, 10, 10, 6], "dense spatial cell is deterministically subdivided at the triangle maximum")
+	checks.check(dense_manifest.chunks[0].chunk_id == "dense/material|0,0,0|0" and dense_manifest.chunks[3].chunk_id == "dense/material|0,0,0|3", "dense spatial subdivisions have stable ordered IDs")
+	checks.check(dense.prepare_preview_chunks(1.0, PackedInt64Array(), 0, 10, 100000.0) == dense_manifest, "dense spatial subdivision IDs, order, and hashes are deterministic")
+	for dense_chunk in dense_manifest.chunks:
+		checks.check(dense_chunk.triangle_count <= 10, "every dense spatial subdivision respects chunk_triangles")
+
+	var positive_zero = ClassDB.instantiate("TBMapDocument")
+	positive_zero.create_cuboid(Vector3(0.0, 0.0, 0.0), Vector3(8, 8, 8), "zero/material")
+	var negative_zero = ClassDB.instantiate("TBMapDocument")
+	negative_zero.create_cuboid(Vector3(-0.0, -0.0, -0.0), Vector3(8, 8, 8), "zero/material")
+	checks.check(positive_zero.prepare_preview_chunks(1.0, PackedInt64Array(), 0).chunks[0].geometry_hash == negative_zero.prepare_preview_chunks(1.0, PackedInt64Array(), 0).chunks[0].geometry_hash, "preview geometry hash normalizes signed zero")
+
+	var change = ClassDB.instantiate("TBMapDocument")
+	var change_id: int = change.create_cuboid(Vector3(10, 10, 10), Vector3(20, 20, 20), "change/material").value
+	var before: Dictionary = change.prepare_preview_chunks(1.0, PackedInt64Array(), 0)
+	var stable_id: String = before.chunks[0].chunk_id
+	var stable_hash: String = before.chunks[0].geometry_hash
+	expect_ok(change.rebuild(), "rebuild preview hash fixture")
+	var rebuilt: Dictionary = change.prepare_preview_chunks(1.0, PackedInt64Array(), 0)
+	checks.check(rebuilt.chunks[0].chunk_id == stable_id and rebuilt.chunks[0].geometry_hash == stable_hash, "equivalent rebuild preserves chunk ID and geometry hash")
+	expect_ok(change.translate_brushes(PackedInt64Array([change_id]), Vector3.ONE), "change preview geometry")
+	checks.check(change.get_preview_chunk(stable_id).is_empty(), "map edit invalidates prepared chunk access")
+	var changed: Dictionary = change.prepare_preview_chunks(1.0, PackedInt64Array(), 0)
+	checks.check(changed.chunks[0].chunk_id == stable_id and changed.chunks[0].geometry_hash != stable_hash, "changed geometry keeps stable chunk ID and changes hash")
+	var changed_hash: String = changed.chunks[0].geometry_hash
+	expect_ok(change.set_texture_sizes({"change/material": Vector2i(64, 32)}), "change preview texture dimensions")
+	checks.check(change.get_preview_chunk(stable_id).is_empty(), "texture-size regeneration invalidates prepared chunk access")
+	checks.check(change.prepare_preview_chunks(1.0, PackedInt64Array(), 0).chunks[0].geometry_hash != changed_hash, "texture-size UV change updates geometry hash")
+	var current_id: String = change.prepare_preview_chunks(1.0, PackedInt64Array(), 0).chunks[0].chunk_id
+	expect_ok(change.import_text("{\n\"classname\" \"worldspawn\"\n}\n"), "replace preview map")
+	checks.check(change.get_preview_chunk(current_id).is_empty(), "map replacement invalidates prepared chunk access")
+
+	checks.check(doc.get_preview_chunk("missing").is_empty(), "invalid preview chunk ID is safe")
+	for invalid in [doc.prepare_preview_chunks(0.0, PackedInt64Array(), 0), doc.prepare_preview_chunks(NAN, PackedInt64Array(), 0), doc.prepare_preview_chunks(INF, PackedInt64Array(), 0), doc.prepare_preview_chunks(1.0, PackedInt64Array(), 8), doc.prepare_preview_chunks(1.0, PackedInt64Array(), 0, 0), doc.prepare_preview_chunks(1.0, PackedInt64Array(), 0, 1, 0.0), doc.prepare_preview_chunks(1.0, PackedInt64Array(), 0, 1, INF)]:
+		checks.check(invalid.is_empty(), "invalid preview preparation option is rejected safely")
+	checks.check(doc.get_preview_chunk(entry.chunk_id).is_empty(), "invalid preparation clears the previous prepared cache")
+	var patches = ClassDB.instantiate("TBMapDocument")
+	expect_ok(patches.load_map("res://fixtures/patches.map"), "load preview patch omission fixture")
+	checks.check(patches.prepare_preview_chunks(1.0, PackedInt64Array(), 0).triangle_count == 0, "preview chunks omit patches")
 
 func test_tohunga_fixture() -> void:
 	const PATH = "res://fixtures/tohunga.map"

@@ -1,9 +1,9 @@
 #include "map_document.h"
 #include "map/brush.h"
 #include "map/face.h"
+#include "map/brush_topology.h"
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <godot_cpp/variant/packed_vector2_array.hpp>
-#include <set>
 #include <vector>
 
 using namespace godot;
@@ -15,31 +15,23 @@ Array TBMapDocument::get_draw_data() const {
 	Array out;
 	for (int e = 0; e < map->entity_count; ++e) for (int b = 0; b < map->entities[e].brush_count; ++b) {
 		const auto &brush = map->entities[e].brushes[b]; const auto &geo = map->entity_geo[e].brushes[b];
+		const auto topology = lm_extract_brush_topology(brush, geo);
 		Dictionary entry; Array faces; PackedVector3Array vertices, edges; PackedInt32Array edge_indices;
-		std::set<std::pair<int, int>> unique_edges;
-		Vector3 lo, hi;
+		for (const auto &point : topology.vertices) vertices.push_back(vector(point));
+		for (const auto &edge : topology.edges) {
+			edge_indices.push_back(edge.first); edge_indices.push_back(edge.second);
+			edges.push_back(vector(topology.vertices[edge.first])); edges.push_back(vector(topology.vertices[edge.second]));
+		}
 		for (int f = 0; f < brush.face_count; ++f) {
-			const auto &face = geo.faces[f]; Dictionary data; PackedVector3Array winding; PackedInt32Array indices; Vector3 center;
-			for (int v = 0; v < face.vertex_count; ++v) {
-				Vector3 p = vector(face.vertices[v].vertex); winding.push_back(p); center += p;
-				int index = 0; for (; index < vertices.size(); ++index) if (vertices[index].distance_squared_to(p) < 1e-10) break;
-				if (index == vertices.size()) {
-					if (vertices.is_empty()) lo = hi = p;
-					else { lo = lo.min(p); hi = hi.max(p); }
-					vertices.push_back(p);
-				}
-				indices.push_back(index);
-			}
-			for (int v = 0; v < indices.size(); ++v) {
-				int a = indices[v], c = indices[(v + 1) % indices.size()]; if (a > c) std::swap(a, c);
-				if (unique_edges.emplace(a, c).second) { edge_indices.push_back(a); edge_indices.push_back(c); edges.push_back(vertices[a]); edges.push_back(vertices[c]); }
-			}
+			const auto &face = topology.faces[f]; Dictionary data; PackedVector3Array winding; PackedInt32Array indices;
+			for (const auto &point : face.winding) winding.push_back(vector(point));
+			for (int index : face.vertex_indices) indices.push_back(index);
 			data["index"] = f; data["winding"] = winding; data["vertex_indices"] = indices;
-			data["center"] = center / face.vertex_count; data["normal"] = vector(brush.faces[f].plane_normal);
+			data["center"] = vector(face.center); data["normal"] = vector(brush.faces[f].plane_normal);
 			data["texture"] = String::utf8(map->textures[brush.faces[f].texture_idx].name); faces.push_back(data);
 		}
 		entry["id"] = brush.id; entry["entity_id"] = map->entities[e].id; entry["topology_revision"] = brush.topology_revision;
-		entry["aabb_min"] = lo; entry["aabb_max"] = hi; entry["vertices"] = vertices; entry["edges"] = edges;
+		entry["aabb_min"] = vector(topology.mins); entry["aabb_max"] = vector(topology.maxs); entry["vertices"] = vertices; entry["edges"] = edges;
 		entry["edge_vertex_indices"] = edge_indices; entry["faces"] = faces; out.push_back(entry);
 	}
 	return out;
