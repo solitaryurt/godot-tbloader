@@ -9,6 +9,8 @@ var camera: Camera3D
 var geometry: Node3D
 var map_geometry: Node3D
 var overlays: Node3D
+var grid_move_preview: Node3D
+var grid_move_preview_key = ""
 var preview_lights: Node3D
 var flying = false
 var held: Dictionary = {}
@@ -16,6 +18,7 @@ var pitch = -0.4
 var yaw = 0.65
 var triangle_count = 0
 var hint: Label
+var crosshair: Control
 var rendered_key = ""
 var rendered_material_key = ""
 var geometry_chunks: Dictionary = {}
@@ -46,6 +49,8 @@ func _ready() -> void:
 	geometry.add_child(map_geometry)
 	overlays = Node3D.new()
 	geometry.add_child(overlays)
+	grid_move_preview = Node3D.new()
+	viewport.add_child(grid_move_preview)
 	camera = Camera3D.new()
 	viewport.add_child(camera)
 	camera.position = Vector3(8, 7, 12)
@@ -67,6 +72,22 @@ func _ready() -> void:
 	hint.text = " Camera • LMB select • Shift+LMB multi-select • RMB fly"
 	hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(hint)
+	var crosshair_center = CenterContainer.new()
+	crosshair_center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	crosshair_center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(crosshair_center)
+	crosshair = Control.new()
+	crosshair.custom_minimum_size = Vector2(22, 22)
+	crosshair.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	crosshair_center.add_child(crosshair)
+	var crosshair_color = Color(1.0, 0.88, 0.63, 0.9)
+	for rect in [Rect2(0, 10, 8, 2), Rect2(14, 10, 8, 2), Rect2(10, 0, 2, 8), Rect2(10, 14, 2, 8)]:
+		var segment = ColorRect.new()
+		segment.position = rect.position
+		segment.size = rect.size
+		segment.color = crosshair_color
+		segment.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		crosshair.add_child(segment)
 	var frame_button = Button.new()
 	frame_button.text = "Frame"
 	frame_button.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
@@ -134,6 +155,7 @@ func frame_selection() -> void:
 func refresh() -> void:
 	if geometry == null:
 		return
+	clear_grid_move_preview()
 	sync_camera_marker()
 	sync_scene_lighting()
 	var hidden_ids: Array = host.session.hidden.keys()
@@ -153,6 +175,53 @@ func refresh() -> void:
 		overlays.remove_child(child)
 		child.queue_free()
 	build_overlays(scale_value)
+
+func preview_grid_move(delta: Vector3) -> void:
+	if grid_move_preview == null or host.session.selected.is_empty():
+		clear_grid_move_preview()
+		return
+	var scale_value := map_scale()
+	var key := "%d:%d:%s:%s" % [host.session.document.get_instance_id(),
+		host.session.document.get_revision(), str(host.session.selected), scale_value]
+	if key != grid_move_preview_key:
+		for child in grid_move_preview.get_children():
+			grid_move_preview.remove_child(child)
+			child.queue_free()
+		var vertices := PackedVector3Array()
+		var normals := PackedVector3Array()
+		for id in host.session.selected:
+			var brush: Dictionary = host.session.brush(id)
+			if not host.session.brush_visible(brush):
+				continue
+			for face in brush.faces:
+				var winding: PackedVector3Array = face.winding
+				for i in range(1, winding.size() - 1):
+					for point in [winding[0], winding[i], winding[i + 1]]:
+						vertices.append(transform_map_scaled(point, scale_value))
+						normals.append(preview_direction_to_map(face.normal))
+		if not vertices.is_empty():
+			var arrays: Array = []
+			arrays.resize(Mesh.ARRAY_MAX)
+			arrays[Mesh.ARRAY_VERTEX] = vertices
+			arrays[Mesh.ARRAY_NORMAL] = normals
+			var mesh := ArrayMesh.new()
+			mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+			var instance := MeshInstance3D.new()
+			instance.mesh = mesh
+			var material := StandardMaterial3D.new()
+			material.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+			material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+			material.albedo_color = Color(1.0, 0.71, 0.34, 0.62)
+			instance.material_override = material
+			grid_move_preview.add_child(instance)
+		grid_move_preview_key = key
+	grid_move_preview.position = transform_map_scaled(delta, scale_value)
+	grid_move_preview.visible = true
+
+func clear_grid_move_preview() -> void:
+	if grid_move_preview != null:
+		grid_move_preview.visible = false
+		grid_move_preview.position = Vector3.ZERO
 
 func add_preview_mesh(vertices: PackedVector3Array, normals: PackedVector3Array, uvs: PackedVector2Array, material: Material) -> MeshInstance3D:
 	if vertices.is_empty():
@@ -336,10 +405,13 @@ func _gui_input(event: InputEvent) -> void:
 			start_fly()
 			accept_event()
 		elif event.button_index == MOUSE_BUTTON_LEFT:
-			pick(event.position, event.shift_pressed)
+			pick_crosshair(event.shift_pressed)
 			accept_event()
 	elif event is InputEventKey and host.route_key(event, host.active_graph):
 		accept_event()
+
+func pick_crosshair(additive: bool) -> void:
+	pick(size * 0.5, additive)
 
 func pick(position: Vector2, additive: bool) -> void:
 	var scale_value := map_scale()
@@ -418,8 +490,11 @@ func stop_fly() -> void:
 func _input(event: InputEvent) -> void:
 	if not flying:
 		return
-	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_RIGHT:
-		stop_fly()
+	if event is InputEventMouseButton and event.pressed:
+		if event.button_index == MOUSE_BUTTON_RIGHT:
+			stop_fly()
+		elif event.button_index == MOUSE_BUTTON_LEFT:
+			pick_crosshair(event.shift_pressed)
 	elif event is InputEventKey:
 		if event.keycode == KEY_ESCAPE:
 			stop_fly()

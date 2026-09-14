@@ -47,6 +47,7 @@ var scene_sessions: Dictionary = {}
 var watched_loaders: Dictionary = {}
 var scene_active = false
 var discovery_queued = false
+var discovered_scene_id = 0
 var changing_scene_tabs = false
 var last_standalone: WeakRef = weakref(null)
 var discard_on_replace: RefCounted
@@ -230,7 +231,13 @@ func set_session(value: RefCounted) -> void:
 
 func _session_changed(origin: RefCounted) -> void:
 	if origin == session:
-		refresh()
+		if origin.change_kind == "brush_translation":
+			graph_a.queue_redraw()
+			graph_b.queue_redraw()
+			camera_view.refresh()
+			refresh_status()
+		else:
+			refresh()
 	else:
 		# Global undo can dirty a retained document without changing the active view.
 		refresh_status()
@@ -829,11 +836,14 @@ func discover_scene_loaders() -> void:
 	if not scene_active or shutting_down or session == null:
 		return
 	var root = EditorInterface.get_edited_scene_root()
+	discovered_scene_id = root.get_instance_id() if root != null else 0
 	var all_loaders: Array[Node] = []
 	if root is TBLoader:
 		all_loaders.append(root)
 	if root != null:
-		all_loaders.append_array(root.find_children("*", "TBLoader", true, false))
+		for node in root.find_children("*", "", true, false):
+			if node is TBLoader:
+				all_loaders.append(node)
 	watch_scene_loaders(all_loaders)
 	var mapped: Array[Node] = all_loaders.filter(func(loader): return not loader.map_resource.is_empty())
 	var previous_loader = session.loader.get_ref()
@@ -1132,6 +1142,11 @@ func unsaved_status() -> String:
 	return "Unsaved Map documents: " + ", ".join(paths) if not paths.is_empty() else ""
 
 func _process(delta: float) -> void:
+	if scene_active:
+		var root = EditorInterface.get_edited_scene_root()
+		var root_id = root.get_instance_id() if root != null else 0
+		if root_id != discovered_scene_id:
+			queue_scene_discovery()
 	if session != null and session.was_bound and not valid_binding():
 		detach()
 	if session != null:

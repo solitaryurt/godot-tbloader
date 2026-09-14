@@ -65,10 +65,14 @@ bool valid_geometry(const LMMapData &map) {
 			const auto &brush = map.entities[e].brushes[b];
 			const auto &geo = map.entity_geo[e].brushes[b];
 			double volume = 0;
+			int contributing_faces = 0;
 			const auto topology = lm_extract_brush_topology(brush, geo);
 			for (int f = 0; f < brush.face_count; ++f) {
 				const auto &face = geo.faces[f];
-				if (face.vertex_count < 3) return false;
+				// Redundant planes occur in production Quake maps and are already
+				// ignored by mesh generation. Preserve them for round-tripping.
+				if (face.vertex_count < 3) continue;
+				++contributing_faces;
 				for (int v = 0; v < face.vertex_count; ++v) {
 					const auto &vertex = face.vertices[v];
 					const auto &p = vertex.vertex;
@@ -84,12 +88,15 @@ bool valid_geometry(const LMMapData &map) {
 					volume += std::abs(vec3_dot(a, vec3_cross(c, d))) / 6.0;
 				}
 			}
-			if (!std::isfinite(volume) || volume <= 1e-9) return false;
+			if (contributing_faces < 4 || !std::isfinite(volume) || volume <= 1e-9) return false;
 			std::map<std::pair<int, int>, int> edge_uses;
-			for (const auto &face : topology.faces) for (size_t v = 0; v < face.vertex_indices.size(); ++v) {
-				int a = face.vertex_indices[v], b = face.vertex_indices[(v + 1) % face.vertex_indices.size()];
-				if (a > b) std::swap(a, b);
-				++edge_uses[{a, b}];
+			for (const auto &face : topology.faces) {
+				if (face.vertex_indices.size() < 3) continue;
+				for (size_t v = 0; v < face.vertex_indices.size(); ++v) {
+					int a = face.vertex_indices[v], b = face.vertex_indices[(v + 1) % face.vertex_indices.size()];
+					if (a > b) std::swap(a, b);
+					++edge_uses[{a, b}];
+				}
 			}
 			for (const auto &edge : edge_uses) if (edge.second != 2) return false;
 		}
@@ -404,6 +411,7 @@ void TBMapDocument::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_dirty"), &TBMapDocument::is_dirty);
 	ClassDB::bind_method(D_METHOD("get_path"), &TBMapDocument::get_path);
 	ClassDB::bind_method(D_METHOD("get_revision"), &TBMapDocument::get_revision);
+	ClassDB::bind_method(D_METHOD("get_topology_revision"), &TBMapDocument::get_topology_revision);
 	ClassDB::bind_method(D_METHOD("get_epoch"), &TBMapDocument::get_epoch);
 	ClassDB::bind_method(D_METHOD("get_texture_names"), &TBMapDocument::get_texture_names);
 	ClassDB::bind_method(D_METHOD("get_entities"), &TBMapDocument::get_entities);

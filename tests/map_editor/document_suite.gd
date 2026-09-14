@@ -581,6 +581,10 @@ func test_document() -> void:
 	checks.check(primitives.size() == 3 and primitives[0].kind == &"patch" and primitives[1].kind == &"brush" and primitives[2].kind == &"patch", "source primitive order retained")
 	var canonical: String = doc.export_text().value
 	checks.check(canonical.find("patchDef2") < canonical.find("( 48 -32 -8 )") and canonical.find("( 48 -32 -8 )") < canonical.find("patchDef3"), "writer emits source primitive order")
+	# Production maps can contain redundant planes which do not contribute a polygon.
+	var redundant = cube.replace("( 48 -32 -8 ) ( -16 32 -8 ) ( -16 -32 -8 ) baseline/checker 0 0 0 1 1\n", "( 48 -32 -8 ) ( -16 32 -8 ) ( -16 -32 -8 ) baseline/checker 0 0 0 1 1\n( 64 -32 -8 ) ( 64 32 24 ) ( 64 32 -8 ) baseline/checker 0 0 0 1 1\n")
+	expect_ok(doc.import_text(redundant), "solid with non-contributing source plane")
+	checks.check(doc.export_text().value.contains("( 64 -32 -8 ) ( 64 32 24 ) ( 64 32 -8 )"), "non-contributing source plane is preserved")
 	var before = state(doc)
 	var events_before = events.duplicate()
 	for invalid in ["", "// only comment", "{", '{"key"}', '{"key" "unterminated}', cube.left(cube.length() - 3), cube.replace("48 -32 -8", "NaN -32 -8"), cube.replace("0 0 0 1 1 0 0 0", "0 0 0 1 1 0 0"), patch_text.replace("( 3 3 1 2 3 )", "( 4 3 1 2 3 )"), patch_text.replace("( -16.5 0 8 0 0.5 )", "( -16.5 0 8 0 )"), cube + "garbage", "/* unterminated"]:
@@ -845,7 +849,13 @@ func test_operations() -> void:
 	expect_failure(doc, doc.make_prism(id, 2, 2), state(doc), "INVALID_ARGUMENT", "make_prism")
 	expect_ok(doc.restore_snapshot(snapshot), "reset for vertex edits")
 	b = brush_data(doc, id)
-	expect_failure(doc, doc.translate_vertices(id, PackedInt32Array([0]), Vector3(1, 2, 3), b.topology_revision), state(doc), "INVALID_GEOMETRY", "translate_vertices")
+	var moved_vertex: Vector3 = b.vertices[0] + Vector3(1, 2, 3)
+	expect_ok(doc.translate_vertices(id, PackedInt32Array([0]), Vector3(1, 2, 3), b.topology_revision), "single vertex rebuilds convex hull")
+	b = brush_data(doc, id)
+	checks.check(b.vertices.has(moved_vertex) and b.faces.size() > 6, "nonplanar cuboid sides split into convex hull planes")
+	assert_solid(doc, id)
+	expect_ok(doc.restore_snapshot(snapshot), "reset after vertex hull edit")
+	b = brush_data(doc, id)
 	expect_failure(doc, doc.translate_vertices(id, PackedInt32Array([0, 99]), Vector3.ONE, b.topology_revision), state(doc), "INVALID_ARGUMENT", "translate_vertices")
 	var face_vertices: PackedInt32Array = b.faces[0].vertex_indices
 	face_vertices.append(face_vertices[0])
@@ -908,9 +918,14 @@ func test_phase5() -> void:
 	var snapshot: Dictionary = doc.snapshot().value
 	var b = brush_data(doc, id)
 	var faces = [component(b, "face", 0), component(b, "face", 1), component(b, "face", 0)]
+	expect_failure(doc, doc.translate_components(Array(b.faces[0].vertex_indices).map(func(index): return component(b, "vertex", index)), Vector3(64, 0, 0)), state(doc), "INVALID_GEOMETRY", "translate_components")
+	expect_ok(doc.translate_components(Array(b.faces[0].vertex_indices).map(func(index): return component(b, "vertex", index)), Vector3(80, 0, 0)), "vertex batch rebuilds changed hull")
+	assert_solid(doc, id)
+	expect_ok(doc.restore_snapshot(snapshot), "reset vertex hull batch")
+	b = brush_data(doc, id)
+	faces = [component(b, "face", 0), component(b, "face", 1), component(b, "face", 0)]
 	for movement in [Vector3(64, 0, 0), Vector3(80, 0, 0)]:
 		expect_failure(doc, doc.translate_components([component(b, "face", 0)], movement), state(doc), "INVALID_GEOMETRY", "translate_components")
-		expect_failure(doc, doc.translate_components(Array(b.faces[0].vertex_indices).map(func(index): return component(b, "vertex", index)), movement), state(doc), "INVALID_GEOMETRY", "translate_components")
 	var events = {"map": 0}
 	doc.map_changed.connect(func(_r): events.map += 1)
 	expect_ok(doc.translate_components(faces, Vector3(128, 0, 0)), "opposite planes batch bypasses invalid intermediate hull")
@@ -931,10 +946,15 @@ func test_phase5() -> void:
 	expect_ok(doc.restore_snapshot(snapshot), "reset atomic group")
 	var second: int = doc.create_cuboid(Vector3(128, 0, 0), Vector3(192, 64, 64), "baseline/checker").value
 	b = brush_data(doc, id)
-	var group = [component(b, "face", 1), component(brush_data(doc, second), "vertex", 0)]
+	var second_brush: Dictionary = brush_data(doc, second)
+	var collapse_face: Dictionary = second_brush.faces[0]
+	var collapse_movement: Vector3 = -collapse_face.normal * 64
+	var outward_face: Dictionary = b.faces.filter(func(face): return face.normal.dot(collapse_movement) > 0.5)[0]
+	var group = [component(b, "face", outward_face.index)]
+	group.append_array(Array(collapse_face.vertex_indices).map(func(index): return component(second_brush, "vertex", index)))
 	var before = state(doc)
 	var event_count: int = events.map
-	expect_failure(doc, doc.translate_components(group, Vector3(16, 8, 0)), before, "INVALID_GEOMETRY", "translate_components")
+	expect_failure(doc, doc.translate_components(group, collapse_movement), before, "INVALID_GEOMETRY", "translate_components")
 	checks.check(events.map == event_count, "invalid later brush emits no partial group commit")
 	group = [component(b, "face", 1), component(brush_data(doc, second), "face", 1)]
 	expect_ok(doc.translate_components(group, Vector3(16, 0, 0)), "valid multi-brush face batch")

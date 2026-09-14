@@ -248,6 +248,24 @@ func run() -> void:
 	ui.graph_a.queue_redraw()
 	ui.graph_b.queue_redraw()
 	report.timings_us.grid_redraw_queue_to_frame_post_draw = await frame_post_draw_boundary()
+	# Break down the synchronous path used when a grid move is committed.
+	candidate.selected = PackedInt64Array([data[0].id])
+	var move_capture_before := timed(func(): return candidate.capture())
+	report.timings_us.move_capture_before = move_capture_before.usec
+	var move_native := timed(func(): return candidate.translate_brushes(candidate.selected, Vector3(candidate.grid, 0, 0)))
+	report.timings_us.move_native_translation = move_native.usec
+	var empty_point_move := timed(func(): return candidate.document.translate_point_entities(PackedInt64Array(), Vector3(candidate.grid, 0, 0)))
+	report.timings_us.move_empty_point_translation = empty_point_move.usec
+	var move_capture_after := timed(func(): return candidate.capture())
+	report.timings_us.move_capture_after = move_capture_after.usec
+	var move_refresh := timed(func():
+		candidate.change_kind = "brush_translation"
+		candidate.changed.emit()
+		candidate.change_kind = "")
+	report.timings_us.move_session_refresh = move_refresh.usec
+	ui.graph_a.apply_dense_translation(Vector3(candidate.grid, 0, 0))
+	ui.graph_b.apply_dense_translation(Vector3(candidate.grid, 0, 0))
+	report.timings_us.move_following_frame = await frame_post_draw_boundary()
 	if failed:
 		finish(1)
 		return

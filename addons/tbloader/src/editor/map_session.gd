@@ -34,17 +34,54 @@ var _marker_cache: Array = []
 var _draw_valid = false
 var _entity_valid = false
 var _marker_valid = false
+var _pending_brush_translation: Dictionary = {}
+var change_kind = ""
 
 func _init() -> void:
 	document.map_changed.connect(_map_changed)
 	document.preview_changed.connect(_preview_changed)
 
 func _map_changed(_revision: int) -> void:
-	_draw_valid = false
-	_entity_valid = false
-	_brush_entity_ids.clear()
-	_marker_valid = false
+	if not _pending_brush_translation.is_empty() and _draw_valid:
+		patch_draw_translation(_pending_brush_translation.ids, _pending_brush_translation.delta)
+	else:
+		_draw_valid = false
+		_entity_valid = false
+		_brush_entity_ids.clear()
+		_marker_valid = false
 	preview_generation += 1
+
+func patch_draw_translation(ids: PackedInt64Array, movement: Vector3) -> void:
+	var topology_revision: int = document.get_topology_revision()
+	for cached in _draw_cache:
+		cached.topology_revision = topology_revision
+	for id in ids:
+		if not _draw_index.has(id):
+			continue
+		var item: Dictionary = _draw_index[id].duplicate(true)
+		item.aabb_min += movement
+		item.aabb_max += movement
+		for key in ["vertices", "edges"]:
+			var points: PackedVector3Array = item[key]
+			for i in points.size():
+				points[i] += movement
+			item[key] = points
+		for face in item.faces:
+			face.center += movement
+			var winding: PackedVector3Array = face.winding
+			for i in winding.size():
+				winding[i] += movement
+			face.winding = winding
+		var index: int = _draw_cache.find(_draw_index[id])
+		if index >= 0:
+			_draw_cache[index] = item
+		_draw_index[id] = item
+
+func translate_brushes(ids: PackedInt64Array, movement: Vector3) -> Dictionary:
+	_pending_brush_translation = {"ids": ids, "delta": movement}
+	var result: Dictionary = document.translate_brushes(ids, movement)
+	_pending_brush_translation.clear()
+	return result
 
 func _preview_changed() -> void:
 	# Rebuilds can replace topology caches without changing canonical map text.
@@ -116,7 +153,7 @@ func report(result: Dictionary) -> bool:
 			(" (%d:%d)" % [e.line, e.column]) if e.line else ""])
 	return result.ok
 
-func transact(label: String, operation: Callable) -> bool:
+func transact(label: String, operation: Callable, kind := "") -> bool:
 	var before = capture()
 	var result: Dictionary = operation.call()
 	if not report(result):
@@ -143,7 +180,9 @@ func transact(label: String, operation: Callable) -> bool:
 	manager.add_undo_reference(token)
 	manager.commit_action(false)
 	action_recorded.emit(token)
+	change_kind = kind
 	changed.emit()
+	change_kind = ""
 	return true
 
 func brush(id: int) -> Dictionary:

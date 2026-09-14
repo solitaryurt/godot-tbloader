@@ -122,6 +122,15 @@ int main() {
 		}
 		LMGeoGenerator geo(map);
 		geo.run();
+		{
+			auto clone = map->deep_clone();
+			equal_maps(*map, *clone);
+			assert(lm_write_map(*clone) == canonical);
+			if (clone->entity_count && clone->entities[0].brush_count) {
+				clone->entities[0].brushes[0].faces[0].plane_points.v0.x += 1;
+				assert(clone->entities[0].brushes[0].faces[0].plane_points.v0.x != map->entities[0].brushes[0].faces[0].plane_points.v0.x);
+			}
+		}
 		for (int e = 0; e < map->entity_count; ++e) for (int b = 0; b < map->entities[e].brush_count; ++b)
 			check_topology_order(map->entities[e].brushes[b], map->entity_geo[e].brushes[b]);
 		if (!strcmp(name, "patches")) {

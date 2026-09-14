@@ -2,6 +2,7 @@
 #include "map/brush.h"
 #include "map/patch.h"
 #include "map/map_writer.h"
+#include "map/map_parser.h"
 #include "map/geo_generator.h"
 #include "map/brush_topology.h"
 #include <godot_cpp/variant/packed_vector3_array.hpp>
@@ -33,6 +34,54 @@ std::vector<int64_t> unique(const PackedInt64Array &ids) {
 void move_face(LMEditFace &f, Vector3 delta) {
 	auto &p = f.plane.plane_points;
 	p.v0 = vec3_add(p.v0, native(delta)); p.v1 = vec3_add(p.v1, native(delta)); p.v2 = vec3_add(p.v2, native(delta));
+}
+struct HullPlane {
+	int a, b, c;
+	Vector3 normal;
+	double distance;
+};
+bool face_has_vertex(const LMBrushTopologyFace &face, int vertex) {
+	return std::find(face.vertex_indices.begin(), face.vertex_indices.end(), vertex) != face.vertex_indices.end();
+}
+bool rebuild_vertex_hull(LMEditPrimitive &target, const LMBrushTopology &topology, const std::vector<vec3> &vertices) {
+	std::vector<HullPlane> planes;
+	for (int a = 0; a < static_cast<int>(vertices.size()); ++a) for (int b = a + 1; b < static_cast<int>(vertices.size()); ++b) for (int c = b + 1; c < static_cast<int>(vertices.size()); ++c) {
+		int ia = a, ib = b, ic = c;
+		Vector3 p = vector(vertices[a]), q = vector(vertices[b]), r = vector(vertices[c]);
+		Vector3 normal = (q - p).cross(r - p);
+		double length = normal.length();
+		if (length <= 1e-8) continue;
+		normal /= length;
+		double distance = normal.dot(p), low = 0, high = 0;
+		for (const vec3 &point : vertices) {
+			double side = normal.dot(vector(point)) - distance;
+			low = std::min(low, side); high = std::max(high, side);
+			if (low < -1e-5 && high > 1e-5) break;
+		}
+		if (low < -1e-5 && high > 1e-5) continue;
+		if (high > 1e-5) { normal = -normal; distance = -distance; std::swap(ib, ic); }
+		bool duplicate = false;
+		for (const auto &plane : planes) if (plane.normal.dot(normal) > 1.0 - 1e-8 && std::abs(plane.distance - distance) < 1e-5) { duplicate = true; break; }
+		if (!duplicate) planes.push_back({ia, ib, ic, normal, distance});
+	}
+	if (planes.size() < 4 || planes.size() > 64) return false;
+	std::vector<LMEditFace> faces;
+	faces.reserve(planes.size());
+	for (const auto &plane : planes) {
+		int source = -1;
+		for (int f = 0; f < static_cast<int>(topology.faces.size()); ++f) {
+			const auto &face = topology.faces[f];
+			if (face_has_vertex(face, plane.a) && face_has_vertex(face, plane.b) && face_has_vertex(face, plane.c)) { source = f; break; }
+		}
+		if (source < 0) for (int f = 0; f < static_cast<int>(topology.faces.size()); ++f) if (face_has_vertex(topology.faces[f], plane.a)) { source = f; break; }
+		if (source < 0 || source >= static_cast<int>(target.faces.size())) return false;
+		auto face = target.faces[source];
+		// LMFace normals use (p2 - p0) x (p1 - p0), opposite the conventional winding above.
+		face.plane.plane_points = {vertices[plane.a], vertices[plane.c], vertices[plane.b]};
+		faces.push_back(std::move(face));
+	}
+	target.faces = std::move(faces);
+	return true;
 }
 std::string origin_text(Vector3 v) {
 	std::string out;
@@ -122,8 +171,56 @@ Dictionary TBMapDocument::delete_brushes(const PackedInt64Array &ids) {
 Dictionary TBMapDocument::translate_brushes(const PackedInt64Array &ids, Vector3 delta) {
 	auto r = check_brushes(ids, "translate_brushes"); if (!bool(r["ok"])) return r;
 	if (!valid(delta)) return failure("INVALID_ARGUMENT", "Invalid translation", "translate_brushes");
-	LMMapEdit edit(*map); for (int64_t id : unique(ids)) for (auto &f : edit_brush(edit, id)->faces) move_face(f, delta);
-	return finish_edit(edit, "translate_brushes");
+	if (ids.is_empty() || delta == Vector3()) return success();
+	auto candidate = map->deep_clone();
+	LMGeoGenerator generator(candidate);
+	std::set<int> affected_entities;
+	for (int64_t id : unique(ids)) {
+		const auto *location = live_location(id, 'b');
+		auto &brush = candidate->entities[location->entity].brushes[location->index];
+		auto &geometry = candidate->entity_geo[location->entity].brushes[location->index];
+		for (int f = 0; f < brush.face_count; ++f) {
+			auto &face = brush.faces[f];
+			auto translated = face.plane_points;
+			translated.v0 = vec3_add(translated.v0, native(delta));
+			translated.v1 = vec3_add(translated.v1, native(delta));
+			translated.v2 = vec3_add(translated.v2, native(delta));
+			if (!valid(vector(translated.v0)) || !valid(vector(translated.v1)) || !valid(vector(translated.v2)))
+				return failure("INVALID_ARGUMENT", "Translated brush exceeds finite map bounds", "translate_brushes");
+			face.plane_points = translated;
+			const vec3 normal = vec3_cross(vec3_sub(translated.v2, translated.v1), vec3_sub(translated.v1, translated.v0));
+			face.plane_normal = vec3_normalize(normal);
+			face.plane_dist = vec3_dot(face.plane_normal, translated.v0);
+			auto &face_geometry = geometry.faces[f];
+			const auto &texture = candidate->textures[face.texture_idx];
+			for (int v = 0; v < face_geometry.vertex_count; ++v) {
+				auto &vertex = face_geometry.vertices[v];
+				vertex.vertex = vec3_add(vertex.vertex, native(delta));
+				vertex.uv = face.is_valve_uv ? generator.get_valve_uv(vertex.vertex, &face, texture.width, texture.height)
+					: generator.get_standard_uv(vertex.vertex, &face, texture.width, texture.height);
+			}
+		}
+		brush.center = vec3_add(brush.center, native(delta));
+		affected_entities.insert(location->entity);
+	}
+	for (int entity_index : affected_entities) {
+		auto &entity = candidate->entities[entity_index];
+		entity.center = { 0, 0, 0 };
+		for (int b = 0; b < entity.brush_count; ++b) entity.center = vec3_add(entity.center, entity.brushes[b].center);
+		for (int p = 0; p < entity.patch_count; ++p) {
+			const auto &patch = candidate->entity_geo[entity_index].patches[p];
+			vec3 center = { 0, 0, 0 };
+			for (int v = 0; v < patch.vertex_count; ++v) center = vec3_add(center, patch.vertices[v].vertex);
+			if (patch.vertex_count) center = vec3_div_double(center, patch.vertex_count);
+			entity.center = vec3_add(entity.center, center);
+		}
+		const int sources = entity.brush_count + entity.patch_count;
+		if (sources) entity.center = vec3_div_double(entity.center, sources);
+	}
+	std::string normalized = lm_write_map(*candidate);
+	if (normalized.size() > LMMapParser::MAX_TEXT_BYTES) return failure("LIMIT_EXCEEDED", "Canonical map exceeds 16 MiB", "translate_brushes", path);
+	commit(candidate, normalized, is_dirty());
+	return success(true);
 }
 Dictionary TBMapDocument::rotate_brushes(const PackedInt64Array &ids, Vector3 pivot, int axis, double radians) {
 	auto r = check_brushes(ids, "rotate_brushes"); if (!bool(r["ok"])) return r;
@@ -230,6 +327,7 @@ Dictionary TBMapDocument::remove_entity_property(int64_t id, const String &key) 
 }
 Dictionary TBMapDocument::translate_point_entities(const PackedInt64Array &ids, Vector3 delta) {
 	if (!valid(delta)) return failure("INVALID_ARGUMENT", "Invalid translation", "translate_point_entities");
+	if (ids.is_empty() || delta == Vector3()) return success();
 	LMMapEdit edit(*map);
 	for (int64_t id : unique(ids)) {
 		auto e = edit_entity(edit, id); if (!e) return failure("INVALID_ID", "Unknown entity handle", "translate_point_entities");
@@ -337,42 +435,11 @@ Dictionary TBMapDocument::move_components(const Array &components, Vector3 delta
 	for (const auto &group : selected_faces) for (int index : group.second) {
 		auto &f = edit_brush(edit, group.first)->faces[index]; Vector3 n = vector(f.plane.plane_normal); move_face(f, n * n.dot(delta));
 	}
-	std::map<int64_t, std::vector<vec3>> expected;
 	for (const auto &group : selected_vertices) {
 		int64_t id = group.first; const auto &selected = group.second;
 		auto vertices = brushes.at(id).vertices;
 		for (int index : selected) { vertices[index] = vec3_add(vertices[index], native(delta)); if (!valid(vector(vertices[index]))) return failure("INVALID_ARGUMENT", "Vertex exceeds coordinate bounds", operation); }
-		expected[id] = vertices;
-		auto &target = *edit_brush(edit, id); const auto &faces = brushes.at(id).faces;
-		for (int f = 0; f < static_cast<int>(faces.size()); ++f) {
-			const auto &indices = faces[f].vertex_indices;
-			bool affected = false; for (int index : indices) if (selected.count(index)) affected = true;
-			if (!affected) continue;
-			Vector3 a = vector(vertices[indices[0]]), b, c, n;
-			for (int i = 1; i + 1 < static_cast<int>(indices.size()); ++i) {
-				b = vector(vertices[indices[i]]); c = vector(vertices[indices[i + 1]]); n = (c - a).cross(b - a);
-				if (n.length_squared() > 1e-10) break;
-			}
-			if (n.length_squared() <= 1e-10) return failure("INVALID_GEOMETRY", "Vertex edit collapses a face", operation);
-			n.normalize();
-			for (int index : indices) if (std::abs(n.dot(vector(vertices[index]) - a)) > 1e-5) return failure("INVALID_GEOMETRY", "Vertex edit makes a nonplanar face", operation);
-			target.faces[f].plane.plane_points = {native(a), native(b), native(c)};
-		}
-	}
-	// Ensure the convex candidate has exactly the requested vertices, not a different
-	// hull produced by intersecting changed supporting planes.
-	std::shared_ptr<LMMapData> candidate; auto r = prepare(edit.text(), candidate, operation, path); if (!bool(r["ok"])) return r;
-	for (int e = 0; e < candidate->entity_count; ++e) for (int b = 0; b < candidate->entities[e].brush_count; ++b) {
-		auto found = expected.find(map->entities[e].brushes[b].id); if (found == expected.end()) continue;
-		const auto &vertices = found->second;
-		std::set<int> matched; const auto &geo = candidate->entity_geo[e].brushes[b];
-		for (int f = 0; f < geo.face_count; ++f) for (int v = 0; v < geo.faces[f].vertex_count; ++v) {
-			const vec3 p = geo.faces[f].vertices[v].vertex; int index = 0;
-			for (; index < static_cast<int>(vertices.size()); ++index) { const vec3 d = vec3_sub(p, vertices[index]); if (vec3_dot(d, d) < 1e-8) break; }
-			if (index == static_cast<int>(vertices.size())) return failure("INVALID_GEOMETRY", "Vertex edit changes the convex hull unexpectedly", operation);
-			matched.insert(index);
-		}
-		if (matched.size() != size_t(vertices.size())) return failure("INVALID_GEOMETRY", "Vertex edit removes a hull vertex", operation);
+		if (!rebuild_vertex_hull(*edit_brush(edit, id), brushes.at(id), vertices)) return failure("INVALID_GEOMETRY", "Vertex edit cannot form a bounded convex brush", operation);
 	}
 	return finish_edit(edit, operation);
 }

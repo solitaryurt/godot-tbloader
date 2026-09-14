@@ -102,3 +102,11 @@ pan and zoom while preserving every edge. Two independent 31-sample process runs
 two-grid redraw boundary at 37.872 ms and 38.440 ms, respectively. This is an 86.1%
 reduction from the 275.959 ms static-edge batching run; final RSS was 1,262.668 MiB
 and 1,262.156 MiB.
+
+The targeted brush-translation path was measured at
+`tests/map_editor/artifacts/current-editor-performance-weby2iy6/`. A Tohunga
+one-brush move took 50.258 ms for the native immutable-map commit, 60.185 ms for
+targeted session/camera refresh, and 45.155 ms through the following rendered frame,
+or 155.598 ms total. The earlier equivalent breakdown totaled about 600 ms. Empty
+point-entity translation, previously a second whole-document edit in the grid move
+path, now returns in 0.012 ms.

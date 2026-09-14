@@ -96,6 +96,8 @@ func cancel() -> void:
 	rotation_angle = 0.0
 	resize_face.clear()
 	drag_component.clear()
+	if host != null and host.camera_view != null:
+		host.camera_view.clear_grid_move_preview()
 	queue_redraw()
 
 func hit_brush(position: Vector2, prefer_selected := false) -> int:
@@ -260,6 +262,14 @@ func draw_dense_edges(dynamic_selection: bool) -> void:
 		draw_multiline(dense_selected_edges, Color("ffb657"), 2.0 / zoom, true)
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
+func apply_dense_translation(movement: Vector3) -> void:
+	if dense_edge_cache_key.is_empty():
+		return
+	var projected := map_edge_point(movement)
+	for i in dense_selected_edges.size():
+		dense_selected_edges[i] += projected
+	dense_edge_cache_key = current_dense_edge_key()
+
 func _gui_input(event: InputEvent) -> void:
 	if event is InputEventKey:
 		if host.route_key(event, self):
@@ -330,6 +340,8 @@ func _gui_input(event: InputEvent) -> void:
 				delta[orientation] = 0
 			if shift_drag and gesture in ["move", "component", "resize"]:
 				delta[a.y if absf(delta[a.x]) > absf(delta[a.y]) else a.x] = 0
+		if gesture == "move":
+			host.camera_view.preview_grid_move(delta)
 		queue_redraw()
 		accept_event()
 
@@ -441,11 +453,15 @@ func finish_left(event: InputEventMouseButton) -> void:
 	elif gesture in ["move", "resize", "component"] and delta != Vector3.ZERO:
 		var movement = delta
 		if gesture == "move":
-			session.transact("Move map selection", func():
-				var r: Dictionary = session.document.translate_brushes(session.selected, movement)
-				if r.ok:
+			var brush_only: bool = session.points.is_empty()
+			var committed: bool = session.transact("Move map selection", func():
+				var r: Dictionary = session.translate_brushes(session.selected, movement)
+				if r.ok and not session.points.is_empty():
 					r = session.document.translate_point_entities(session.points, movement)
-				return r)
+				return r, "brush_translation" if brush_only else "")
+			if committed and brush_only:
+				host.graph_a.apply_dense_translation(movement)
+				host.graph_b.apply_dense_translation(movement)
 		elif gesture == "resize":
 			var component = resize_face.duplicate()
 			session.transact("Resize map face", func():

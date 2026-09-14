@@ -493,7 +493,7 @@ Every selected handle is validated before committing any candidate.
 | `delete_brushes(ids)` | null; retains empty owner entities and their epairs |
 | `translate_brushes(ids,delta:Vector3)` | null; move all supporting plane points once; projection parameters retained (no texture lock) |
 | `translate_face(id,face:int,delta:Vector3,topology_revision:int)` | null; normal component of delta moves the plane; tangent-only motion is a no-op |
-| `translate_vertices(id,vertex_indices,delta,topology_revision)` | null; requires planar faces and exactly the requested closed convex hull; nonplanar/collapsed/unexpected hull changes reject atomically |
+| `translate_vertices(id,vertex_indices,delta,topology_revision)` | null; rebuilds the convex hull of moved and untouched vertices, adding/removing planes as needed; degenerate/unbounded results reject atomically |
 | `translate_components(components:Array,delta:Vector3)` | null; validates all tokens, deduplicates components/shared vertices, stages all brushes and commits once; failed groups preserve all state/signals |
 | `make_prism(id,sides:int,axis:int)` | null; replaces hull inside current AABB, 3..62 sides, extrusion axis 0=X/1=Y/2=Z; elliptical cross-section for asymmetric bounds; inherits first face's material/UV/flags |
 | `clip_brushes(ids,p0,p1,p2,split:bool)` | Surviving result brush IDs in selection order; semantics below |
@@ -519,8 +519,10 @@ source that needs another plane returns `LIMIT_EXCEEDED`; no partial batch edit.
 to current copied draw data (edge index addresses the pair at `index * 2`). Invalid
 schema/kind/index, stale tokens and missing owners reject the whole operation.
 Face groups translate each supporting plane by the normal projection of delta.
-Vertex/edge groups union incident vertex indices per brush and move each once;
-the validated hull must contain exactly the requested vertices. Mixing face and
+Vertex/edge groups union incident vertex indices per brush and move each once, then
+derive supporting planes from the resulting point-cloud convex hull. Coplanar hull
+triangles merge into one plane; split/new planes inherit source face material and UV
+metadata where possible. Mixing face and
 vertex/edge deformation within one brush rejects as ambiguous. Across brushes,
 the final candidate is validated before any live content, revision or signal changes.
 The existing `translate_vertices` delegates to this same validation path and keeps

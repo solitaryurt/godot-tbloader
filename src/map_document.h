@@ -94,6 +94,7 @@ public:
 	bool is_dirty() const { return !has_baseline || *canonical != baseline; }
 	String get_path() const { return path; }
 	int64_t get_revision() const { return revision; }
+	int64_t get_topology_revision() const { return topology; }
 	int64_t get_epoch() const { return epoch; }
 	PackedStringArray get_texture_names() const;
 	// Copied ownership/property data for the future N inspector. Primitive IDs use

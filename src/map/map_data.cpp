@@ -8,7 +8,25 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <memory>
 #include <utility>
+
+namespace {
+char *clone_string(const char *source) {
+	if (!source) return nullptr;
+	const size_t bytes = strlen(source) + 1;
+	auto *result = static_cast<char *>(malloc(bytes));
+	memcpy(result, source, bytes);
+	return result;
+}
+template <typename T>
+T *clone_array(const T *source, int count) {
+	if (!source || count <= 0) return nullptr;
+	auto *result = static_cast<T *>(malloc(size_t(count) * sizeof(T)));
+	memcpy(result, source, size_t(count) * sizeof(T));
+	return result;
+}
+}
 
 size_t LMMapData::retained_bytes() const {
 	size_t bytes = sizeof(LMMapData);
@@ -48,6 +66,70 @@ size_t LMMapData::retained_bytes() const {
 		}
 	}
 	return bytes;
+}
+
+std::shared_ptr<LMMapData> LMMapData::deep_clone() const {
+	auto result = std::make_shared<LMMapData>();
+	result->entity_count = entity_count;
+	result->entities = static_cast<LMEntity *>(calloc(entity_count, sizeof(LMEntity)));
+	for (int e = 0; e < entity_count; ++e) {
+		const auto &source = entities[e];
+		auto &target = result->entities[e];
+		target = source;
+		target.primitives = clone_array(source.primitives, source.primitive_count);
+		target.properties = static_cast<LMProperty *>(calloc(source.property_count, sizeof(LMProperty)));
+		for (int p = 0; p < source.property_count; ++p) {
+			target.properties[p].key = clone_string(source.properties[p].key);
+			target.properties[p].value = clone_string(source.properties[p].value);
+		}
+		target.brushes = static_cast<LMBrush *>(calloc(source.brush_count, sizeof(LMBrush)));
+		for (int b = 0; b < source.brush_count; ++b) {
+			target.brushes[b] = source.brushes[b];
+			target.brushes[b].faces = clone_array(source.brushes[b].faces, source.brushes[b].face_count);
+		}
+		target.patches = static_cast<LMPatch *>(calloc(source.patch_count, sizeof(LMPatch)));
+		for (int p = 0; p < source.patch_count; ++p) {
+			target.patches[p] = source.patches[p];
+			target.patches[p].control_points = clone_array(source.patches[p].control_points, source.patches[p].width * source.patches[p].height);
+		}
+	}
+	result->texture_count = texture_count;
+	result->textures = static_cast<LMTextureData *>(calloc(texture_count, sizeof(LMTextureData)));
+	for (int t = 0; t < texture_count; ++t) {
+		result->textures[t] = textures[t];
+		result->textures[t].name = clone_string(textures[t].name);
+	}
+	result->worldspawn_layer_count = worldspawn_layer_count;
+	result->worldspawn_layers = clone_array(worldspawn_layers, worldspawn_layer_count);
+	result->geometry_entity_count = geometry_entity_count;
+	result->entity_geo = static_cast<LMEntityGeometry *>(calloc(geometry_entity_count, sizeof(LMEntityGeometry)));
+	for (int e = 0; e < geometry_entity_count; ++e) {
+		const auto &source = entity_geo[e];
+		auto &target = result->entity_geo[e];
+		target.brush_count = source.brush_count;
+		target.patch_count = source.patch_count;
+		target.brushes = static_cast<LMBrushGeometry *>(calloc(source.brush_count, sizeof(LMBrushGeometry)));
+		for (int b = 0; b < source.brush_count; ++b) {
+			target.brushes[b].face_count = source.brushes[b].face_count;
+			target.brushes[b].faces = static_cast<LMFaceGeometry *>(calloc(source.brushes[b].face_count, sizeof(LMFaceGeometry)));
+			for (int f = 0; f < source.brushes[b].face_count; ++f) {
+				const auto &source_face = source.brushes[b].faces[f];
+				auto &target_face = target.brushes[b].faces[f];
+				target_face.vertex_count = source_face.vertex_count;
+				target_face.index_count = source_face.index_count;
+				target_face.vertices = clone_array(source_face.vertices, source_face.vertex_count);
+				target_face.indices = clone_array(source_face.indices, source_face.index_count);
+			}
+		}
+		target.patches = static_cast<LMPatchGeometry *>(calloc(source.patch_count, sizeof(LMPatchGeometry)));
+		for (int p = 0; p < source.patch_count; ++p) {
+			target.patches[p].vertex_count = source.patches[p].vertex_count;
+			target.patches[p].index_count = source.patches[p].index_count;
+			target.patches[p].vertices = clone_array(source.patches[p].vertices, source.patches[p].vertex_count);
+			target.patches[p].indices = clone_array(source.patches[p].indices, source.patches[p].index_count);
+		}
+	}
+	return result;
 }
 
 void LMMapData::map_data_free_geometry() {

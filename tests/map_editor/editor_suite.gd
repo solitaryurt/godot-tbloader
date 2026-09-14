@@ -451,12 +451,28 @@ func run() -> void:
 	# Fly state and capture exit paths, with native display capture in UI suite.
 	print("TB_UI_STAGE: entities/persistence complete")
 	var camera = ui.camera_view
+	checks.check(camera.crosshair != null and camera.crosshair.get_child_count() == 4 and camera.crosshair.is_visible_in_tree(), "active map camera displays a centered crosshair")
+	var target_brush: Dictionary = ui.session.draw_data()[0]
+	var target_center: Vector3 = camera.transform_map(target_brush.aabb_min + (target_brush.aabb_max - target_brush.aabb_min) * 0.5)
+	camera.camera.position = target_center + Vector3(0, 0, 5)
+	camera.camera.look_at(target_center)
+	var expected_hits: Array = ui.session.visible_ray_hits(camera.camera_map_position(), camera.camera_map_direction(), 1e30)
+	var left = InputEventMouseButton.new()
+	left.pressed = true
+	left.button_index = MOUSE_BUTTON_LEFT
+	left.position = Vector2.ZERO
+	ui.session.select(PackedInt64Array())
+	camera._gui_input(left)
+	checks.check(not expected_hits.is_empty() and ui.session.selected == PackedInt64Array([expected_hits[0].brush_id]), "camera LMB selects the brush under the crosshair instead of the mouse position")
 	camera.grab_focus()
 	var right = InputEventMouseButton.new()
 	right.pressed = true
 	right.button_index = MOUSE_BUTTON_RIGHT
 	camera._gui_input(right)
 	checks.check(camera.flying, "RMB camera capture toggles on")
+	ui.session.select(PackedInt64Array())
+	camera._input(left)
+	checks.check(ui.session.selected == PackedInt64Array([expected_hits[0].brush_id]), "captured camera LMB selects the brush under the crosshair")
 	var movement_key = InputEventKey.new()
 	movement_key.keycode = KEY_W
 	movement_key.pressed = true
@@ -707,11 +723,15 @@ func automatic_scene_journey(plugin: EditorPlugin) -> void:
 	branch.name = "Maps"
 	automatic.add_child(branch)
 	branch.owner = automatic
+	var nested_branch = Node3D.new()
+	nested_branch.name = "Nested"
+	branch.add_child(nested_branch)
+	nested_branch.owner = automatic
 	var automatic_loader = ClassDB.instantiate("TBLoader")
 	automatic_loader.name = "OnlyLoader"
 	automatic_loader.map_resource = "res://journey-copy.map"
 	automatic_loader.texture_path = "res://textures-other"
-	branch.add_child(automatic_loader)
+	nested_branch.add_child(automatic_loader)
 	automatic_loader.owner = automatic
 	var empty_loader = ClassDB.instantiate("TBLoader")
 	empty_loader.name = "EmptyLoader"
@@ -726,7 +746,7 @@ func automatic_scene_journey(plugin: EditorPlugin) -> void:
 	for frame in 8:
 		await get_tree().process_frame
 	var automatic_root = EditorInterface.get_edited_scene_root()
-	var nested = automatic_root.get_node("Maps/OnlyLoader")
+	var nested = automatic_root.get_node("Maps/Nested/OnlyLoader")
 	var empty = automatic_root.get_node("Maps/EmptyLoader")
 	checks.check(ui.same_path(ui.session.document.get_path(), "res://journey-copy.map"), "Map tab opens the only TBLoader map in the current scene")
 	checks.check(ui.session.loader.get_ref() == nested and ui.valid_binding(), "automatic discovery includes nested TBLoader nodes")
@@ -737,7 +757,7 @@ func automatic_scene_journey(plugin: EditorPlugin) -> void:
 	for frame in 3:
 		await get_tree().process_frame
 	checks.check(ui.scene_tabs.visible and ui.scene_tabs.tab_count == 2, "map property signal exposes a switcher when a second loader becomes mapped")
-	checks.check(ui.scene_tabs.get_tab_title(0) == "Maps/OnlyLoader" and ui.scene_tabs.get_tab_title(1) == "Maps/EmptyLoader", "loader tabs use unambiguous scene-relative node paths")
+	checks.check(ui.scene_tabs.get_tab_title(0) == "Maps/Nested/OnlyLoader" and ui.scene_tabs.get_tab_title(1) == "Maps/EmptyLoader", "loader tabs use unambiguous scene-relative node paths")
 	ui.session.grid = 8
 	ui.scene_tab_changed(1)
 	var second_session = ui.session
@@ -759,7 +779,7 @@ func automatic_scene_journey(plugin: EditorPlugin) -> void:
 	automatic_root.get_node("Maps").name = "RenamedMaps"
 	for frame in 3:
 		await get_tree().process_frame
-	checks.check(ui.scene_tabs.get_tab_title(0) == "RenamedMaps/OnlyLoader" and ui.scene_tabs.get_tab_title(1) == "RenamedMaps/EmptyLoader", "scene ancestor renames refresh node-identifying loader labels")
+	checks.check(ui.scene_tabs.get_tab_title(0) == "RenamedMaps/Nested/OnlyLoader" and ui.scene_tabs.get_tab_title(1) == "RenamedMaps/EmptyLoader", "scene ancestor renames refresh node-identifying loader labels")
 	EditorInterface.open_scene_from_path("res://other-scene.tscn")
 	for frame in 6:
 		await get_tree().process_frame
@@ -1123,13 +1143,13 @@ func precision_journey() -> void:
 	checks.check(scratch.selected.is_empty() and scratch.hidden.is_empty(), "multi reveal leaves no edit targets")
 	ui.set_tool("Brush")
 	scratch.select(PackedInt64Array([one]))
-	# An invalid native vertex deformation must surface through the actual tool.
+	# A nonplanar cuboid corner rebuilds through the actual tool.
 	ui.set_tool("Vertex")
 	var vertex: Vector3 = scratch.brush(one).vertices[0]
 	before = text()
 	count = ui.tokens.size()
 	drag(graph, vertex, vertex + Vector3(16, 16, 0))
-	checks.check(text() == before and ui.tokens.size() == count and ui.notice.text.contains("INVALID_GEOMETRY"), "nonplanar vertex drag is rejected by real component handler")
+	checks.check(text() != before and ui.tokens.size() == count + 1, "nonplanar vertex drag commits rebuilt convex hull")
 	# Expiration on native epoch replacement must release payload and never restore.
 	var old_token: RefCounted = ui.tokens.back()
 	checks.check(old_token.session == scratch, "history token belongs to scratch session")
@@ -1312,6 +1332,11 @@ func grid_draw_batch_regression() -> void:
 	checks.check(graph.gesture == "" and scratch.selected == PackedInt64Array([selected]), "selected and unselected static grid edges redraw together")
 	graph.gesture = "move"
 	graph.delta = Vector3(16, 0, 0)
+	ui.camera_view.preview_grid_move(graph.delta)
+	checks.check(ui.camera_view.grid_move_preview.visible and ui.camera_view.grid_move_preview.get_child_count() == 1,
+		"grid move immediately builds a visible camera preview")
+	checks.check(ui.camera_view.grid_move_preview.position.is_equal_approx(ui.camera_view.transform_map_scaled(graph.delta, ui.camera_view.map_scale())),
+		"camera move preview follows the snapped grid delta")
 	graph.queue_redraw()
 	await get_tree().process_frame
 	RenderingServer.force_draw()
@@ -1323,7 +1348,20 @@ func grid_draw_batch_regression() -> void:
 	await get_tree().process_frame
 	RenderingServer.force_draw()
 	checks.check(graph.gesture == "rotate" and is_equal_approx(graph.rotation_angle, deg_to_rad(45)), "rotate preview redraws with batched ordinary edges")
+	var cached_min: Vector3 = scratch.brush(selected).aabb_min
+	var cached_move: Dictionary = scratch.translate_brushes(PackedInt64Array([selected]), Vector3(16, 0, 0))
+	checks.check(cached_move.ok and scratch._draw_valid and scratch.brush(selected).aabb_min == cached_min + Vector3(16, 0, 0),
+		"whole-brush translation patches the populated session draw cache")
+	checks.check(scratch.brush(selected).topology_revision == scratch.document.get_topology_revision(),
+		"translated draw cache receives the current native topology token")
+	var translated_oracle = ClassDB.instantiate("TBMapDocument")
+	var oracle_loaded: Dictionary = translated_oracle.import_text(scratch.document.export_text().value)
+	checks.check(oracle_loaded.ok and draw_geometry_approx(translated_oracle.get_draw_data(), scratch.document.get_draw_data()),
+		"incremental brush translation matches fully reparsed draw geometry")
+	checks.check(preview_geometry_approx(translated_oracle.get_preview_data(), scratch.document.get_preview_data()),
+		"incremental brush translation matches fully regenerated preview vertices and UVs")
 	graph.cancel()
+	checks.check(not ui.camera_view.grid_move_preview.visible, "ending a grid gesture clears the camera move preview")
 	scratch.save_enabled = false
 	ui.set_session(original)
 	ui.graph_a.grab_focus()
@@ -1331,6 +1369,40 @@ func grid_draw_batch_regression() -> void:
 func click_component(graph: Control, position: Vector3, toggle = false) -> void:
 	mouse(graph, graph.project(position), true, MOUSE_BUTTON_LEFT, toggle)
 	mouse(graph, graph.project(position), false, MOUSE_BUTTON_LEFT, toggle)
+
+func packed_approx(a: Variant, b: Variant) -> bool:
+	if a.size() != b.size():
+		return false
+	for i in a.size():
+		if a[i] is Vector2 or a[i] is Vector3:
+			if not a[i].is_equal_approx(b[i]):
+				return false
+		elif a[i] != b[i]:
+			return false
+	return true
+
+func draw_geometry_approx(a: Array, b: Array) -> bool:
+	if a.size() != b.size():
+		return false
+	for i in a.size():
+		if not a[i].aabb_min.is_equal_approx(b[i].aabb_min) or not a[i].aabb_max.is_equal_approx(b[i].aabb_max):
+			return false
+		if not packed_approx(a[i].vertices, b[i].vertices) or not packed_approx(a[i].edges, b[i].edges) or a[i].edge_vertex_indices != b[i].edge_vertex_indices or a[i].faces.size() != b[i].faces.size():
+			return false
+		for f in a[i].faces.size():
+			if not a[i].faces[f].center.is_equal_approx(b[i].faces[f].center) or not a[i].faces[f].normal.is_equal_approx(b[i].faces[f].normal) or not packed_approx(a[i].faces[f].winding, b[i].faces[f].winding):
+				return false
+	return true
+
+func preview_geometry_approx(a: Array, b: Array) -> bool:
+	if a.size() != b.size():
+		return false
+	for i in a.size():
+		if a[i].texture != b[i].texture or a[i].indices != b[i].indices or a[i].triangle_face_indices != b[i].triangle_face_indices:
+			return false
+		if not packed_approx(a[i].vertices, b[i].vertices) or not packed_approx(a[i].normals, b[i].normals) or not packed_approx(a[i].uvs, b[i].uvs):
+			return false
+	return true
 
 func solid_volume(b: Dictionary) -> float:
 	var center = Vector3.ZERO
@@ -1463,7 +1535,7 @@ func phase5_journey() -> void:
 	key(KEY_Y, true)
 	checks.check(scratch.components.size() == 2 and scratch.components.all(func(c): return scratch.component_valid(c, scratch.brush(id))), "edge batch redo safely remaps edge handles")
 	key(KEY_Z, true)
-	# Reject a nonplanar corner in a cube with no document/cache/history changes.
+	# A single cuboid corner rebuilds the convex hull, splitting nonplanar sides.
 	ui.set_tool("Vertex")
 	mouse(graph, graph.project(Vector3(32, 32, 32)), true, MOUSE_BUTTON_LEFT, false, true)
 	mouse(graph, graph.project(Vector3(32, 32, 32)), false, MOUSE_BUTTON_LEFT, false, true)
@@ -1480,7 +1552,9 @@ func phase5_journey() -> void:
 	var revision: int = doc.get_revision()
 	count = ui.tokens.size()
 	drag(graph, Vector3(64, 64, 0), Vector3(80, 80, 0))
-	checks.check(text() == before and doc.get_revision() == revision and ui.tokens.size() == count and ui.notice.text.contains("INVALID_GEOMETRY"), "nonplanar single quad corner rejected atomically")
+	checks.check(text() != before and Array(scratch.brush(id).vertices).any(func(point): return point.x == 80 and point.y == 80) and doc.get_revision() > revision and ui.tokens.size() == count + 1, "single quad corner rebuilds and commits convex hull")
+	key(KEY_Z, true)
+	checks.check(text() == before, "single-corner hull edit undo restores brush")
 	# A valid first brush and invalid second brush must both remain untouched.
 	var second: int = doc.create_cuboid(Vector3(128, 0, 0), Vector3(192, 64, 64), "baseline/checker").value
 	scratch.select(PackedInt64Array([id, second]))
@@ -1492,7 +1566,7 @@ func phase5_journey() -> void:
 	revision = doc.get_revision()
 	count = ui.tokens.size()
 	drag(graph, Vector3(64, 64, 32), Vector3(80, 80, 32))
-	checks.check(text() == before and doc.get_revision() == revision and ui.tokens.size() == count and scratch.components.size() == 2, "invalid later brush leaves entire selected group and history intact")
+	checks.check(text() != before and doc.get_revision() > revision and ui.tokens.size() == count + 1 and scratch.components.size() == 2, "multi-brush component group rebuilds every convex hull atomically")
 	scratch.restore(baseline)
 	# Triangular incident faces permit constrained single and grouped vertex edits.
 	doc.clip_brushes(PackedInt64Array([id]), Vector3(64, 0, 0), Vector3(0, 0, 64), Vector3(0, 64, 0), false)

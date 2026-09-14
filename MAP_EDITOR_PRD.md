@@ -580,7 +580,7 @@ for brush B in selection:
 | Clone nudge | One grid step on active view nDim1 after Space clone |
 | Delete key | Delete / Backspace only (not Z) |
 | Rebuild on save | On for a valid binding after save/build integration gate passes |
-| Component vertex move | Shared-vertex/incident-face mapping; accept only validated planar convex results. Never derive a face blindly from its first three moved vertices. Reject unsupported deformation with an explanatory diagnostic. |
+| Component vertex move | Rebuild the convex hull of moved and untouched points, merging coplanar facets and preserving source-face material metadata; reject degenerate or unbounded results. |
 | Prism axis | Hidden axis of the last focused graph view |
 
 ---
@@ -662,7 +662,7 @@ Exit gate:
 - Clip/flip retain the expected half; entirely-front/back, coplanar, tangent, near-degenerate, and multi-brush cases have explicit tested outcomes. Undo restores both topology and selection.
 - For N=3 through 9 on each axis, a prism has N side faces plus two caps, expected axis/depth, valid windings, and a valid round-trip.
 - Assigning a texture to one face leaves every other face unchanged.
-- Vertex/edge moves use incident topology and reject nonplanar, inverted, unbounded, or zero-volume results atomically. Include valid constrained deformations and rejected single-corner quad deformations; do not claim arbitrary mesh modeling support.
+- Vertex/edge moves rebuild a validated convex hull, adding or removing supporting planes when old polygons become nonplanar. Include single-corner cuboid deformation plus degenerate, unbounded, and zero-volume rejection; do not claim concave mesh modeling support.
 
 ### Phase 6 — Display-backed acceptance and handoff
 

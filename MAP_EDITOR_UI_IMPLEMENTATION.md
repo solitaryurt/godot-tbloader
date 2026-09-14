@@ -297,8 +297,8 @@ previous output. The journey supplies `fixtures/info_player_start.tscn` delibera
 ## Remaining acceptance / limitations
 
 - Resize/component drag previews show the drag reference rather than rebuilding a
-  live hull. Geometry is validated on release; arbitrary nonplanar mesh deformation
-  is intentionally rejected. General three-point placement across graph panes is
+  live hull. Geometry is rebuilt as a convex hull and validated on release; concave
+  mesh deformation remains unsupported. General three-point placement across graph panes is
   not implemented (the Phase 5 exit gate exercises the usable two-point 2D tool).
 - Brush clipboard follows the native API (point-only clipboard unsupported).
 - Patch primitives persist natively but have no graph/camera drawing or editing.
