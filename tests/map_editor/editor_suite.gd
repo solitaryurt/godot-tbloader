@@ -164,6 +164,11 @@ func run() -> void:
 	ui.apply_layout(3)
 	checks.check(ui.camera_view.get_parent() == ui.view_slots[0] and ui.visible_graphs().size() == 2, "layout changes restore camera-left three-view arrangement")
 	checks.check(ui.camera_view.find_children("FrameSelection", "Button", true, false).size() == 1 and ui.graph_a.find_children("FrameSelection", "Button", true, false).size() == 1, "camera and grid panes expose compact frame buttons")
+	checks.check(ui.camera_view.find_children("BuiltAppearance", "Button", true, false).size() == 1
+		and ui.camera_view.built_appearance_button.toggle_mode and not ui.camera_view.built_appearance_button.button_pressed,
+		"camera exposes a local Built appearance toggle which defaults off")
+	checks.check(ui.camera_view.preview_world_environment.environment.background_mode == Environment.BG_COLOR,
+		"camera uses its studio environment when the active document has no bound scene sky")
 	checks.check(ui.camera_view.find_child("FrameSelection", true, false).icon != null and ui.graph_a.find_child("FrameSelection", true, false).icon != null,
 		"camera and grid frame-selection buttons use the custom frame icon")
 	checks.check(ui.camera_view.find_child("FrameSelection", true, false).anchor_left == 1.0
@@ -845,8 +850,8 @@ func camera_marker_regression() -> void:
 	var preview_sentinel = Node3D.new()
 	camera_view.map_geometry.add_child(preview_sentinel)
 	camera_view.camera.position += Vector3(1, 2, 3)
-	camera_view._process(0)
-	checks.check(graph.camera_position.is_equal_approx(Vector3(7, 3, 5) * camera_view.map_scale()) and ui.graph_b.camera_position.is_equal_approx(graph.camera_position), "camera movement updates every graph marker on the camera frame")
+	camera_view.camera_transform_changed()
+	checks.check(graph.camera_position.is_equal_approx(Vector3(7, 3, 5) * camera_view.map_scale()) and ui.graph_b.camera_position.is_equal_approx(graph.camera_position), "camera movement updates every graph marker from the movement event")
 	checks.check(camera_updates.size() == 2, "camera movement emits one graph update")
 	checks.check(preview_sentinel.get_parent() == camera_view.map_geometry, "camera marker update leaves map geometry untouched")
 	camera_view.map_geometry.remove_child(preview_sentinel)
@@ -863,6 +868,18 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	point_prefab.free()
 	var source = Node3D.new()
 	source.name = "MapJourney"
+	var source_world_environment := WorldEnvironment.new()
+	source_world_environment.name = "WorldEnvironment"
+	source_world_environment.environment = Environment.new()
+	source_world_environment.environment.background_mode = Environment.BG_SKY
+	source_world_environment.environment.sky = Sky.new()
+	source_world_environment.environment.sky.sky_material = ProceduralSkyMaterial.new()
+	source_world_environment.environment.background_energy_multiplier = 1.25
+	source_world_environment.environment.ambient_light_source = Environment.AMBIENT_SOURCE_BG
+	source_world_environment.environment.ambient_light_sky_contribution = 0.8
+	source_world_environment.environment.reflected_light_source = Environment.REFLECTION_SOURCE_BG
+	source.add_child(source_world_environment)
+	source_world_environment.owner = source
 	for name_value in ["BoundLoader", "OtherLoader"]:
 		var loader = ClassDB.instantiate("TBLoader")
 		loader.name = name_value
@@ -893,6 +910,57 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	checks.check(not ui.loader_actions.BindLoader.disabled, "Map Bind enables promptly for the selected TBLoader")
 	ui.bind_selected()
 	checks.check(ui.session.loader.get_ref() == loader and ui.valid_binding() and not ui.loader_actions.DetachLoader.disabled and not ui.loader_actions.UpdateLoaderPath.disabled and not ui.loader_actions.BuildMeshes.disabled and not ui.rebuild_on_save.disabled, "explicit Bind loads the document and enables bound actions")
+	var source_environment: Environment = root.get_node("WorldEnvironment").environment
+	ui.camera_view.sync_scene_environment(true)
+	var preview_environment: Environment = ui.camera_view.preview_world_environment.environment
+	checks.check(loader.get_world_3d().environment == source_environment, "bound loader world exposes the effective scene environment")
+	checks.check(preview_environment != source_environment and preview_environment.sky == source_environment.sky, "camera owns its environment and shares the effective scene sky read-only")
+	checks.check(is_equal_approx(preview_environment.background_energy_multiplier, 1.25), "camera copies scene sky background energy")
+	checks.check(preview_environment.ambient_light_source == Environment.AMBIENT_SOURCE_BG, "camera copies sky ambient-light source")
+	checks.check(is_equal_approx(preview_environment.ambient_light_sky_contribution, 0.8), "camera copies sky ambient contribution")
+	checks.check(preview_environment.reflected_light_source == Environment.REFLECTION_SOURCE_BG, "camera copies sky reflected-light source for PBR")
+	var preview_geometry_ids: Array = ui.camera_view.map_geometry.get_children().map(func(node): return node.get_instance_id())
+	ui.camera_view.environment_resource_changed()
+	ui.camera_view.sync_scene_environment()
+	checks.check(ui.camera_view.map_geometry.get_children().map(func(node): return node.get_instance_id()) == preview_geometry_ids,
+		"environment refresh leaves camera geometry untouched")
+	checks.check(loader.has_method("build_visual_preview_checked"), "native checked visual preview is available")
+	ui.camera_view.set_built_appearance(true)
+	checks.check(ui.camera_view.built_preview_valid and ui.camera_view.built_geometry.visible and not ui.camera_view.map_geometry.visible,
+		"Built appearance atomically replaces authoring visuals after a successful build")
+	var built_meshes: Array = ui.camera_view.built_geometry.find_children("*", "MeshInstance3D", true, false)
+	checks.check(not built_meshes.is_empty() and ui.camera_view.built_geometry.find_children("*", "CollisionShape3D", true, false).is_empty()
+		and ui.camera_view.built_geometry.find_children("*", "Area3D", true, false).is_empty(),
+		"Built appearance contains visual meshes without collision or gameplay nodes")
+	checks.check(built_meshes.all(func(node): return node.owner == null and node.mesh.get_surface_count() > 0),
+		"Built appearance output is ownerless and contains generated surfaces")
+	checks.check(built_meshes.all(func(node):
+		for surface in node.mesh.get_surface_count():
+			var arrays: Array = node.mesh.surface_get_arrays(surface)
+			if arrays[Mesh.ARRAY_TANGENT].size() != arrays[Mesh.ARRAY_VERTEX].size() * 4:
+				return false
+		return true), "Built appearance supplies tangent-space data for PBR materials")
+	var built_ids: Array = built_meshes.map(func(node): return node.get_instance_id())
+	var invalid_preview: Dictionary = loader.build_visual_preview_checked(null, ui.camera_view.built_geometry)
+	checks.check(not invalid_preview.ok and invalid_preview.error.code == "INVALID_ARGUMENT"
+		and ui.camera_view.built_geometry.find_children("*", "MeshInstance3D", true, false).map(func(node): return node.get_instance_id()) == built_ids,
+		"invalid visual preview generation preserves the exact previous target")
+	var collision_only_document = ClassDB.instantiate("TBMapDocument")
+	checks.check(collision_only_document.load_map("res://fixtures/classic_cube.map").ok, "collision-only preview fixture loads")
+	var collision_brush: int = collision_only_document.get_draw_data()[0].id
+	checks.check(collision_only_document.group_brushes(PackedInt64Array([collision_brush]), "area").ok, "collision-only preview fixture groups its brush")
+	var collision_only_target := Node3D.new()
+	var collision_only_preview: Dictionary = loader.build_visual_preview_checked(collision_only_document, collision_only_target)
+	checks.check(collision_only_preview.ok and collision_only_target.find_children("*", "MeshInstance3D", true, false).is_empty(),
+		"Built appearance omits common collision-only entity geometry")
+	collision_only_target.free()
+	ui.camera_view.camera.position += Vector3.ONE
+	ui.camera_view.refresh()
+	checks.check(ui.camera_view.built_geometry.find_children("*", "MeshInstance3D", true, false).map(func(node): return node.get_instance_id()) == built_ids,
+		"camera movement reuses cached built geometry")
+	ui.camera_view.set_built_appearance(false)
+	checks.check(ui.camera_view.map_geometry.visible and not ui.camera_view.built_geometry.visible,
+		"disabling Built appearance restores authoring geometry")
 	var bound_session = ui.session
 	var bound_session_count = ui.sessions.size()
 	plugin.map_control.get_child(2).pressed.emit()
@@ -919,6 +987,23 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	checks.check(not loader.has_node("PreviousOutput") and other.has_node("PreviousOutput"), "bake touches only bound loader")
 	checks.check(ui.session.baked_text == text() and ui.status.text.contains("meshes current"), "saved/build state independently reported")
 	checks.check(not loader.find_children("*", "MeshInstance3D", true, false).is_empty(), "real baked mesh output")
+	var baked_meshes: Array = loader.find_children("*", "MeshInstance3D", true, false)
+	checks.check(built_meshes.size() == baked_meshes.size(), "built camera and scene bake create the same visual mesh count")
+	for mesh_index in mini(built_meshes.size(), baked_meshes.size()):
+		var preview_mesh: MeshInstance3D = built_meshes[mesh_index]
+		var baked_mesh: MeshInstance3D = baked_meshes[mesh_index]
+		checks.check(preview_mesh.transform == baked_mesh.transform and preview_mesh.get_parent().transform == baked_mesh.get_parent().transform,
+			"built camera transforms match bake %d" % mesh_index)
+		checks.check(preview_mesh.layers == baked_mesh.layers, "built camera layers match bake %d" % mesh_index)
+		checks.check(preview_mesh.gi_mode == baked_mesh.gi_mode, "built camera GI mode matches bake %d" % mesh_index)
+		checks.check(preview_mesh.mesh.get_surface_count() == baked_mesh.mesh.get_surface_count(),
+			"built camera surface count matches bake %d" % mesh_index)
+		for surface in mini(preview_mesh.mesh.get_surface_count(), baked_mesh.mesh.get_surface_count()):
+			var preview_arrays: Array = preview_mesh.mesh.surface_get_arrays(surface)
+			var baked_arrays: Array = baked_mesh.mesh.surface_get_arrays(surface)
+			for array_index in [Mesh.ARRAY_VERTEX, Mesh.ARRAY_NORMAL, Mesh.ARRAY_TANGENT, Mesh.ARRAY_TEX_UV, Mesh.ARRAY_TEX_UV2, Mesh.ARRAY_INDEX]:
+				checks.check(preview_arrays[array_index] == baked_arrays[array_index],
+					"built camera array %d matches bake mesh %d surface %d" % [array_index, mesh_index, surface])
 	checks.check(not loader.find_children("*", "CollisionShape3D", true, false).is_empty(), "real baked collision output")
 	checks.check(ui.camera_view.triangle_count == 0 and not hidden_ids.is_empty(), "bake retains brushes hidden from editor preview")
 	ui.session.hide_selection(true)
@@ -1277,7 +1362,7 @@ func resolver_regression(plugin: EditorPlugin) -> void:
 		checks.check(ui.bake(), "resolver parity checked bake %d" % index)
 		var signature = mesh_signature(loader)
 		checks.check(signature[0][5] == native.resource_path, "baked material resolves same resource as preview %d" % index)
-		checks.check(mesh_vertex_samples(loader) == mesh_vertex_samples(ui.camera_view.geometry), "camera/bake vertex-normal-UV parity for resolver %d" % index)
+		checks.check(mesh_vertex_samples(loader) == mesh_vertex_samples(ui.camera_view.map_geometry), "camera/bake vertex-normal-UV parity for resolver %d" % index)
 		signatures.append(signature)
 	checks.check(signatures[0] == signatures[2] and signatures[0] != signatures[1], "A-B-A baked mesh UV/material parity restored")
 	ui.configure_browser("res://textures-other")

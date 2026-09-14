@@ -53,10 +53,13 @@ public:
 
 public:
 	Builder(TBLoader* loader, Node3D* parent = nullptr);
+	Builder(TBLoader* loader, Node3D* parent, std::shared_ptr<LMMapData> map);
 	~Builder();
 
 	Dictionary load_map(const String& path);
+	bool prepare_map_data();
 	bool build_map();
+	bool build_visual_map();
 	Dictionary resolve_material(const String& token);
 
 	Node* build_worldspawn(int idx, LMEntity& ent, bool collision);

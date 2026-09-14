@@ -22,6 +22,7 @@ class TBMapDocumentState : public RefCounted {
 	std::shared_ptr<const std::string> canonical;
 	Dictionary texture_sizes;
 	int64_t epoch = 0;
+	int64_t state_generation = 0;
 
 protected:
 	static void _bind_methods();
@@ -39,7 +40,7 @@ class TBMapDocument : public RefCounted {
 	std::shared_ptr<const std::string> canonical = std::make_shared<const std::string>();
 	std::string baseline, disk_bytes;
 	bool has_baseline = false;
-	int64_t epoch = 0, revision = 0, next_id = 1, topology = 0;
+	int64_t epoch = 0, revision = 0, next_id = 1, topology = 0, state_generation = 0, next_state_generation = 0;
 	std::unordered_map<int64_t, char> issued_ids;
 	struct LiveLocation {
 		char kind;
@@ -50,12 +51,18 @@ class TBMapDocument : public RefCounted {
 	std::unordered_map<int64_t, LiveLocation> live_ids;
 	struct SpatialIndex;
 	mutable std::shared_ptr<SpatialIndex> spatial_index;
+	mutable std::vector<std::shared_ptr<SpatialIndex>> spatial_history;
 	struct PreviewCache;
 	std::shared_ptr<PreviewCache> preview_cache;
+	std::vector<std::shared_ptr<PreviewCache>> preview_history;
 	Dictionary texture_sizes;
 	void rebuild_live_index();
 	void invalidate_spatial_index();
 	void invalidate_preview_cache();
+	void retain_spatial_index();
+	void restore_spatial_index();
+	void retain_preview_cache();
+	void restore_preview_cache();
 	const SpatialIndex &get_spatial_index() const;
 	const LiveLocation *live_location(int64_t id, char kind) const;
 	LMEditEntity *edit_entity(LMMapEdit &edit, int64_t id) const;
@@ -63,6 +70,8 @@ class TBMapDocument : public RefCounted {
 	Dictionary prepare_edit_candidate(const LMMapEdit &edit, const StringName &operation, std::shared_ptr<LMMapData> &candidate, std::string &normalized, int64_t &high) const;
 	Dictionary finish_edit(const LMMapEdit &edit, const StringName &operation, const Variant &value = Variant());
 	Dictionary preview_edit(const LMMapEdit &edit, const StringName &operation, const Dictionary &sources) const;
+	void stage_preview_brushes(const PackedInt64Array &ids, LMMapEdit &edit) const;
+	Dictionary preview_fragments(const LMMapEdit &before, const LMMapEdit &after, const StringName &operation, const Dictionary &sources) const;
 	Dictionary check_brushes(const PackedInt64Array &ids, const StringName &operation) const;
 	Dictionary check_face(int64_t id, int face, int64_t token, const StringName &operation) const;
 	Dictionary move_components(const Array &components, Vector3 delta, const StringName &operation);
@@ -74,7 +83,8 @@ class TBMapDocument : public RefCounted {
 	Dictionary replace_text(const std::string &text, const StringName &operation, const String &new_path, bool saved);
 	Dictionary prepare(const std::string &text, std::shared_ptr<LMMapData> &candidate, const StringName &operation, const String &error_path, std::string *normalized = nullptr) const;
 	void assign_ids(LMMapData &candidate);
-	void commit(std::shared_ptr<LMMapData> candidate, const std::string &text, bool was_dirty);
+	void commit(std::shared_ptr<LMMapData> candidate, const std::string &text, bool was_dirty, int64_t restored_generation = 0);
+	void commit(std::shared_ptr<LMMapData> candidate, std::shared_ptr<const std::string> text, bool was_dirty, int64_t restored_generation = 0);
 	Dictionary identities(const LMMapData &data) const;
 	bool apply_identities(LMMapData &data, const Dictionary &ids) const;
 	static Dictionary success(bool changed = false, const Variant &value = Variant());
@@ -101,12 +111,15 @@ public:
 	int64_t get_revision() const { return revision; }
 	int64_t get_topology_revision() const { return topology; }
 	int64_t get_epoch() const { return epoch; }
+	int64_t get_state_generation() const { return state_generation; }
+	std::shared_ptr<LMMapData> clone_map_for_build() const { return map->deep_clone(); }
 	PackedStringArray get_texture_names() const;
 	// Copied ownership/property data for the future N inspector. Primitive IDs use
 	// the same source order and schema as snapshot identities; no native pointers.
 	Array get_entities() const;
 	Array get_draw_data() const;
 	Array get_preview_data() const;
+	PackedVector2Array get_face_preview_uvs(const Array &targets, const String &texture) const;
 	Dictionary prepare_preview_chunks(double scale, const PackedInt64Array &hidden_ids, int filter_mask, int chunk_triangles = 2048, double chunk_size = 64.0);
 	Dictionary get_preview_chunk(const String &chunk_id) const;
 	PackedInt64Array query_brushes_2d(int hidden_axis, Vector3 mins, Vector3 maxs) const;
@@ -125,6 +138,7 @@ public:
 	Dictionary set_face_texture(int64_t id, int face, const String &name, int64_t topology_revision);
 	Dictionary get_face_uv(int64_t id, int face, int64_t topology_revision) const;
 	Dictionary set_face_uv(int64_t id, int face, Vector2 shift, double rotation, Vector2 scale, int64_t topology_revision);
+	Dictionary apply_face_edits(const Array &edits);
 	Dictionary set_texture_sizes(const Dictionary &sizes);
 	Dictionary export_selection(const PackedInt64Array &ids) const;
 	Dictionary import_selection(const String &text);

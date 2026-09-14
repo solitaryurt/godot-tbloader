@@ -44,6 +44,8 @@ var dense_cache_selection_generation = -1
 var dense_cache_orientation = -1
 var dense_unselected_edges := PackedVector2Array()
 var dense_selected_edges := PackedVector2Array()
+var dense_cache_history: Dictionary = {}
+var dense_cache_history_order: Array[String] = []
 var orientation_gizmo: Control
 var camera_views: Array[WeakRef] = []
 const DENSE_EDGE_THRESHOLD = 1024
@@ -379,25 +381,26 @@ func map_edge_point(point: Vector3) -> Vector2:
 
 func current_dense_edge_key() -> String:
 	return "%d:%d:%d:%d:%d" % [host.session.document.get_instance_id(),
-		host.session.document.get_revision(), host.session.visibility_generation,
+		host.session.document.get_state_generation(), host.session.visibility_generation,
 		host.session.selection_generation, orientation]
 
 func dense_edge_cache_matches() -> bool:
 	return (dense_cache_document_id == host.session.document.get_instance_id()
-		and dense_cache_revision == host.session.document.get_revision()
+		and dense_cache_revision == host.session.document.get_state_generation()
 		and dense_cache_visibility_generation == host.session.visibility_generation
 		and dense_cache_selection_generation == host.session.selection_generation
 		and dense_cache_orientation == orientation)
 
 func capture_dense_edge_cache_state() -> void:
 	dense_cache_document_id = host.session.document.get_instance_id()
-	dense_cache_revision = host.session.document.get_revision()
+	dense_cache_revision = host.session.document.get_state_generation()
 	dense_cache_visibility_generation = host.session.visibility_generation
 	dense_cache_selection_generation = host.session.selection_generation
 	dense_cache_orientation = orientation
 	dense_edge_cache_key = current_dense_edge_key()
 
 func rebuild_dense_edge_cache() -> void:
+	retain_dense_edge_cache()
 	dense_unselected_edges.clear()
 	dense_selected_edges.clear()
 	for brush in host.session.draw_data():
@@ -412,8 +415,29 @@ func rebuild_dense_edge_cache() -> void:
 				dense_unselected_edges.append(map_edge_point(brush.edges[i + 1]))
 	capture_dense_edge_cache_state()
 
+func retain_dense_edge_cache() -> void:
+	if dense_cache_revision < 0 or dense_edge_cache_key.is_empty():
+		return
+	if dense_cache_history.has(dense_edge_cache_key):
+		dense_cache_history_order.erase(dense_edge_cache_key)
+	dense_cache_history[dense_edge_cache_key] = [dense_unselected_edges, dense_selected_edges]
+	dense_cache_history_order.append(dense_edge_cache_key)
+	while dense_cache_history_order.size() > 2:
+		dense_cache_history.erase(dense_cache_history_order.pop_front())
+
+func restore_dense_edge_cache() -> bool:
+	var key := current_dense_edge_key()
+	if not dense_cache_history.has(key):
+		return false
+	var cached: Array = dense_cache_history[key]
+	retain_dense_edge_cache()
+	dense_unselected_edges = cached[0]
+	dense_selected_edges = cached[1]
+	capture_dense_edge_cache_state()
+	return true
+
 func draw_dense_edges(dynamic_selection: bool) -> void:
-	if not dense_edge_cache_matches():
+	if not dense_edge_cache_matches() and not restore_dense_edge_cache():
 		rebuild_dense_edge_cache()
 	var a := axes()
 	var canvas_origin: Vector2 = size * 0.5 + Vector2(-origin[a.x], origin[a.y]) * zoom
@@ -427,6 +451,8 @@ func draw_dense_edges(dynamic_selection: bool) -> void:
 func apply_dense_translation(movement: Vector3) -> void:
 	if dense_cache_revision < 0:
 		return
+	retain_dense_edge_cache()
+	dense_selected_edges = dense_selected_edges.duplicate()
 	var projected := map_edge_point(movement)
 	for i in dense_selected_edges.size():
 		dense_selected_edges[i] += projected

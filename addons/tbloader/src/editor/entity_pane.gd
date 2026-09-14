@@ -88,7 +88,14 @@ func set_selected_entity_id(entity_id: int) -> bool:
 	return false
 
 func _session_changed() -> void:
-	refresh()
+	if session != null and session.change_kind in ["selection", "visibility", "brush_translation", "status"]:
+		refresh_selection()
+	else:
+		refresh()
+
+func refresh_selection() -> void:
+	if group_button != null:
+		group_button.disabled = session == null or session.selected.is_empty()
 
 func _build_ui() -> void:
 	name = "EntityPane"

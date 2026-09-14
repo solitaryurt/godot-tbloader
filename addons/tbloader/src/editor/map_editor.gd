@@ -691,8 +691,7 @@ func restore_workspace_state(state: Dictionary) -> void:
 			camera_view.camera.transform = state.camera_transform
 			camera_view.orbit_target = state.get("camera_target", camera_view.orbit_target)
 			camera_view.orbit_distance = float(state.get("camera_distance", camera_view.orbit_distance))
-			camera_view.sync_camera_marker(true)
-			camera_view.update_orientation_gizmo()
+			camera_view.camera_transform_changed()
 	else:
 		for index in mini(slot_views.size(), slots.size()):
 			var pane: Control = slot_views[index]
@@ -707,8 +706,7 @@ func restore_workspace_state(state: Dictionary) -> void:
 				pane.camera.transform = pane_state.camera_transform
 				pane.orbit_target = pane_state.get("camera_target", pane.orbit_target)
 				pane.orbit_distance = float(pane_state.get("camera_distance", pane.orbit_distance))
-				pane.sync_camera_marker(true)
-				pane.update_orientation_gizmo()
+				pane.camera_transform_changed()
 	refresh()
 
 func file_menu_command(id: int) -> void:
@@ -744,7 +742,11 @@ func set_session(value: RefCounted) -> void:
 
 func _session_changed(origin: RefCounted) -> void:
 	if origin == session:
-		if origin.change_kind == "brush_translation":
+		if origin.change_kind == "selection":
+			refresh_selection()
+		elif origin.change_kind == "visibility":
+			refresh_visibility()
+		elif origin.change_kind == "brush_translation":
 			for graph in graphs:
 				graph.queue_redraw()
 			for camera in cameras:
@@ -889,6 +891,28 @@ func refresh() -> void:
 	if inspector != null and inspector.visible:
 		fallback_entity_pane.refresh()
 
+func refresh_selection() -> void:
+	for graph in graphs:
+		graph.queue_redraw()
+	for camera in cameras:
+		camera.refresh_selection()
+	refresh_status()
+	refresh_uv()
+	sync_material_selection()
+	for pane in entity_panes:
+		pane.refresh_selection()
+	if inspector != null and inspector.visible:
+		fallback_entity_pane.refresh_selection()
+
+func refresh_visibility() -> void:
+	for graph in graphs:
+		graph.queue_redraw()
+	for camera in cameras:
+		camera.refresh()
+	refresh_status()
+	refresh_uv()
+	sync_material_selection()
+
 func set_tool(value: String) -> void:
 	var leaving_cut := tool == "Cut" and value != "Cut"
 	cancel_interaction()
@@ -897,9 +921,13 @@ func set_tool(value: String) -> void:
 	tool = value
 	if session != null:
 		session.components.clear()
+		session._sync_selection_generation()
 	for key in tool_buttons:
 		tool_buttons[key].button_pressed = key == tool
-	refresh()
+	if session != null:
+		session.notify_changed("selection")
+	else:
+		refresh()
 
 func route_key(event: InputEventKey, graph: Control) -> bool:
 	if not event.pressed or event.echo or cameras.any(func(camera): return camera.flying):
@@ -1026,7 +1054,7 @@ func clone_selection(axis: int) -> void:
 			session.select(result.value)
 			var movement = Vector3.ZERO
 			movement[axis] = session.grid
-			return session.document.translate_brushes(session.selected, movement)
+			return session.translate_brushes(session.selected, movement)
 		return result)
 
 func paste_text(text: String) -> void:
@@ -1225,17 +1253,11 @@ func assign_texture() -> void:
 	session.transact("Assign map material", func():
 		if not component_mode:
 			return session.document.set_brush_texture(session.selected, session.texture)
+		var edits: Array = []
 		for target in targets:
-			var validation: Dictionary = session.document.get_face_uv(target.brush_id, target.index, target.topology_revision)
-			if not validation.ok:
-				return validation
-		for target in targets:
-			var brush: Dictionary = session.brush(target.brush_id)
-			var result: Dictionary = session.document.set_face_texture(target.brush_id, target.index, session.texture, brush.topology_revision)
-			if not result.ok:
-				return result
-		session.rebind_components() # Surface edits preserve face order and geometry.
-		return session.success())
+			edits.append({"brush_id": target.brush_id, "face": target.index,
+				"topology_revision": target.topology_revision, "texture": session.texture})
+		return session.apply_face_edits(edits))
 	refresh_materials()
 
 func refresh_uv() -> void:
@@ -1287,19 +1309,7 @@ func face_texture(target: Dictionary) -> String:
 	return ""
 
 func uv_preview(targets: Array, texture: String) -> Dictionary:
-	var triangles := PackedVector2Array()
-	for surface in session.document.get_preview_data():
-		if surface.texture != texture:
-			continue
-		var indices: PackedInt32Array = surface.indices
-		for triangle in surface.triangle_brush_ids.size():
-			var selected := targets.any(func(target):
-				return target.brush_id == surface.triangle_brush_ids[triangle] and target.index == surface.triangle_face_indices[triangle])
-			if not selected:
-				continue
-			for corner in 3:
-				var uv: Vector2 = surface.uvs[indices[triangle * 3 + corner]]
-				triangles.append(Vector2(fposmod(uv.x, 1.0), fposmod(uv.y, 1.0)))
+	var triangles: PackedVector2Array = session.document.get_face_preview_uvs(targets, texture) if not targets.is_empty() and not texture.is_empty() else PackedVector2Array()
 	var resolved := resolve_token(texture) if not texture.is_empty() else {}
 	var material: Material = resolved.get("material")
 	var preview_texture: Texture2D
@@ -1322,17 +1332,12 @@ func apply_uv() -> void:
 func apply_uv_transform(shift: Vector2, rotation: float, scale_value: Vector2) -> void:
 	var targets = face_targets()
 	session.transact("Edit map UV", func():
+		var edits: Array = []
 		for target in targets:
-			var validation: Dictionary = session.document.get_face_uv(target.brush_id, target.index, target.topology_revision)
-			if not validation.ok:
-				return validation
-		for target in targets:
-			var revision: int = session.brush(target.brush_id).topology_revision
-			var result: Dictionary = session.document.set_face_uv(target.brush_id, target.index, shift, rotation, scale_value, revision)
-			if not result.ok:
-				return result
-		session.rebind_components()
-		return session.success())
+			edits.append({"brush_id": target.brush_id, "face": target.index,
+				"topology_revision": target.topology_revision,
+				"uv": {"shift": shift, "rotation": rotation, "scale": scale_value}})
+		return session.apply_face_edits(edits))
 
 func uv_texture_requested(token: String) -> void:
 	texture_field.text = token

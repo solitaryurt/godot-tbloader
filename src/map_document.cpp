@@ -170,18 +170,27 @@ LMEditEntity *TBMapDocument::edit_entity(LMMapEdit &edit, int64_t id) const {
 }
 LMEditPrimitive *TBMapDocument::edit_brush(LMMapEdit &edit, int64_t id) const {
 	const auto *location = live_location(id, 'b');
-	if (!location || location->entity >= static_cast<int>(edit.entities.size())) return nullptr;
-	auto &primitives = edit.entities[location->entity].primitives;
-	return location->primitive < static_cast<int>(primitives.size()) && !primitives[location->primitive].patch && primitives[location->primitive].id == id ? &primitives[location->primitive] : nullptr;
+	if (!location) return nullptr;
+	if (location->entity < static_cast<int>(edit.entities.size())) {
+		auto &primitives = edit.entities[location->entity].primitives;
+		if (location->primitive < static_cast<int>(primitives.size()) && !primitives[location->primitive].patch && primitives[location->primitive].id == id) return &primitives[location->primitive];
+	}
+	return edit.brush(id);
 }
-void TBMapDocument::commit(std::shared_ptr<LMMapData> candidate, const std::string &text, bool was_dirty) {
+void TBMapDocument::commit(std::shared_ptr<LMMapData> candidate, const std::string &text, bool was_dirty, int64_t restored_generation) {
+	commit(std::move(candidate), std::make_shared<const std::string>(text), was_dirty, restored_generation);
+}
+void TBMapDocument::commit(std::shared_ptr<LMMapData> candidate, std::shared_ptr<const std::string> text, bool was_dirty, int64_t restored_generation) {
+	retain_spatial_index();
+	retain_preview_cache();
 	++topology;
 	for (int i = 0; i < candidate->entity_count; ++i) for (int b = 0; b < candidate->entities[i].brush_count; ++b) candidate->entities[i].brushes[b].topology_revision = topology;
 	map = std::move(candidate);
 	rebuild_live_index();
-	invalidate_spatial_index();
-	invalidate_preview_cache();
-	canonical = std::make_shared<const std::string>(text);
+	restore_spatial_index();
+	restore_preview_cache();
+	canonical = std::move(text);
+	state_generation = restored_generation > 0 ? restored_generation : ++next_state_generation;
 	++revision;
 	emit_signal("map_changed", revision);
 	if (was_dirty != is_dirty()) emit_signal("dirty_changed", is_dirty());
@@ -341,6 +350,7 @@ Ref<TBMapDocumentState> TBMapDocument::capture_history_state() const {
 	state->canonical = canonical;
 	state->texture_sizes = texture_sizes;
 	state->epoch = epoch;
+	state->state_generation = state_generation;
 	return state;
 }
 bool TBMapDocument::is_history_state_current(const Ref<TBMapDocumentState> &state) const {
@@ -357,7 +367,7 @@ Dictionary TBMapDocument::restore_history_state(const Ref<TBMapDocumentState> &s
 		if (!bool(result["ok"])) return result;
 		if (!apply_identities(*candidate, identities(*state->map))) return failure("SNAPSHOT_MISMATCH", "History state identities no longer match", "restore_history_state");
 	}
-	commit(candidate, *state->canonical, is_dirty());
+	commit(candidate, state->canonical, is_dirty(), state->state_generation);
 	return success(true);
 }
 Dictionary TBMapDocument::rebuild() {
@@ -413,10 +423,12 @@ void TBMapDocument::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_revision"), &TBMapDocument::get_revision);
 	ClassDB::bind_method(D_METHOD("get_topology_revision"), &TBMapDocument::get_topology_revision);
 	ClassDB::bind_method(D_METHOD("get_epoch"), &TBMapDocument::get_epoch);
+	ClassDB::bind_method(D_METHOD("get_state_generation"), &TBMapDocument::get_state_generation);
 	ClassDB::bind_method(D_METHOD("get_texture_names"), &TBMapDocument::get_texture_names);
 	ClassDB::bind_method(D_METHOD("get_entities"), &TBMapDocument::get_entities);
 	ClassDB::bind_method(D_METHOD("get_draw_data"), &TBMapDocument::get_draw_data);
 	ClassDB::bind_method(D_METHOD("get_preview_data"), &TBMapDocument::get_preview_data);
+	ClassDB::bind_method(D_METHOD("get_face_preview_uvs", "targets", "texture"), &TBMapDocument::get_face_preview_uvs);
 	ClassDB::bind_method(D_METHOD("prepare_preview_chunks", "scale", "hidden_ids", "filter_mask", "chunk_triangles", "chunk_size"), &TBMapDocument::prepare_preview_chunks, DEFVAL(2048), DEFVAL(64.0));
 	ClassDB::bind_method(D_METHOD("get_preview_chunk", "chunk_id"), &TBMapDocument::get_preview_chunk);
 	ClassDB::bind_method(D_METHOD("query_brushes_2d", "hidden_axis", "mins", "maxs"), &TBMapDocument::query_brushes_2d);
@@ -435,6 +447,7 @@ void TBMapDocument::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_face_texture", "id", "face", "name", "topology_revision"), &TBMapDocument::set_face_texture);
 	ClassDB::bind_method(D_METHOD("get_face_uv", "id", "face", "topology_revision"), &TBMapDocument::get_face_uv);
 	ClassDB::bind_method(D_METHOD("set_face_uv", "id", "face", "shift", "rotation", "scale", "topology_revision"), &TBMapDocument::set_face_uv);
+	ClassDB::bind_method(D_METHOD("apply_face_edits", "edits"), &TBMapDocument::apply_face_edits);
 	ClassDB::bind_method(D_METHOD("set_texture_sizes", "sizes"), &TBMapDocument::set_texture_sizes);
 	ClassDB::bind_method(D_METHOD("export_selection", "ids"), &TBMapDocument::export_selection);
 	ClassDB::bind_method(D_METHOD("import_selection", "text"), &TBMapDocument::import_selection);

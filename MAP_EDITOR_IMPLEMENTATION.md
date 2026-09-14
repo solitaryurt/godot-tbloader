@@ -5,6 +5,23 @@ especially §§6–8 and 14–16. **API v1 is frozen and the native operation/qu
 is implemented.** The Phase 2 handoff below adds the N-inspector entity API.
 Changes require updating this document and its consumers together.
 
+## Built appearance preview
+
+The camera now has an optional **Built appearance** mode backed by
+`TBLoader.build_visual_preview_checked(document, target)`. The checked API deep
+clones the current in-memory document, runs the same native geometry/material
+pipeline as a bake, and atomically replaces ownerless visual-only children under
+the camera viewport. Authoring geometry remains available for picking and
+overlays. Collision, gameplay nodes, and arbitrary custom entity scene
+instantiation are deliberately excluded.
+
+The isolated camera world mirrors the effective `WorldEnvironment` sky from the
+bound loader's edited scene into a preview-owned `Environment`. It shares the
+source `Sky` read-only and copies sky background, ambient, and reflected-light
+settings for PBR response. Directional scene lights remain synchronized; the
+studio environment is used when no effective sky exists. GI, probes, local
+lights, camera exposure, fog, and post-processing are not scene-final parity.
+
 ## Phase 0 gate / environment
 
 - [x] Existing extension built before feature changes; bounded `-j2`.

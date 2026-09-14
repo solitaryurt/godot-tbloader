@@ -31,6 +31,26 @@ std::vector<int64_t> unique(const PackedInt64Array &ids) {
 	for (int64_t id : ids) if (seen.insert(id).second) out.push_back(id);
 	return out;
 }
+size_t map_geometry_work(const LMMapData &data) {
+	size_t work = 0;
+	for (int e = 0; e < data.entity_count; ++e) {
+		const auto &entity = data.entities[e];
+		for (int b = 0; b < entity.brush_count; ++b) {
+			const size_t faces = entity.brushes[b].face_count;
+			work += faces * faces * faces;
+		}
+		for (int p = 0; p < entity.patch_count; ++p) work += size_t(entity.patches[p].width) * entity.patches[p].height * 33 * 33;
+	}
+	return work;
+}
+size_t edit_geometry_work(const LMMapEdit &edit) {
+	size_t work = 0;
+	for (const auto &entity : edit.entities) for (const auto &primitive : entity.primitives) if (!primitive.patch) {
+		const size_t faces = primitive.faces.size();
+		work += faces * faces * faces;
+	}
+	return work;
+}
 void move_face(LMEditFace &f, Vector3 delta) {
 	auto &p = f.plane.plane_points;
 	p.v0 = vec3_add(p.v0, native(delta)); p.v1 = vec3_add(p.v1, native(delta)); p.v2 = vec3_add(p.v2, native(delta));
@@ -187,6 +207,48 @@ Dictionary TBMapDocument::preview_edit(const LMMapEdit &edit, const StringName &
 	if (!bool(result["ok"])) return result;
 	return success(false, candidate_draw_data(*candidate, sources));
 }
+
+void TBMapDocument::stage_preview_brushes(const PackedInt64Array &ids, LMMapEdit &edit) const {
+	const auto list = unique(ids);
+	const std::set<int64_t> selected(list.begin(), list.end());
+	for (int e = 0; e < map->entity_count; ++e) {
+		const auto &source = map->entities[e];
+		LMEditEntity entity;
+		entity.id = source.id;
+		for (int k = 0; k < source.property_count; ++k) entity.epairs.emplace_back(source.properties[k].key, source.properties[k].value);
+		for (int k = 0; k < source.primitive_count; ++k) {
+			const auto &primitive = source.primitives[k];
+			if (primitive.is_patch || !selected.count(source.brushes[primitive.index].id)) continue;
+			const auto &brush = source.brushes[primitive.index];
+			LMEditPrimitive staged;
+			staged.id = brush.id;
+			for (int f = 0; f < brush.face_count; ++f) staged.faces.push_back({brush.faces[f], map->textures[brush.faces[f].texture_idx].name});
+			entity.primitives.push_back(std::move(staged));
+		}
+		if (!entity.primitives.empty()) edit.entities.push_back(std::move(entity));
+	}
+}
+
+Dictionary TBMapDocument::preview_fragments(const LMMapEdit &before, const LMMapEdit &after, const StringName &operation, const Dictionary &sources) const {
+	if (after.entities.empty()) return success(false, Array());
+	const std::string old_text = before.text(), new_text = after.text();
+	if (new_text.size() > old_text.size() && new_text.size() - old_text.size() > LMMapParser::MAX_TEXT_BYTES - canonical->size())
+		return failure("LIMIT_EXCEEDED", "Canonical map exceeds 16 MiB", operation, path);
+	const size_t old_work = edit_geometry_work(before), new_work = edit_geometry_work(after), current_work = map_geometry_work(*map);
+	if (new_work > old_work && new_work - old_work > 8000000 - current_work)
+		return failure("LIMIT_EXCEEDED", "Geometry work budget exceeded", operation, path);
+	std::shared_ptr<LMMapData> candidate;
+	Dictionary result = prepare(new_text, candidate, operation, path); if (!bool(result["ok"])) return result;
+	for (int e = 0; e < candidate->entity_count; ++e) {
+		candidate->entities[e].id = after.entities[e].id;
+		for (int k = 0; k < candidate->entities[e].primitive_count; ++k) {
+			const auto &ref = candidate->entities[e].primitives[k];
+			if (ref.is_patch) candidate->entities[e].patches[ref.index].id = after.entities[e].primitives[k].id;
+			else candidate->entities[e].brushes[ref.index].id = after.entities[e].primitives[k].id;
+		}
+	}
+	return success(false, candidate_draw_data(*candidate, sources));
+}
 Dictionary TBMapDocument::check_brushes(const PackedInt64Array &ids, const StringName &operation) const {
 	for (int64_t id : ids) if (!live_location(id, 'b')) {
 		Dictionary r = failure("INVALID_ID", "Unknown brush handle", operation); Dictionary error = r["error"]; error["brush_id"] = id; return r;
@@ -312,10 +374,19 @@ Dictionary TBMapDocument::translate_brushes(const PackedInt64Array &ids, Vector3
 }
 
 Dictionary TBMapDocument::preview_translate_brushes(const PackedInt64Array &ids, Vector3 delta) const {
-	std::shared_ptr<LMMapData> candidate; std::string normalized;
-	auto r = build_translation_candidate(ids, delta, "preview_translate_brushes", candidate, normalized); if (!bool(r["ok"])) return r;
-	Dictionary sources; for (int64_t id : unique(ids)) sources[id] = id;
-	return success(false, candidate_draw_data(*candidate, sources));
+	auto r = check_brushes(ids, "preview_translate_brushes"); if (!bool(r["ok"])) return r;
+	if (!valid(delta)) return failure("INVALID_ARGUMENT", "Invalid translation", "preview_translate_brushes");
+	LMMapEdit edit; stage_preview_brushes(ids, edit); LMMapEdit before = edit; Dictionary sources;
+	for (int64_t id : unique(ids)) {
+		sources[id] = id;
+		if (delta == Vector3()) continue;
+		for (auto &face : edit.brush(id)->faces) {
+			move_face(face, delta);
+			const auto &points = face.plane.plane_points;
+			if (!valid(vector(points.v0)) || !valid(vector(points.v1)) || !valid(vector(points.v2))) return failure("INVALID_ARGUMENT", "Translated brush exceeds finite map bounds", "preview_translate_brushes");
+		}
+	}
+	return preview_fragments(before, edit, "preview_translate_brushes", sources);
 }
 
 Dictionary TBMapDocument::rotate_brushes(const PackedInt64Array &ids, Vector3 pivot, int axis, double radians) {
@@ -334,9 +405,9 @@ Dictionary TBMapDocument::preview_rotate_brushes(const PackedInt64Array &ids, Ve
 	if (!valid(pivot) || axis < 0 || axis > 2 || !std::isfinite(radians) || std::abs(radians) > 1e9)
 		return failure("INVALID_ARGUMENT", "Expected a finite pivot, axis 0..2 and finite angle", "preview_rotate_brushes");
 	radians = std::remainder(radians, 6.28318530717958647692);
-	LMMapEdit edit(*map); Dictionary sources;
+	LMMapEdit edit; stage_preview_brushes(ids, edit); LMMapEdit before = edit; Dictionary sources;
 	for (int64_t id : unique(ids)) { sources[id] = id; if (std::abs(radians) >= 1e-12) lm_edit_rotate_brush(*edit_brush(edit, id), native(pivot), axis, radians); }
-	return preview_edit(edit, "preview_rotate_brushes", sources);
+	return preview_fragments(before, edit, "preview_rotate_brushes", sources);
 }
 Dictionary TBMapDocument::translate_face(int64_t id, int face, Vector3 delta, int64_t topology_revision) {
 	auto r = check_face(id, face, topology_revision, "translate_face"); if (!bool(r["ok"])) return r;
@@ -372,6 +443,65 @@ Dictionary TBMapDocument::set_face_uv(int64_t id, int face, Vector2 shift, doubl
 	LMMapEdit edit(*map); auto &f = edit_brush(edit, id)->faces[face].plane;
 	if (f.is_valve_uv) return failure("UNSUPPORTED_PROJECTION", "Valve projection is read-only", "set_face_uv");
 	f.uv_standard = {shift.x, shift.y}; f.uv_extra = {rotation, scale.x, scale.y}; return finish_edit(edit, "set_face_uv");
+}
+
+Dictionary TBMapDocument::apply_face_edits(const Array &edits) {
+	struct FaceEdit {
+		int64_t id;
+		int face;
+		bool has_texture = false, has_uv = false;
+		std::string texture;
+		Vector2 shift, scale;
+		double rotation = 0;
+	};
+	std::vector<FaceEdit> validated;
+	validated.reserve(edits.size());
+	std::set<std::pair<int64_t, int>> targets;
+	bool changed = false;
+	for (int i = 0; i < edits.size(); ++i) {
+		if (edits[i].get_type() != Variant::DICTIONARY) return failure("INVALID_ARGUMENT", "Expected face edit dictionary", "apply_face_edits");
+		Dictionary item = edits[i];
+		if (!item.has("brush_id") || !item.has("face") || !item.has("topology_revision") ||
+				item["brush_id"].get_type() != Variant::INT || item["face"].get_type() != Variant::INT || item["topology_revision"].get_type() != Variant::INT)
+			return failure("INVALID_ARGUMENT", "Invalid face edit target schema", "apply_face_edits");
+		const int64_t face_value = item["face"];
+		if (face_value < std::numeric_limits<int>::min() || face_value > std::numeric_limits<int>::max()) return failure("INVALID_ARGUMENT", "Invalid face index", "apply_face_edits");
+		FaceEdit edit{int64_t(item["brush_id"]), int(face_value)};
+		auto result = check_face(edit.id, edit.face, item["topology_revision"], "apply_face_edits"); if (!bool(result["ok"])) return result;
+		if (!targets.insert({edit.id, edit.face}).second) return failure("INVALID_ARGUMENT", "Duplicate face edit target", "apply_face_edits");
+		if (item.has("texture")) {
+			if (item["texture"].get_type() != Variant::STRING || !token(String(item["texture"]))) return failure("INVALID_ARGUMENT", "Invalid texture name", "apply_face_edits");
+			edit.has_texture = true; edit.texture = bytes(item["texture"]);
+		}
+		if (item.has("uv")) {
+			if (item["uv"].get_type() != Variant::DICTIONARY) return failure("INVALID_ARGUMENT", "Invalid UV edit schema", "apply_face_edits");
+			Dictionary uv = item["uv"];
+			if (!uv.has("shift") || !uv.has("rotation") || !uv.has("scale") || uv["shift"].get_type() != Variant::VECTOR2 ||
+					(uv["rotation"].get_type() != Variant::FLOAT && uv["rotation"].get_type() != Variant::INT) || uv["scale"].get_type() != Variant::VECTOR2)
+				return failure("INVALID_ARGUMENT", "Invalid UV edit schema", "apply_face_edits");
+			edit.shift = uv["shift"]; edit.rotation = uv["rotation"]; edit.scale = uv["scale"];
+			if (!edit.shift.is_finite() || !edit.scale.is_finite() || !std::isfinite(edit.rotation) || std::abs(edit.rotation) > 1e9 ||
+					std::abs(edit.shift.x) > 1e9 || std::abs(edit.shift.y) > 1e9 || std::abs(edit.scale.x) < 1e-9 || std::abs(edit.scale.y) < 1e-9 ||
+					std::abs(edit.scale.x) > 1e9 || std::abs(edit.scale.y) > 1e9) return failure("INVALID_ARGUMENT", "Invalid UV transform", "apply_face_edits");
+			const auto *location = live_location(edit.id, 'b');
+			if (map->entities[location->entity].brushes[location->index].faces[edit.face].is_valve_uv) return failure("UNSUPPORTED_PROJECTION", "Valve projection is read-only", "apply_face_edits");
+			edit.has_uv = true;
+		}
+		if (!edit.has_texture && !edit.has_uv) return failure("INVALID_ARGUMENT", "Face edit must include texture or UV", "apply_face_edits");
+		const auto *location = live_location(edit.id, 'b');
+		const auto &face = map->entities[location->entity].brushes[location->index].faces[edit.face];
+		if (edit.has_texture && edit.texture != map->textures[face.texture_idx].name) changed = true;
+		if (edit.has_uv && (Vector2(face.uv_standard.u, face.uv_standard.v) != edit.shift || face.uv_extra.rot != edit.rotation || Vector2(face.uv_extra.scale_x, face.uv_extra.scale_y) != edit.scale)) changed = true;
+		validated.push_back(std::move(edit));
+	}
+	if (!changed) return success();
+	LMMapEdit map_edit(*map);
+	for (const auto &edit : validated) {
+		auto &face = edit_brush(map_edit, edit.id)->faces[edit.face];
+		if (edit.has_texture) face.texture = edit.texture;
+		if (edit.has_uv) { face.plane.uv_standard = {edit.shift.x, edit.shift.y}; face.plane.uv_extra = {edit.rotation, edit.scale.x, edit.scale.y}; }
+	}
+	return finish_edit(map_edit, "apply_face_edits");
 }
 void TBMapDocument::resolve_texture_sizes(LMMapData &data, const Dictionary &sizes) const {
 	for (int i = 0; i < data.texture_count; ++i) {
@@ -558,9 +688,14 @@ Dictionary TBMapDocument::stage_components(const Array &components, Vector3 delt
 }
 
 Dictionary TBMapDocument::preview_translate_components(const Array &components, Vector3 delta) const {
-	LMMapEdit edit(*map); Dictionary sources;
+	PackedInt64Array ids;
+	for (int i = 0; i < components.size(); ++i) if (components[i].get_type() == Variant::DICTIONARY) {
+		Dictionary component = components[i];
+		if (component.has("brush_id") && component["brush_id"].get_type() == Variant::INT) ids.push_back(component["brush_id"]);
+	}
+	LMMapEdit edit; stage_preview_brushes(ids, edit); LMMapEdit before = edit; Dictionary sources;
 	auto r = stage_components(components, delta, "preview_translate_components", edit, sources); if (!bool(r["ok"])) return r;
-	return preview_edit(edit, "preview_translate_components", sources);
+	return preview_fragments(before, edit, "preview_translate_components", sources);
 }
 
 Dictionary TBMapDocument::clip_brushes(const PackedInt64Array &ids, Vector3 p0, Vector3 p1, Vector3 p2, bool split) {
@@ -605,7 +740,7 @@ Dictionary TBMapDocument::stage_clip(const PackedInt64Array &ids, Vector3 p0, Ve
 
 Dictionary TBMapDocument::preview_clip_brushes(const PackedInt64Array &ids, Vector3 p0, Vector3 p1, Vector3 p2, bool split, bool flip) const {
 	if (flip) std::swap(p1, p2);
-	LMMapEdit edit(*map); PackedInt64Array out; Dictionary sources;
+	LMMapEdit edit; stage_preview_brushes(ids, edit); LMMapEdit before = edit; PackedInt64Array out; Dictionary sources;
 	auto r = stage_clip(ids, p0, p1, p2, split, "preview_clip_brushes", edit, out, sources); if (!bool(r["ok"])) return r;
-	return preview_edit(edit, "preview_clip_brushes", sources);
+	return preview_fragments(before, edit, "preview_clip_brushes", sources);
 }

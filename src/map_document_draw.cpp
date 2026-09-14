@@ -4,6 +4,7 @@
 #include "map/brush_topology.h"
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <godot_cpp/variant/packed_vector2_array.hpp>
+#include <cmath>
 #include <vector>
 
 using namespace godot;
@@ -64,6 +65,31 @@ Array TBMapDocument::get_preview_data() const {
 		Dictionary data; data["texture"] = String::utf8(map->textures[t].name); data["texture_size"] = Vector2i(map->textures[t].width, map->textures[t].height);
 		data["vertices"] = s.vertices; data["normals"] = s.normals; data["uvs"] = s.uvs; data["indices"] = s.indices;
 		data["triangle_brush_ids"] = s.brushes; data["triangle_face_indices"] = s.faces; out.push_back(data);
+	}
+	return out;
+}
+
+PackedVector2Array TBMapDocument::get_face_preview_uvs(const Array &targets, const String &texture) const {
+	PackedVector2Array out;
+	for (int i = 0; i < targets.size(); ++i) {
+		if (targets[i].get_type() != Variant::DICTIONARY) continue;
+		const Dictionary target = targets[i];
+		if (!target.has("brush_id") || !target.has("index") || !target.has("topology_revision") ||
+				target["brush_id"].get_type() != Variant::INT || target["index"].get_type() != Variant::INT ||
+				target["topology_revision"].get_type() != Variant::INT) continue;
+		const int64_t id = target["brush_id"];
+		const int face_index = target["index"];
+		const int64_t token = target["topology_revision"];
+		const LiveLocation *location = live_location(id, 'b');
+		if (!location) continue;
+		const auto &brush = map->entities[location->entity].brushes[location->index];
+		if (brush.topology_revision != token || face_index < 0 || face_index >= brush.face_count ||
+				String::utf8(map->textures[brush.faces[face_index].texture_idx].name) != texture) continue;
+		const auto &face = map->entity_geo[location->entity].brushes[location->index].faces[face_index];
+		for (int index = 0; index < face.index_count; ++index) {
+			const auto &uv = face.vertices[face.indices[index]].uv;
+			out.push_back(Vector2(uv.u - std::floor(uv.u), uv.v - std::floor(uv.v)));
+		}
 	}
 	return out;
 }

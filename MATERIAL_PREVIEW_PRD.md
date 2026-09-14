@@ -52,7 +52,8 @@ undo history, or require the map to be saved.
 - Preview unsaved document edits.
 - Match built visual surfaces, indices, UVs, normals, tangents, patches, smoothing,
   filtering, transforms, and render layers.
-- Show the active scene `WorldEnvironment` sky when one is available.
+- Show the effective `WorldEnvironment` sky from the bound loader's edited scene
+  when one is available.
 - Preserve fast camera navigation, selection, overlays, and authoring tools.
 - Make mode changes deterministic and non-destructive.
 - Report preview failures without replacing the last valid camera result.
@@ -242,16 +243,20 @@ use where this can be done without instantiating gameplay scenes.
 ### 7.5 Rendering context
 
 The first delivery must support synchronized directional scene lights and the
-active scene `WorldEnvironment` sky. The preview resolves the environment from
-the edited scene containing the bound loader. When that `Environment` uses a sky
-background and has a valid `Sky`, the camera viewport must show that same sky,
-including its sky material and sky/background orientation and energy settings.
+effective `WorldEnvironment` contained in the bound loader's edited-scene root.
+The effective source is determined by identity with the loader's
+`World3D.environment`, not by choosing an arbitrary `WorldEnvironment` node. When
+that `Environment` uses a sky background and has a valid `Sky`, the camera
+viewport must show that same sky, including its material, orientation, custom
+field of view, and background energy settings. It must also copy the sky-related
+ambient and reflected-light source settings so the sky contributes to PBR
+lighting rather than appearing only as a backdrop.
 
-The camera must use a preview-owned `Environment` resource. It may reference the
-scene's `Sky` and its dependent resources, but it must not mutate the scene's
-`WorldEnvironment`, `Environment`, `Sky`, or sky material. Changes to those
-resources must invalidate or refresh the camera environment without rebuilding
-map geometry.
+The camera owns its `Environment`; the source `Sky` and dependent resources are
+shared read-only because Godot sky resources can be used by multiple rendering
+scenarios. The preview must not mutate the scene's `WorldEnvironment`,
+`Environment`, `Sky`, or sky material. Changes to those resources must invalidate
+or refresh the camera environment without rebuilding map geometry.
 
 If there is no bound scene, active `WorldEnvironment`, valid `Environment`, or
 usable sky background, the camera retains its current studio environment. A
@@ -265,11 +270,15 @@ Scene-perfect context is a later phase and includes:
 - map-generated light entities;
 - fog, reflection probes, decals, and GI resources;
 - effective ancestor visibility;
-- scene camera cull masks and exposure.
+- scene camera cull masks;
+- tonemapping, adjustments, compositor effects, and `CameraAttributes` exposure.
 
-The UI must not describe the first delivery as exact final lighting. The contract
-is exact visual geometry and material construction under the preview's documented
-rendering context.
+Built appearance uses Godot's normal lit material pipeline with bake-equivalent
+visual mesh attributes, resolved materials, transforms, boundaries, layers, and
+filtering. It receives synchronized directional lights plus sky-based ambient and
+reflected lighting. It does not claim scene-final lighting, baked GI, probes,
+local lights, exposure, fog, or post-processing parity. The UI must not describe
+the first delivery as exact lighting or a scene-final preview.
 
 ## 8. Architecture
 
@@ -355,9 +364,10 @@ The built preview cache key must include:
 - smoothing/normal override revision when that feature exists;
 - active rendering mode.
 
-Sky/environment invalidation is tracked separately from visual geometry. Its key
-includes the active `WorldEnvironment`, `Environment`, `Sky`, sky material, and
-their resource change revisions.
+Sky/environment invalidation is tracked separately from visual geometry. It uses
+the source node/resource identities, relevant property signatures, and
+`Resource.changed` signals for the effective `WorldEnvironment`, `Environment`,
+`Sky`, sky material, and dependent sky resources.
 
 Selection, camera movement, overlays, and status changes must not regenerate built
 geometry.
@@ -417,6 +427,10 @@ Verify that:
 - toggling back restores the authoring preview and picking behavior;
 - the active scene sky refreshes without regenerating map geometry;
 - removing or invalidating the active scene sky restores the studio environment;
+- multiple `WorldEnvironment` nodes resolve to the environment actually active in
+  the loader's `World3D`;
+- replacing the source environment or changing a nested sky dependency refreshes
+  the sky while preserving preview mesh instance IDs;
 - plugin teardown frees all transient preview resources.
 
 ### 10.3 Rendered tests
@@ -435,8 +449,9 @@ Add displayed fixtures or image comparisons for:
 - studio-environment fallback when the scene has no usable sky.
 
 Image tests must use controlled renderer, viewport size, camera, environment, and
-light settings. Geometry/material parity assertions remain authoritative when
-renderer output varies across hardware.
+light settings, with separate Compatibility and Forward+ baselines. Structural
+geometry/material assertions remain authoritative when renderer output varies
+across hardware.
 
 ## 11. Delivery Plan
 
@@ -493,8 +508,9 @@ The first complete release is accepted when:
 8. Camera movement, selection, and overlays do not regenerate built geometry.
 9. Repeated mode/session switching and plugin teardown produce no retained-node or
    native-memory growth.
-10. A usable sky from the active scene `WorldEnvironment` appears in the camera,
-    updates independently of map geometry, and falls back safely when unavailable.
+10. A usable sky from the effective scene `WorldEnvironment` appears in the
+    camera, contributes visible reflected-light response to PBR materials, updates
+    independently of map geometry, and falls back safely when unavailable.
 11. The UI accurately describes the rendering context and does not claim exact
     baked GI before that phase is delivered.
 
@@ -511,9 +527,9 @@ The first complete release is accepted when:
 - ShaderMaterials can depend on screen textures, depth, camera state, globals, and
   instance uniforms. Exact resource assignment is required; exact game-frame
   output is not universally possible in an isolated editor viewport.
-- Sky resources may be expensive or invalid when referenced across worlds. The
-  preview-owned environment and shared sky dependencies need dedicated resource
-  change and lifecycle testing.
+- Sharing a `Sky` RID across worlds is supported. Profile radiance regeneration
+  and test procedural and physical skies whose output depends on directional
+  lights in the destination rendering scenario.
 - Built geometry may be too expensive to regenerate on every interactive brush
   motion. Debounce, generation cancellation, or an explicit refresh policy may be
   required after profiling.

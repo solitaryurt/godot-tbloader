@@ -31,6 +31,11 @@ Builder::Builder(TBLoader* loader, Node3D* parent)
 	m_map = std::make_shared<LMMapData>();
 }
 
+Builder::Builder(TBLoader* loader, Node3D* parent, std::shared_ptr<LMMapData> map) : Builder(loader, parent)
+{
+	m_map = std::move(map);
+}
+
 Builder::~Builder()
 {
 }
@@ -50,8 +55,18 @@ Dictionary Builder::load_map(const String& path)
 		return result;
 	}
 
+	prepare_map_data();
+	return result;
+}
+
+bool Builder::prepare_map_data()
+{
+	if (!m_map) {
+		m_error = "Map data is unavailable";
+		return false;
+	}
 	load_and_cache_map_textures();
-	if (!m_error.is_empty()) return result;
+	if (!m_error.is_empty()) return false;
 
 	// We have to manually set the size of textures
 	for (int i = 0; i < m_map->texture_count; i++) {
@@ -71,7 +86,7 @@ Dictionary Builder::load_map(const String& path)
 	// Run geometry generator (this also generates UV's, so we do this last)
 	LMGeoGenerator geogen(m_map);
 	geogen.run();
-	return result;
+	return true;
 }
 
 bool Builder::build_map()
@@ -82,6 +97,26 @@ bool Builder::build_map()
 		auto& ent = m_map->entities[i];
 		build_entity(i, ent, ent.get_property("classname"), entity_class_count);
 		if (!m_error.is_empty()) return false;
+	}
+	return true;
+}
+
+bool Builder::build_visual_map()
+{
+	if (!m_error.is_empty()) return false;
+	for (int i = 0; i < m_map->entity_count; i++) {
+		auto& ent = m_map->entities[i];
+		if (ent.brush_count == 0 && ent.patch_count == 0) continue;
+		if (m_loader->m_skip_hidden_layers && ent.get_property_int("_tb_layer_hidden", 0) != 0) continue;
+		String classname = ent.get_property("classname");
+		if (m_loader->m_entity_common && (classname == "light" || classname == "area" || classname == "target_speaker" || classname == "trigger_location")) continue;
+		Node* node = build_worldspawn(i, ent, false);
+		if (!m_error.is_empty()) return false;
+		if (!node) continue;
+		if (ent.has_property("name")) node->set_name(ent.get_property("name"));
+		if (node->get_child_count() > 0 && (ent.has_property("smooth") || ent.has_property("soft"))) {
+			smooth_mesh_shading(Object::cast_to<MeshInstance3D>(node->get_child(0)));
+		}
 	}
 	return true;
 }
@@ -664,12 +699,14 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 	std::vector<String> collision_surface_types = {SURFACE_GRASS, SURFACE_DIRT, SURFACE_METAL, SURFACE_WOOD, SURFACE_GLASS, SURFACE_WINDOW, SURFACE_SAND, SURFACE_TILE, SURFACE_SNOW, SURFACE_VENT, SURFACE_WATER};
 	std::vector<String> collision_special_types = {SURFACE_DEFAULT, SURFACE_PLAYER_CLIP, SURFACE_LADDER_CLIP, SURFACE_CUSHION_CLIP, SURFACE_NO_WALL_JUMP};
 
-	// Initialize the map with the specified types
-	for (auto& collision_type : collision_surface_types) {
-		collision_mesh_map.emplace(collision_type, memnew(ArrayMesh()));
-	}
-	for (auto& collision_type : collision_special_types) {
-		collision_mesh_map.emplace(collision_type, memnew(ArrayMesh()));
+	const bool need_collision = coltype != ColliderType::None;
+	if (need_collision) {
+		for (auto& collision_type : collision_surface_types) {
+			collision_mesh_map.emplace(collision_type, memnew(ArrayMesh()));
+		}
+		for (auto& collision_type : collision_special_types) {
+			collision_mesh_map.emplace(collision_type, memnew(ArrayMesh()));
+		}
 	}
 
 	// Example usage: Assign the collision mesh to the map
@@ -712,18 +749,18 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 			// Add surface to collision mesh
 			// Skip if the texture specifies that we only want collision (invisible walls)
 			if (tex.name == m_loader->get_clip_texture_name()) {
-				add_surface_to_mesh(collision_mesh_map[SURFACE_PLAYER_CLIP], surf);
+				if (need_collision) add_surface_to_mesh(collision_mesh_map[SURFACE_PLAYER_CLIP], surf);
 				continue;
 			} else if (tex.name == m_loader->get_ladder_texture_name()) {
-				add_surface_to_mesh(collision_mesh_map[SURFACE_LADDER_CLIP], surf);
+				if (need_collision) add_surface_to_mesh(collision_mesh_map[SURFACE_LADDER_CLIP], surf);
 				continue;
 			} else if (tex.name == m_loader->get_cushion_texture_name()) {
-				add_surface_to_mesh(collision_mesh_map[SURFACE_CUSHION_CLIP], surf);
+				if (need_collision) add_surface_to_mesh(collision_mesh_map[SURFACE_CUSHION_CLIP], surf);
 				continue;
 			} else if (tex.name == m_loader->get_no_wall_jump_texture_name()) {
-				add_surface_to_mesh(collision_mesh_map[SURFACE_NO_WALL_JUMP], surf);
+				if (need_collision) add_surface_to_mesh(collision_mesh_map[SURFACE_NO_WALL_JUMP], surf);
 				continue;
-			} else {
+			} else if (need_collision) {
 				bool added = false;
 				for (const auto& collision_type : collision_surface_types) {
 					if (check_texture(tex.name, collision_type.utf8().get_data())) {
@@ -917,6 +954,62 @@ Dictionary Builder::resolve_material(const String& token)
 	return result;
 }
 
+namespace {
+void regenerate_tangents(Array& arrays)
+{
+	PackedVector3Array vertices = arrays[Mesh::ARRAY_VERTEX];
+	PackedVector3Array normals = arrays[Mesh::ARRAY_NORMAL];
+	PackedVector2Array uvs = arrays[Mesh::ARRAY_TEX_UV];
+	PackedInt32Array indices = arrays[Mesh::ARRAY_INDEX];
+	PackedFloat32Array previous = arrays[Mesh::ARRAY_TANGENT];
+	if (vertices.size() != normals.size() || vertices.size() != uvs.size()) return;
+	std::vector<Vector3> tangent_sum(vertices.size());
+	std::vector<Vector3> bitangent_sum(vertices.size());
+	int index_count = indices.is_empty() ? vertices.size() : indices.size();
+	for (int i = 0; i + 2 < index_count; i += 3) {
+		int a = indices.is_empty() ? i : indices[i];
+		int b = indices.is_empty() ? i + 1 : indices[i + 1];
+		int c = indices.is_empty() ? i + 2 : indices[i + 2];
+		if (a < 0 || b < 0 || c < 0 || a >= vertices.size() || b >= vertices.size() || c >= vertices.size()) continue;
+		Vector3 edge1 = vertices[b] - vertices[a];
+		Vector3 edge2 = vertices[c] - vertices[a];
+		Vector2 uv1 = uvs[b] - uvs[a];
+		Vector2 uv2 = uvs[c] - uvs[a];
+		double determinant = uv1.x * uv2.y - uv1.y * uv2.x;
+		if (!std::isfinite(determinant) || std::abs(determinant) < 1e-12) continue;
+		Vector3 tangent = (edge1 * uv2.y - edge2 * uv1.y) / determinant;
+		Vector3 bitangent = (edge2 * uv1.x - edge1 * uv2.x) / determinant;
+		for (int index : {a, b, c}) {
+			tangent_sum[index] += tangent;
+			bitangent_sum[index] += bitangent;
+		}
+	}
+	PackedFloat32Array tangents;
+	tangents.resize(vertices.size() * 4);
+	for (int i = 0; i < vertices.size(); ++i) {
+		Vector3 normal = normals[i].normalized();
+		Vector3 tangent = tangent_sum[i] - normal * normal.dot(tangent_sum[i]);
+		bool used_previous = false;
+		if (tangent.length_squared() < 1e-12 && previous.size() == vertices.size() * 4) {
+			tangent = Vector3(previous[i * 4], previous[i * 4 + 1], previous[i * 4 + 2]);
+			tangent -= normal * normal.dot(tangent);
+			used_previous = tangent.length_squared() >= 1e-12;
+		}
+		if (tangent.length_squared() < 1e-12) {
+			tangent = normal.cross(std::abs(normal.y) < 0.99 ? Vector3(0, 1, 0) : Vector3(1, 0, 0));
+		}
+		tangent.normalize();
+		double handedness = used_previous && bitangent_sum[i].length_squared() < 1e-12
+			? previous[i * 4 + 3] : (normal.cross(tangent).dot(bitangent_sum[i]) < 0.0 ? -1.0 : 1.0);
+		tangents.set(i * 4, tangent.x);
+		tangents.set(i * 4 + 1, tangent.y);
+		tangents.set(i * 4 + 2, tangent.z);
+		tangents.set(i * 4 + 3, handedness);
+	}
+	arrays[Mesh::ARRAY_TANGENT] = tangents;
+}
+}
+
 void Builder::smooth_mesh_shading(MeshInstance3D* mesh_instance) {
     if (!mesh_instance || !mesh_instance->get_mesh().is_valid()) {
         return;
@@ -971,6 +1064,7 @@ void Builder::smooth_mesh_shading(MeshInstance3D* mesh_instance) {
 
         // Update the arrays with new normals
         arrays[Mesh::ARRAY_NORMAL] = new_normals;
+		regenerate_tangents(arrays);
 
         // Add surface to new mesh
         Dictionary format_info;

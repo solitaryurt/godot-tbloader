@@ -34,6 +34,9 @@ public:
 	LMSurfaceGatherer(std::shared_ptr<LMMapData> _map_data) :
 			map_data(_map_data) {
 	}
+	~LMSurfaceGatherer() { surface_gatherer_reset_state(); }
+	LMSurfaceGatherer(const LMSurfaceGatherer &) = delete;
+	LMSurfaceGatherer &operator=(const LMSurfaceGatherer &) = delete;
 
 	SURFACE_SPLIT_TYPE split_type = SST_NONE;
 	int entity_filter_idx = -1;

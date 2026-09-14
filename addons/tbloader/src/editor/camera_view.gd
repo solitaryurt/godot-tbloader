@@ -10,13 +10,25 @@ var viewport: SubViewport
 var camera: Camera3D
 var geometry: Node3D
 var map_geometry: Node3D
+var built_geometry: Node3D
 var overlays: Node3D
+var core_overlays: Node3D
 var ground_grid: Node3D
 var grid_move_preview: Node3D
 var grid_move_preview_key = ""
 var candidate_offscreen := false
 var candidate_indicator: Label
 var preview_lights: Node3D
+var preview_world_environment: WorldEnvironment
+var environment_key: Array = []
+var environment_resources: Array[Resource] = []
+var environment_dirty := true
+var built_appearance := false
+var built_preview_key := ""
+var built_preview_context_key := ""
+var built_preview_attempt_key := ""
+var built_preview_valid := false
+var built_appearance_button: Button
 var flying = false
 var rmb_down := false
 var rmb_was_flying := false
@@ -41,8 +53,10 @@ var yaw = 0.65
 var triangle_count = 0
 var hint: Label
 var crosshair: Control
-var rendered_key = ""
+var rendered_key = []
 var rendered_material_key = ""
+var core_overlay_key: Array = []
+var cut_overlay_context_key: Array = []
 var geometry_chunks: Dictionary = {}
 var lighting_key: Array = []
 var lighting_initialized = false
@@ -65,8 +79,8 @@ var camera_rotation_pivot := Vector3.ZERO
 var camera_rotation_start := 0.0
 var camera_rotation_angle := 0.0
 var surface_grid_visible := false
-var surface_grid_key := ""
-var ground_grid_key := ""
+var surface_grid_key: Array = []
+var ground_grid_key: Array = []
 const CHUNK_TRIANGLES = 2048
 const CHUNK_SIZE = 64.0
 const GROUND_GRID_MIN_EXTENT = 2048.0
@@ -82,6 +96,19 @@ const CAMERA_FOV_STEP = 5.0
 const MIN_DOLLY_STEP = 0.125
 const MAX_DOLLY_STEP = 128.0
 const DOLLY_STEP_FACTOR = 1.25
+const SKY_ENVIRONMENT_PROPERTIES = [
+	"background_mode",
+	"sky",
+	"sky_rotation",
+	"sky_custom_fov",
+	"background_energy_multiplier",
+	"background_intensity",
+	"ambient_light_source",
+	"ambient_light_color",
+	"ambient_light_energy",
+	"ambient_light_sky_contribution",
+	"reflected_light_source",
+]
 
 func _ready() -> void:
 	focus_mode = Control.FOCUS_ALL
@@ -101,9 +128,15 @@ func _ready() -> void:
 	geometry = Node3D.new()
 	viewport.add_child(geometry)
 	map_geometry = Node3D.new()
+	map_geometry.name = "AuthoringGeometry"
 	geometry.add_child(map_geometry)
+	built_geometry = Node3D.new()
+	built_geometry.name = "BuiltGeometry"
+	built_geometry.hide()
+	geometry.add_child(built_geometry)
 	overlays = Node3D.new()
 	geometry.add_child(overlays)
+	core_overlays = overlays
 	ground_grid = Node3D.new()
 	ground_grid.name = "GroundGrid"
 	viewport.add_child(ground_grid)
@@ -118,16 +151,13 @@ func _ready() -> void:
 	camera.fov = camera_fov
 	camera.current = true
 	orbit_target = camera.position - camera.global_basis.z * orbit_distance
-	var environment = WorldEnvironment.new()
-	environment.environment = Environment.new()
-	environment.environment.background_mode = Environment.BG_COLOR
-	environment.environment.background_color = Color("18232e")
-	environment.environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	environment.environment.ambient_light_color = Color.WHITE
-	environment.environment.ambient_light_energy = 0.75
-	viewport.add_child(environment)
+	preview_world_environment = WorldEnvironment.new()
+	preview_world_environment.name = "PreviewWorldEnvironment"
+	preview_world_environment.environment = studio_environment()
+	viewport.add_child(preview_world_environment)
 	preview_lights = Node3D.new()
 	viewport.add_child(preview_lights)
+	sync_scene_environment(true)
 	sync_scene_lighting(true)
 	hint = Label.new()
 	hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -142,6 +172,7 @@ func _ready() -> void:
 	orientation_gizmo.axis_selected.connect(snap_to_axis)
 	orientation_gizmo.orbit_dragged.connect(orbit_from_gizmo)
 	add_child(orientation_gizmo)
+	update_orientation_gizmo()
 	var crosshair_center = CenterContainer.new()
 	crosshair_center.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	crosshair_center.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -179,6 +210,18 @@ func _ready() -> void:
 	frame_button.position = Vector2(-32, 4)
 	frame_button.pressed.connect(frame_selection)
 	add_child(frame_button)
+	built_appearance_button = Button.new()
+	built_appearance_button.name = "BuiltAppearance"
+	built_appearance_button.text = "Built appearance"
+	built_appearance_button.toggle_mode = true
+	built_appearance_button.tooltip_text = "Preview PBR materials and visual geometry using TBLoader build rules"
+	built_appearance_button.accessibility_name = "Built appearance"
+	built_appearance_button.theme_type_variation = "FlatButton"
+	built_appearance_button.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
+	built_appearance_button.position = Vector2(-162, 4)
+	built_appearance_button.size = Vector2(126, 28)
+	built_appearance_button.toggled.connect(set_built_appearance)
+	add_child(built_appearance_button)
 	focus_exited.connect(cancel_interaction)
 
 func _sync_suspension(force_suspended := false) -> void:
@@ -231,8 +274,7 @@ func apply_camera_state(state: Dictionary) -> void:
 		camera.fov = camera_fov
 		pitch = camera.rotation.x
 		yaw = camera.rotation.y
-		sync_camera_marker(true)
-		update_orientation_gizmo()
+		camera_transform_changed()
 	update_hint()
 
 func update_hint() -> void:
@@ -266,8 +308,7 @@ func handle_camera_wheel(event: InputEventMouseButton) -> bool:
 		camera.global_position += movement
 		orbit_target += movement
 		orbit_distance = maxf(camera.global_position.distance_to(orbit_target), 0.01)
-		sync_camera_marker(true)
-		update_orientation_gizmo()
+		camera_transform_changed()
 		feedback = "Camera dolly: %.3f" % dolly_step
 	update_hint()
 	if is_instance_valid(host) and host.has_method("set_status"):
@@ -310,6 +351,12 @@ func sync_camera_marker(force = false) -> void:
 	marker_scale = scale_value
 	camera_moved.emit(camera_map_position(scale_value), camera_map_direction())
 
+func camera_transform_changed() -> void:
+	sync_camera_marker()
+	update_orientation_gizmo()
+	if is_instance_valid(host) and host.tool == "Cut" and host.cut_points.size() == 2:
+		rebuild_cut_overlay()
+
 func frame_selection() -> void:
 	var bounds: AABB
 	var first = true
@@ -328,7 +375,7 @@ func frame_selection() -> void:
 	camera.look_at(center)
 	pitch = camera.rotation.x
 	yaw = camera.rotation.y
-	update_orientation_gizmo()
+	camera_transform_changed()
 
 func map_axis_preview(axis: int) -> Vector3:
 	return [Vector3.BACK, Vector3.RIGHT, Vector3.UP][axis]
@@ -351,8 +398,7 @@ func snap_to_axis(axis: int, positive: bool) -> void:
 	camera.look_at(orbit_target, Vector3.BACK if axis == 2 else Vector3.UP)
 	pitch = camera.rotation.x
 	yaw = camera.rotation.y
-	sync_camera_marker(true)
-	update_orientation_gizmo()
+	camera_transform_changed()
 	host.set_status("Camera aligned to %s%s" % ["+" if positive else "-", ["X", "Y", "Z"][axis]])
 
 func orbit_from_gizmo(relative: Vector2) -> void:
@@ -370,31 +416,56 @@ func orbit_from_gizmo(relative: Vector2) -> void:
 	camera.look_at(orbit_target)
 	pitch = camera.rotation.x
 	yaw = camera.rotation.y
-	sync_camera_marker(true)
-	update_orientation_gizmo()
+	camera_transform_changed()
 
 func refresh() -> void:
 	if geometry == null:
 		return
 	sync_camera_marker()
+	sync_scene_environment()
 	sync_scene_lighting()
 	var hidden_ids: Array = host.session.hidden.keys()
 	hidden_ids.sort()
 	var scale_value := map_scale()
 	var loader = host.session.loader.get_ref()
 	var visual_layer: int = loader.option_visual_layer_mask if is_instance_valid(loader) else 1
-	var key := "%d:%d:%d:%s:%s" % [host.session.document.get_instance_id(), host.session.preview_generation, host.session.visibility_generation, str(hidden_ids), scale_value]
-	if key != rendered_key:
+	var key: Array = [host.session.document.get_instance_id(), host.session.preview_generation,
+		host.session.visibility_generation, hidden_ids, scale_value]
+	if not rendered_key is Array or key != rendered_key:
 		rendered_key = key
 		rebuild_geometry(scale_value)
 	var material_key := "%d:%d:%d" % [host.session.document.get_instance_id(), host.material_generation, visual_layer]
 	if material_key != rendered_material_key:
 		rendered_material_key = material_key
 		refresh_chunk_materials(visual_layer)
-	for child in overlays.get_children():
-		overlays.remove_child(child)
-		child.queue_free()
-	build_overlays(scale_value)
+	refresh_built_appearance()
+	refresh_selection()
+
+func refresh_selection(force := false) -> void:
+	if core_overlays == null or not is_instance_valid(host) or host.session == null:
+		return
+	var scale_value := map_scale()
+	var loader = host.session.loader.get_ref()
+	var visual_layer: int = loader.option_visual_layer_mask if is_instance_valid(loader) else 1
+	var key: Array = [host.session.document.get_instance_id(), host.session.preview_generation,
+		host.session.visibility_generation, host.session.selection_generation, host.tool,
+		scale_value, visual_layer]
+	if force or key != core_overlay_key:
+		core_overlay_key = key
+		for child in core_overlays.get_children():
+			if child.name in ["SelectedSurfaceGrid", "CutOverlay"]:
+				continue
+			core_overlays.remove_child(child)
+			child.queue_free()
+		build_overlays(scale_value, visual_layer)
+	var cut_key := [host.session.document.get_instance_id(), scale_value, visual_layer]
+	if cut_key != cut_overlay_context_key:
+		cut_overlay_context_key = cut_key
+		rebuild_cut_overlay()
+	if ground_grid_key != ground_grid_signature():
+		rebuild_ground_grid()
+	if surface_grid_visible and surface_grid_key != surface_grid_signature():
+		rebuild_surface_grid_overlay()
 
 func candidate_material(color: Color, hidden: bool) -> StandardMaterial3D:
 	var material := StandardMaterial3D.new()
@@ -404,6 +475,71 @@ func candidate_material(color: Color, hidden: bool) -> StandardMaterial3D:
 	material.no_depth_test = hidden
 	material.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
 	return material
+
+func set_built_appearance(enabled: bool) -> void:
+	built_appearance = enabled
+	refresh_built_appearance()
+
+func visual_loader_signature(loader: Object) -> String:
+	var values: Array = []
+	for property in loader.get_property_list():
+		var property_name: String = property.name
+		if not (property_name.begins_with("map_") or property_name.begins_with("lighting_")
+				or property_name.begins_with("option_") or property_name.begins_with("entity_")
+				or property_name.begins_with("texture_")):
+			continue
+		var value = loader.get(property_name)
+		values.append([property_name, value.get_instance_id() if value is Object and is_instance_valid(value) else value])
+	return str(values)
+
+func refresh_built_appearance() -> void:
+	if map_geometry == null or built_geometry == null:
+		return
+	if not built_appearance:
+		map_geometry.show()
+		built_geometry.hide()
+		return
+	var loader = host.session.loader.get_ref() if host != null and host.session != null else null
+	var context_key := "%d:%d" % [host.session.document.get_instance_id(), loader.get_instance_id() if is_instance_valid(loader) else 0]
+	if context_key != built_preview_context_key:
+		built_preview_context_key = context_key
+		built_preview_key = ""
+		built_preview_attempt_key = ""
+		built_preview_valid = false
+		for child in built_geometry.get_children():
+			built_geometry.remove_child(child)
+			child.queue_free()
+	if not is_instance_valid(loader) or not loader.has_method("build_visual_preview_checked"):
+		map_geometry.show()
+		built_geometry.hide()
+		if is_instance_valid(host):
+			host.set_status("Built appearance requires a bound TBLoader")
+		return
+	var key := "%d:%d:%d:%d:%s" % [host.session.document.get_instance_id(), host.session.preview_generation,
+		host.material_generation, loader.get_instance_id(), visual_loader_signature(loader)]
+	if key == built_preview_key and built_preview_valid:
+		map_geometry.hide()
+		built_geometry.show()
+		return
+	if key == built_preview_attempt_key:
+		map_geometry.visible = not built_preview_valid
+		built_geometry.visible = built_preview_valid
+		return
+	built_preview_attempt_key = key
+	var result: Dictionary = loader.build_visual_preview_checked(host.session.document, built_geometry)
+	if result.get("ok", false):
+		built_preview_key = key
+		built_preview_valid = true
+		map_geometry.hide()
+		built_geometry.show()
+		return
+	map_geometry.visible = not built_preview_valid
+	built_geometry.visible = built_preview_valid
+	var error: Dictionary = result.get("error", {})
+	if error.get("code", "") == "BUSY":
+		built_preview_attempt_key = ""
+	if is_instance_valid(host):
+		host.set_status("%s: %s" % [error.get("code", "PREVIEW_FAILED"), error.get("message", "Built appearance failed")])
 
 func candidate_mesh_instance(vertices: PackedVector3Array, primitive: int, material: Material, name_value: String) -> MeshInstance3D:
 	if vertices.is_empty():
@@ -533,6 +669,121 @@ func scene_directional_lights() -> Array[DirectionalLight3D]:
 		result.append(node)
 	return result
 
+func studio_environment() -> Environment:
+	var environment := Environment.new()
+	environment.background_mode = Environment.BG_COLOR
+	environment.background_color = Color("18232e")
+	environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	environment.ambient_light_color = Color.WHITE
+	environment.ambient_light_energy = 0.75
+	return environment
+
+func scene_world_environments(root: Node) -> Array[WorldEnvironment]:
+	var result: Array[WorldEnvironment] = []
+	if root is WorldEnvironment:
+		result.append(root)
+	for node in root.find_children("*", "WorldEnvironment", true, false):
+		result.append(node)
+	return result
+
+func effective_scene_environment() -> Dictionary:
+	if host == null or host.session == null:
+		return {}
+	var root = host.session.scene.get_ref()
+	var loader = host.session.loader.get_ref()
+	if not is_instance_valid(root) or not is_instance_valid(loader):
+		return {}
+	if loader != root and not root.is_ancestor_of(loader):
+		return {}
+	var world: World3D = loader.get_world_3d()
+	if world == null or world.environment == null:
+		return {}
+	for node in scene_world_environments(root):
+		if node.environment == world.environment:
+			return {"node": node, "environment": world.environment}
+	return {}
+
+func resource_property(resource: Resource, property_name: StringName, fallback: Variant = null) -> Variant:
+	for property in resource.get_property_list():
+		if property.name == property_name:
+			return resource.get(property_name)
+	return fallback
+
+func environment_signature(context: Dictionary) -> Array:
+	if context.is_empty():
+		return []
+	var node: WorldEnvironment = context.node
+	var source: Environment = context.environment
+	var signature: Array = [node.get_instance_id(), source.get_instance_id()]
+	for property_name in SKY_ENVIRONMENT_PROPERTIES:
+		var value = resource_property(source, property_name)
+		signature.append(value.get_instance_id() if value is Object and is_instance_valid(value) else value)
+	return signature
+
+func collect_environment_resource(resource: Resource, output: Array[Resource], visited: Dictionary, depth := 0) -> void:
+	if resource == null or depth > 3 or visited.has(resource.get_instance_id()):
+		return
+	visited[resource.get_instance_id()] = true
+	output.append(resource)
+	for property in resource.get_property_list():
+		if (int(property.usage) & PROPERTY_USAGE_STORAGE) == 0:
+			continue
+		var value = resource.get(property.name)
+		if value is Resource:
+			collect_environment_resource(value, output, visited, depth + 1)
+		elif value is Array:
+			for item in value:
+				if item is Resource:
+					collect_environment_resource(item, output, visited, depth + 1)
+		elif value is Dictionary:
+			for item in value.values():
+				if item is Resource:
+					collect_environment_resource(item, output, visited, depth + 1)
+
+func disconnect_environment_resources() -> void:
+	var callback := Callable(self, "environment_resource_changed")
+	for resource in environment_resources:
+		if is_instance_valid(resource) and resource.changed.is_connected(callback):
+			resource.changed.disconnect(callback)
+	environment_resources.clear()
+
+func connect_environment_resources(source: Environment) -> void:
+	disconnect_environment_resources()
+	collect_environment_resource(source, environment_resources, {})
+	var callback := Callable(self, "environment_resource_changed")
+	for resource in environment_resources:
+		if not resource.changed.is_connected(callback):
+			resource.changed.connect(callback)
+
+func environment_resource_changed() -> void:
+	environment_dirty = true
+
+func sync_scene_environment(force := false) -> void:
+	if preview_world_environment == null:
+		return
+	var context := effective_scene_environment()
+	var key := environment_signature(context)
+	if not force and not environment_dirty and key == environment_key:
+		return
+	environment_key = key
+	environment_dirty = false
+	if context.is_empty():
+		disconnect_environment_resources()
+		preview_world_environment.environment = studio_environment()
+		return
+	var source: Environment = context.environment
+	if source.background_mode != Environment.BG_SKY or source.sky == null:
+		disconnect_environment_resources()
+		preview_world_environment.environment = studio_environment()
+		return
+	var environment := studio_environment()
+	for property_name in SKY_ENVIRONMENT_PROPERTIES:
+		var value = resource_property(source, property_name)
+		if value != null:
+			environment.set(property_name, value)
+	preview_world_environment.environment = environment
+	connect_environment_resources(source)
+
 func copied_light_properties(light: DirectionalLight3D) -> Array:
 	var result: Array = []
 	for property in light.get_property_list():
@@ -633,7 +884,7 @@ func add_selection_overlay(name_value: String, triangles: PackedVector3Array, co
 	var loader = host.session.loader.get_ref()
 	if is_instance_valid(loader):
 		instance.layers = loader.option_visual_layer_mask
-	overlays.add_child(instance)
+	core_overlays.add_child(instance)
 
 
 func add_selection_lines(name_value: String, lines: PackedVector3Array, color: Color, priority: int) -> void:
@@ -651,7 +902,7 @@ func add_selection_lines(name_value: String, lines: PackedVector3Array, color: C
 	var loader = host.session.loader.get_ref()
 	if is_instance_valid(loader):
 		instance.layers = loader.option_visual_layer_mask
-	overlays.add_child(instance)
+	core_overlays.add_child(instance)
 
 func append_face_triangles(target: PackedVector3Array, winding: PackedVector3Array, scale_value: float) -> void:
 	for index in range(1, winding.size() - 1):
@@ -659,22 +910,23 @@ func append_face_triangles(target: PackedVector3Array, winding: PackedVector3Arr
 		target.append(transform_map_scaled(winding[index], scale_value))
 		target.append(transform_map_scaled(winding[index + 1], scale_value))
 
-func build_overlays(scale_value: float) -> void:
-	if ground_grid_key != ground_grid_signature():
-		rebuild_ground_grid()
+func build_overlays(scale_value: float, visual_layer: int) -> void:
+	var marker_mesh := SphereMesh.new()
+	marker_mesh.radius = 0.15
+	marker_mesh.height = 0.3
+	var marker_material := StandardMaterial3D.new()
+	marker_material.albedo_color = Color("83dfbd")
+	var selected_marker_material := StandardMaterial3D.new()
+	selected_marker_material.albedo_color = Color("ffb657")
 	for marker in host.session.point_markers():
 		if not host.session.marker_visible():
 			continue
 		var instance = MeshInstance3D.new()
-		var mesh = SphereMesh.new()
-		mesh.radius = 0.15
-		mesh.height = 0.3
-		instance.mesh = mesh
+		instance.mesh = marker_mesh
 		instance.position = transform_map_scaled(marker.origin, scale_value)
-		var material = StandardMaterial3D.new()
-		material.albedo_color = Color("ffb657") if host.session.points.has(marker.id) else Color("83dfbd")
-		instance.material_override = material
-		overlays.add_child(instance)
+		instance.material_override = selected_marker_material if host.session.points.has(marker.id) else marker_material
+		instance.layers = visual_layer
+		core_overlays.add_child(instance)
 	var brush_triangles := PackedVector3Array()
 	var face_edges := PackedVector3Array()
 	for id in host.session.selected:
@@ -696,7 +948,6 @@ func build_overlays(scale_value: float) -> void:
 					face_edges.append(transform_map_scaled(face.winding[(index + 1) % face.winding.size()], scale_value))
 	add_selection_overlay("SelectedBrushFill", brush_triangles, Color(1.0, 0.48, 0.14, 0.14), 1)
 	add_selection_lines("SelectedFaceEdges", face_edges, Color(0.16, 0.5, 1.0, 1.0), 2)
-	build_surface_grid(scale_value)
 	if host.tool in ["Face", "Edge", "Vertex"]:
 		var handle_material = StandardMaterial3D.new()
 		handle_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -704,6 +955,14 @@ func build_overlays(scale_value: float) -> void:
 		var selected_handle_material = StandardMaterial3D.new()
 		selected_handle_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 		selected_handle_material.albedo_color = Color("ffe6a6")
+		var handle_mesh := SphereMesh.new()
+		handle_mesh.radius = 0.1
+		handle_mesh.height = 0.2
+		var selected_components: Dictionary = {}
+		for component in host.session.components:
+			var brush: Dictionary = host.session.brush(component.brush_id)
+			if host.session.component_valid(component, brush):
+				selected_components[[component.brush_id, component.kind, component.index]] = true
 		for id in host.session.selected:
 			var brush: Dictionary = host.session.brush(id)
 			if not host.session.brush_visible(brush):
@@ -720,16 +979,13 @@ func build_overlays(scale_value: float) -> void:
 					position = (brush.vertices[brush.edge_vertex_indices[edge]] + brush.vertices[brush.edge_vertex_indices[edge + 1]]) * 0.5
 				else:
 					position = brush.vertices[index]
-				var selected: bool = host.session.components.any(func(component):
-					return component.brush_id == id and component.kind == host.tool.to_lower() and component.index == index and host.session.component_valid(component, brush))
+				var selected := selected_components.has([id, host.tool.to_lower(), index])
 				var handle = MeshInstance3D.new()
-				var handle_mesh = SphereMesh.new()
-				handle_mesh.radius = 0.1
-				handle_mesh.height = 0.2
 				handle.mesh = handle_mesh
 				handle.position = transform_map_scaled(position, scale_value)
 				handle.material_override = selected_handle_material if selected else handle_material
-				overlays.add_child(handle)
+				handle.layers = visual_layer
+				core_overlays.add_child(handle)
 	var outline = ImmediateMesh.new()
 	var outline_material = StandardMaterial3D.new()
 	outline_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -748,13 +1004,13 @@ func build_overlays(scale_value: float) -> void:
 		outline.surface_end()
 		var instance = MeshInstance3D.new()
 		instance.mesh = outline
-		overlays.add_child(instance)
-	rebuild_cut_overlay()
+		instance.layers = visual_layer
+		core_overlays.add_child(instance)
 
-func ground_grid_signature() -> String:
+func ground_grid_signature() -> Array:
 	if not is_instance_valid(host) or host.session == null:
-		return ""
-	return "%d:%d:%d:%s:%s" % [host.session.document.get_instance_id(), host.session.preview_generation,
+		return []
+	return [host.session.document.get_instance_id(), host.session.preview_generation,
 		host.session.visibility_generation, host.session.grid, map_scale()]
 
 func ground_grid_extent(spacing: float) -> float:
@@ -826,11 +1082,14 @@ func rebuild_ground_grid() -> void:
 		child.queue_free()
 	build_ground_grid(map_scale())
 
-func surface_grid_signature() -> String:
+func surface_grid_signature() -> Array:
 	if not is_instance_valid(host) or host.session == null:
-		return ""
-	return "%d:%d:%d:%s:%s" % [host.session.document.get_instance_id(), host.session.preview_generation,
-		host.session.visibility_generation, str(host.session.selected), host.session.grid]
+		return []
+	var loader = host.session.loader.get_ref()
+	var visual_layer: int = loader.option_visual_layer_mask if is_instance_valid(loader) else 1
+	return [host.session.document.get_instance_id(), host.session.preview_generation,
+		host.session.visibility_generation, host.session.selection_generation, host.session.grid,
+		map_scale(), visual_layer]
 
 func toggle_surface_grid() -> void:
 	surface_grid_visible = not surface_grid_visible
@@ -946,11 +1205,11 @@ func rebuild_cut_overlay() -> void:
 	material.albedo_color = Color("fc7373")
 	material.no_depth_test = true
 	material.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
+	var marker_mesh := SphereMesh.new()
+	marker_mesh.radius = 0.09
+	marker_mesh.height = 0.18
 	for point in host.cut_points:
 		var marker := MeshInstance3D.new()
-		var marker_mesh := SphereMesh.new()
-		marker_mesh.radius = 0.09
-		marker_mesh.height = 0.18
 		marker.mesh = marker_mesh
 		marker.position = transform_map(point)
 		marker.material_override = material
@@ -1178,6 +1437,7 @@ func _gui_input(event: InputEvent) -> void:
 			toggle_surface_grid()
 			accept_event()
 		elif host.route_key(event, host.active_graph):
+			refresh_selection()
 			accept_event()
 
 func face_hit(position: Vector2) -> Dictionary:
@@ -1210,7 +1470,7 @@ func begin_ctrl_gesture(position: Vector2) -> void:
 			prepare_ctrl_resize(component, ctrl_start_hit.position)
 			# Preserve press-time face feedback while keeping geometry untouched.
 			host.session.components = [component]
-			host.session.changed.emit()
+			host.session.notify_changed("selection")
 		else:
 			ctrl_gesture = "click"
 	else:
@@ -1251,7 +1511,7 @@ func paint_face(hit: Dictionary) -> void:
 	var component := face_component(hit)
 	if component.is_empty():
 		return
-	var key := "%d:%d" % [component.brush_id, component.index]
+	var key := [component.brush_id, component.index]
 	if ctrl_visited.has(key):
 		return
 	ctrl_visited[key] = true
@@ -1379,7 +1639,7 @@ func set_face_selection(ids: PackedInt64Array, components: Array) -> void:
 	host.session.points.clear()
 	host.session.components = components.filter(func(item): return host.session.component_valid(item, host.session.brush(item.brush_id)))
 	host.session.prune()
-	host.session.changed.emit()
+	host.session.notify_changed("selection")
 
 func start_fly() -> void:
 	cancel_gesture()
@@ -1426,6 +1686,9 @@ func stop_fly() -> void:
 	update_hint()
 
 func _input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo and (event.keycode in [KEY_BRACKETLEFT, KEY_BRACKETRIGHT] or event.keycode >= KEY_1 and event.keycode <= KEY_9):
+		# The host applies grid shortcuts later in GUI dispatch; refresh every camera afterward.
+		call_deferred("refresh_selection")
 	if not flying:
 		return
 	if event is InputEventMouseButton:
@@ -1452,6 +1715,7 @@ func _input(event: InputEvent) -> void:
 			if not event.shift_pressed:
 				selection_painting = false
 	elif event is InputEventMouseMotion:
+		var previous_transform := camera.transform
 		if rmb_down:
 			rmb_drag_distance += event.relative.length()
 			rmb_dragging = rmb_dragging or rmb_drag_distance >= DRAG_THRESHOLD
@@ -1468,29 +1732,30 @@ func _input(event: InputEvent) -> void:
 			else:
 				selection_painting = false
 		orbit_target = camera.position - camera.global_basis.z * orbit_distance
+		if camera.transform != previous_transform:
+			camera_transform_changed()
 	get_viewport().set_input_as_handled()
 
 func _process(dt: float) -> void:
-	update_hint()
 	lighting_sync_delay -= dt
 	if lighting_sync_delay <= 0:
 		lighting_sync_delay = 0.25
+		sync_scene_environment()
 		sync_scene_lighting()
+		if built_appearance:
+			refresh_built_appearance()
 	if flying:
 		var direction = Vector3(float(held.get(KEY_D, false)) - float(held.get(KEY_A, false)),
 			float(held.get(KEY_E, false)) - float(held.get(KEY_Q, false)),
 			float(held.get(KEY_S, false)) - float(held.get(KEY_W, false)))
-		camera.position += camera.basis * direction.normalized() * dt * fly_speed * (FAST_FLY_FACTOR if held.get(KEY_SHIFT, false) else 1.0)
-		orbit_target = camera.position - camera.global_basis.z * orbit_distance
-	if surface_grid_visible and surface_grid_key != surface_grid_signature():
-		rebuild_surface_grid_overlay()
-	if ground_grid_key != ground_grid_signature():
-		rebuild_ground_grid()
-	sync_camera_marker()
-	update_orientation_gizmo()
+		if not direction.is_zero_approx():
+			camera.position += camera.basis * direction.normalized() * dt * fly_speed * (FAST_FLY_FACTOR if held.get(KEY_SHIFT, false) else 1.0)
+			orbit_target = camera.position - camera.global_basis.z * orbit_distance
+			camera_transform_changed()
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_EXIT_TREE:
+		disconnect_environment_resources()
 		_sync_suspension(true)
 	elif what == NOTIFICATION_ENTER_TREE:
 		call_deferred("_sync_suspension")

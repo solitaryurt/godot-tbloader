@@ -63,6 +63,16 @@ func samples(operation: Callable, count: int) -> Array:
 		values.append(measurement.usec)
 	return values
 
+func preview_samples(operation: Callable, count: int, name: String) -> Array:
+	var values: Array = []
+	for index in count:
+		var measurement := timed(operation)
+		var result = measurement.value
+		require(result is Dictionary and result.get("ok", false) and not result.get("changed", true)
+			and result.get("value", []).size() > 0, name + " returns read-only candidate geometry")
+		values.append(measurement.usec)
+	return values
+
 func frame_post_draw_boundary() -> int:
 	var state := {"drawn": false}
 	var completed := func(): state.drawn = true
@@ -204,6 +214,22 @@ func run() -> void:
 	report.timings_us.attach_session_and_initial_camera_rebuild = attach.usec
 	await get_tree().process_frame
 	var data: Array = candidate.draw_data()
+	var preview_brush: Dictionary = data[0]
+	var preview_ids := PackedInt64Array([preview_brush.id])
+	var preview_component := [{"brush_id": preview_brush.id, "kind": "face", "index": 0,
+		"topology_revision": preview_brush.topology_revision}]
+	var preview_revision: int = candidate.document.get_revision()
+	var preview_text: String = candidate.document.export_text().value
+	report.timings_us.native_preview_translate_one_brush = preview_samples(func():
+		return candidate.document.preview_translate_brushes(preview_ids, Vector3(candidate.grid, 0, 0)), report.samples, "one-brush translation preview")
+	report.timings_us.native_preview_rotate_one_brush = preview_samples(func():
+		return candidate.document.preview_rotate_brushes(preview_ids,
+			(preview_brush.aabb_min + preview_brush.aabb_max) * 0.5, 2, PI / 2), report.samples, "one-brush rotation preview")
+	report.timings_us.native_preview_translate_face_component = preview_samples(func():
+		return candidate.document.preview_translate_components(preview_component,
+			preview_brush.faces[0].normal * candidate.grid), report.samples, "face component translation preview")
+	require(candidate.document.get_revision() == preview_revision and candidate.document.export_text().value == preview_text,
+		"native preview samples preserve document revision and canonical text")
 	fit_graph(ui.graph_a, data)
 	fit_graph(ui.graph_b, data)
 	ui.camera_view.frame_selection()
@@ -249,7 +275,14 @@ func run() -> void:
 	ui.graph_b.queue_redraw()
 	report.timings_us.grid_redraw_queue_to_frame_post_draw = await frame_post_draw_boundary()
 	# Break down the synchronous path used when a grid move is committed.
-	candidate.selected = PackedInt64Array([data[0].id])
+	candidate.select(PackedInt64Array([data[0].id]))
+	report.timings_us.selection_refresh_cache_hit = samples(func(): ui.refresh_selection(), report.samples)
+	require(candidate.document.get_revision() == preview_revision and candidate.document.export_text().value == preview_text,
+		"selection refresh samples preserve document revision and canonical text")
+	# Real drags begin from an already rendered selection. Establish that A-state
+	# dense cache before measuring the A -> B -> A -> B history cycle.
+	await frame_post_draw_boundary()
+	var before_move_text: String = candidate.document.export_text().value
 	var move_capture_before := timed(func(): return candidate.capture())
 	report.timings_us.move_capture_before = move_capture_before.usec
 	var move_native := timed(func(): return candidate.translate_brushes(candidate.selected, Vector3(candidate.grid, 0, 0)))
@@ -258,6 +291,7 @@ func run() -> void:
 	report.timings_us.move_empty_point_translation = empty_point_move.usec
 	var move_capture_after := timed(func(): return candidate.capture())
 	report.timings_us.move_capture_after = move_capture_after.usec
+	var after_move_text: String = candidate.document.export_text().value
 	var move_refresh := timed(func():
 		candidate.change_kind = "brush_translation"
 		candidate.changed.emit()
@@ -266,6 +300,23 @@ func run() -> void:
 	ui.graph_a.apply_dense_translation(Vector3(candidate.grid, 0, 0))
 	ui.graph_b.apply_dense_translation(Vector3(candidate.grid, 0, 0))
 	report.timings_us.move_following_frame = await frame_post_draw_boundary()
+	var undo_restore_samples: Array = []
+	var undo_frame_samples: Array = []
+	var redo_restore_samples: Array = []
+	var redo_frame_samples: Array = []
+	for index in report.samples:
+		var undo := timed(func(): candidate.restore(move_capture_before.value))
+		undo_restore_samples.append(undo.usec)
+		require(candidate.document.export_text().value == before_move_text, "session undo restores exact Tohunga text")
+		undo_frame_samples.append(await frame_post_draw_boundary())
+		var redo := timed(func(): candidate.restore(move_capture_after.value))
+		redo_restore_samples.append(redo.usec)
+		require(candidate.document.export_text().value == after_move_text, "session redo restores exact Tohunga text")
+		redo_frame_samples.append(await frame_post_draw_boundary())
+	report.timings_us.undo_session_restore = undo_restore_samples
+	report.timings_us.undo_following_frame = undo_frame_samples
+	report.timings_us.redo_session_restore = redo_restore_samples
+	report.timings_us.redo_following_frame = redo_frame_samples
 	if failed:
 		finish(1)
 		return

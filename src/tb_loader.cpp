@@ -4,6 +4,7 @@
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include <builder.h>
+#include <map_document.h>
 #include <cmath>
 #include <vector>
 
@@ -16,7 +17,13 @@ void TBLoader::_bind_methods()
 
 	ClassDB::bind_method(D_METHOD("set_lighting_unwrap_texel_size", "lighting_unwrap_texel_size"), &TBLoader::set_lighting_unwrap_texel_size);
 	ClassDB::bind_method(D_METHOD("get_lighting_unwrap_texel_size"), &TBLoader::get_lighting_unwrap_texel_size);
+	ClassDB::bind_method(D_METHOD("set_lighting_unwrap_uv2", "lighting_unwrap_uv2"), &TBLoader::set_lighting_unwrap_uv2);
+	ClassDB::bind_method(D_METHOD("get_lighting_unwrap_uv2"), &TBLoader::get_lighting_unwrap_uv2);
 
+	ClassDB::bind_method(D_METHOD("set_collision", "option_collision"), &TBLoader::set_collision);
+	ClassDB::bind_method(D_METHOD("get_collision"), &TBLoader::get_collision);
+	ClassDB::bind_method(D_METHOD("set_filter_nearest", "option_filter_nearest"), &TBLoader::set_filter_nearest);
+	ClassDB::bind_method(D_METHOD("get_filter_nearest"), &TBLoader::get_filter_nearest);
 	ClassDB::bind_method(D_METHOD("set_skip_hidden_layers", "option_skip_hidden_layers"), &TBLoader::set_skip_hidden_layers);
 	ClassDB::bind_method(D_METHOD("get_skip_hidden_layers"), &TBLoader::get_skip_hidden_layers);
 	ClassDB::bind_method(D_METHOD("set_skip_empty_meshes", "option_skip_empty_meshes"), &TBLoader::set_skip_empty_meshes);
@@ -55,6 +62,7 @@ void TBLoader::_bind_methods()
 	ClassDB::bind_method(D_METHOD("clear"), &TBLoader::clear);
 	ClassDB::bind_method(D_METHOD("build_meshes"), &TBLoader::build_meshes);
 	ClassDB::bind_method(D_METHOD("build_meshes_checked"), &TBLoader::build_meshes_checked);
+	ClassDB::bind_method(D_METHOD("build_visual_preview_checked", "document", "target"), &TBLoader::build_visual_preview_checked);
 	ClassDB::bind_method(D_METHOD("resolve_material", "token"), &TBLoader::resolve_material);
 	ADD_SIGNAL(MethodInfo("map_resource_changed", PropertyInfo(Variant::STRING, "path")));
 
@@ -63,9 +71,12 @@ void TBLoader::_bind_methods()
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "map_inverse_scale", PROPERTY_HINT_NONE, "Inverse Scale"), "set_inverse_scale", "get_inverse_scale");
 
 	ADD_GROUP("Lighting", "lighting_");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "lighting_unwrap_uv2"), "set_lighting_unwrap_uv2", "get_lighting_unwrap_uv2");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "lighting_unwrap_texel_size", PROPERTY_HINT_NONE, "Unwrap Texel Size"), "set_lighting_unwrap_texel_size", "get_lighting_unwrap_texel_size");
 
 	ADD_GROUP("Options", "option_");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "option_collision"), "set_collision", "get_collision");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "option_filter_nearest"), "set_filter_nearest", "get_filter_nearest");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "option_skip_hidden_layers", PROPERTY_HINT_NONE, "Skip Hidden Layers"), "set_skip_hidden_layers", "get_skip_hidden_layers");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "option_skip_empty_meshes", PROPERTY_HINT_NONE, "Skip Empty Meshes"), "set_skip_empty_meshes", "get_skip_empty_meshes");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "option_clip_texture_name", PROPERTY_HINT_NONE, "Clip Texture"), "set_clip_texture_name", "get_clip_texture_name");
@@ -340,10 +351,10 @@ void TBLoader::build_meshes()
 }
 
 namespace {
-Dictionary bake_failure(const StringName& code, const String& message, const String& path)
+Dictionary build_failure(const StringName& code, const String& message, const String& path, const StringName& operation)
 {
 	Dictionary error;
-	error["code"] = code; error["message"] = message; error["operation"] = StringName("build_meshes_checked"); error["path"] = path;
+	error["code"] = code; error["message"] = message; error["operation"] = operation; error["path"] = path;
 	error["line"] = 0; error["column"] = 0; error["entity_id"] = int64_t(0); error["brush_id"] = int64_t(0); error["face"] = -1;
 	Dictionary result;
 	result["ok"] = false; result["changed"] = false; result["value"] = Variant(); result["error"] = error;
@@ -358,9 +369,9 @@ void collect_generated_owners(Node* node, Node* owner, std::vector<Node*>& nodes
 
 Dictionary TBLoader::build_meshes_checked()
 {
-	if (m_building) return bake_failure("BUSY", "A map bake is already in progress", m_map_path);
+	if (m_building) return build_failure("BUSY", "A map build is already in progress", m_map_path, "build_meshes_checked");
 	if (m_inverse_scale <= 0 || (m_lighting_unwrap_uv2 && (!std::isfinite(m_lighting_unwrap_texel_size) || m_lighting_unwrap_texel_size <= 0))) {
-		return bake_failure("INVALID_ARGUMENT", "Inverse scale and lightmap texel size must be positive and finite", m_map_path);
+		return build_failure("INVALID_ARGUMENT", "Inverse scale and lightmap texel size must be positive and finite", m_map_path, "build_meshes_checked");
 	}
 	m_building = true;
 	auto staging = memnew(Node3D());
@@ -370,9 +381,9 @@ Dictionary TBLoader::build_meshes_checked()
 		Dictionary error = result["error"];
 		error["operation"] = StringName("build_meshes_checked");
 	} else if (!builder.m_error.is_empty()) {
-		result = bake_failure("RESOURCE_LOAD_FAILED", builder.m_error, m_map_path);
+		result = build_failure("RESOURCE_LOAD_FAILED", builder.m_error, m_map_path, "build_meshes_checked");
 	} else if (!builder.build_map()) {
-		result = bake_failure("GENERATION_FAILED", builder.m_error, m_map_path);
+		result = build_failure("GENERATION_FAILED", builder.m_error, m_map_path, "build_meshes_checked");
 	} else {
 		// Only generated ownership changes. Owners internal to instantiated scenes
 		// remain internal; the staging owner is replaced by the edited scene owner.
@@ -393,6 +404,49 @@ Dictionary TBLoader::build_meshes_checked()
 		value["path"] = m_map_path;
 		value["child_count"] = count;
 		result["ok"] = true; result["changed"] = changed; result["value"] = value; result["error"] = Dictionary();
+	}
+	memdelete(staging);
+	m_building = false;
+	return result;
+}
+
+Dictionary TBLoader::build_visual_preview_checked(const Ref<TBMapDocument>& document, Node3D* target)
+{
+	const StringName operation = "build_visual_preview_checked";
+	String path = document.is_valid() ? document->get_path() : String();
+	if (m_building) return build_failure("BUSY", "A map build is already in progress", path, operation);
+	if (document.is_null() || !target) return build_failure("INVALID_ARGUMENT", "Document and preview target are required", path, operation);
+	if (m_inverse_scale <= 0 || (m_lighting_unwrap_uv2 && (!std::isfinite(m_lighting_unwrap_texel_size) || m_lighting_unwrap_texel_size <= 0))) {
+		return build_failure("INVALID_ARGUMENT", "Inverse scale and lightmap texel size must be positive and finite", path, operation);
+	}
+	m_building = true;
+	auto staging = memnew(Node3D());
+	Builder builder(this, staging, document->clone_map_for_build());
+	Dictionary result;
+	if (!builder.prepare_map_data()) {
+		result = build_failure("RESOURCE_LOAD_FAILED", builder.m_error, path, operation);
+	} else if (!builder.build_visual_map()) {
+		result = build_failure("GENERATION_FAILED", builder.m_error, path, operation);
+	} else {
+		std::vector<Node*> generated;
+		collect_generated_owners(staging, staging, generated);
+		for (Node* node : generated) node->set_owner(nullptr);
+		while (target->get_child_count() > 0) {
+			Node* child = target->get_child(0);
+			target->remove_child(child);
+			child->queue_free();
+		}
+		int count = staging->get_child_count();
+		while (staging->get_child_count() > 0) {
+			Node* child = staging->get_child(0);
+			staging->remove_child(child);
+			target->add_child(child);
+		}
+		Dictionary value;
+		value["child_count"] = count;
+		value["document_epoch"] = document->get_epoch();
+		value["document_revision"] = document->get_revision();
+		result["ok"] = true; result["changed"] = true; result["value"] = value; result["error"] = Dictionary();
 	}
 	memdelete(staging);
 	m_building = false;

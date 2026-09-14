@@ -10,6 +10,8 @@
 
 using namespace godot;
 
+namespace godot { class TBMapDocument; }
+
 class TBLoader : public Node3D
 {
 	GDCLASS(TBLoader, Node3D);
@@ -105,6 +107,7 @@ public:
 	void clear();
 	void build_meshes();
 	Dictionary build_meshes_checked();
+	Dictionary build_visual_preview_checked(const Ref<TBMapDocument>& document, Node3D* target);
 	Dictionary resolve_material(const String& token);
 
 private:

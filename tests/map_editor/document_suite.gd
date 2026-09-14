@@ -16,6 +16,7 @@ func run() -> void:
 	test_preview_chunks()
 	test_tohunga_fixture()
 	test_operations()
+	test_apply_face_edits()
 	test_rotation()
 	test_candidate_geometry_previews()
 	test_merge_brushes()
@@ -278,6 +279,14 @@ func test_preview_chunks() -> void:
 	checks.check(chunk.schema == 1 and chunk.texture == entry.texture and chunk.triangle_count == 12 and chunk.geometry_hash == entry.geometry_hash and chunk.geometry_version == 1, "materialized chunk matches manifest metadata")
 	checks.check(chunk.vertices.size() == 36 and chunk.normals.size() == 36 and chunk.uvs.size() == 36, "materialized chunk packs three corners per triangle")
 	var source: Dictionary = doc.get_preview_data()[0]
+	var draw_brush: Dictionary = doc.get_draw_data()[0]
+	var face_target := [{"brush_id": draw_brush.id, "index": 0, "topology_revision": draw_brush.topology_revision}]
+	var face_preview: PackedVector2Array = doc.get_face_preview_uvs(face_target, draw_brush.faces[0].texture)
+	var wrapped := face_preview.size() == 6
+	for uv in face_preview:
+		wrapped = wrapped and uv.x >= 0.0 and uv.x < 1.0 and uv.y >= 0.0 and uv.y < 1.0
+	checks.check(wrapped, "selected-face UV preview returns wrapped face triangles only")
+	checks.check(doc.get_face_preview_uvs(face_target, "missing/texture").is_empty(), "selected-face UV preview filters other materials")
 	var packed_index := 0
 	for triangle in source.triangle_brush_ids.size():
 		for corner in 3:
@@ -353,11 +362,17 @@ func test_preview_chunks() -> void:
 	expect_ok(change.rebuild(), "rebuild preview hash fixture")
 	var rebuilt: Dictionary = change.prepare_preview_chunks(1.0, PackedInt64Array(), 0)
 	checks.check(rebuilt.chunks[0].chunk_id == stable_id and rebuilt.chunks[0].geometry_hash == stable_hash, "equivalent rebuild preserves chunk ID and geometry hash")
+	var history_before = change.capture_history_state()
 	expect_ok(change.translate_brushes(PackedInt64Array([change_id]), Vector3.ONE), "change preview geometry")
 	checks.check(change.get_preview_chunk(stable_id).is_empty(), "map edit invalidates prepared chunk access")
 	var changed: Dictionary = change.prepare_preview_chunks(1.0, PackedInt64Array(), 0)
 	checks.check(changed.chunks[0].chunk_id == stable_id and changed.chunks[0].geometry_hash != stable_hash, "changed geometry keeps stable chunk ID and changes hash")
 	var changed_hash: String = changed.chunks[0].geometry_hash
+	var history_after = change.capture_history_state()
+	expect_ok(change.restore_history_state(history_before), "restore cached preview history state")
+	checks.check(change.get_preview_chunk(stable_id).geometry_hash == stable_hash and change.is_history_state_current(history_before), "history undo reuses its prepared preview and canonical identity")
+	expect_ok(change.restore_history_state(history_after), "redo cached preview history state")
+	checks.check(change.get_preview_chunk(stable_id).geometry_hash == changed_hash and change.is_history_state_current(history_after), "history redo reuses its prepared preview and canonical identity")
 	expect_ok(change.set_texture_sizes({"change/material": Vector2i(64, 32)}), "change preview texture dimensions")
 	checks.check(change.get_preview_chunk(stable_id).is_empty(), "texture-size regeneration invalidates prepared chunk access")
 	checks.check(change.prepare_preview_chunks(1.0, PackedInt64Array(), 0).chunks[0].geometry_hash != changed_hash, "texture-size UV change updates geometry hash")
@@ -382,6 +397,7 @@ func test_tohunga_fixture() -> void:
 	var initial_brushes: int = doc.get_draw_data().size()
 	checks.check(initial_brushes > 100 and doc.get_entities().size() > 1, "Tohunga loads substantial brush and entity topology")
 	var history_before = doc.capture_history_state()
+	var generation_before: int = doc.get_state_generation()
 	var original_text: String = doc.export_text().value
 	var original_ids: Dictionary = doc.snapshot().value.identities
 	checks.check(doc.is_history_state_current(history_before) and history_before.get_retained_bytes() > original_text.to_utf8_buffer().size(), "Tohunga native history accounts for canonical, parsed and generated state")
@@ -389,13 +405,14 @@ func test_tohunga_fixture() -> void:
 	var created: Dictionary = doc.create_cuboid(Vector3(-64, -64, -64), Vector3(64, 64, 64), "common/caulk")
 	expect_ok(created, "create Tohunga native-history brush")
 	var history_after = doc.capture_history_state()
+	var generation_after: int = doc.get_state_generation()
 	var edited_text: String = doc.export_text().value
 	var edited_ids: Dictionary = doc.snapshot().value.identities
-	checks.check(not doc.is_history_state_current(history_before) and doc.is_history_state_current(history_after), "committed edit changes native history state")
+	checks.check(generation_after != generation_before and not doc.is_history_state_current(history_before) and doc.is_history_state_current(history_after), "committed edit changes native history state")
 	expect_ok(doc.restore_history_state(history_before), "restore Tohunga native history undo")
-	checks.check(doc.export_text().value == original_text and doc.snapshot().value.identities == original_ids, "native history undo restores exact Tohunga map and identities")
+	checks.check(doc.get_state_generation() == generation_before and doc.export_text().value == original_text and doc.snapshot().value.identities == original_ids, "native history undo restores exact Tohunga map, identities and stable generation")
 	expect_ok(doc.restore_history_state(history_after), "restore Tohunga native history redo")
-	checks.check(doc.export_text().value == edited_text and doc.snapshot().value.identities == edited_ids, "native history redo restores exact Tohunga map and identities")
+	checks.check(doc.get_state_generation() == generation_after and doc.export_text().value == edited_text and doc.snapshot().value.identities == edited_ids, "native history redo restores exact Tohunga map, identities and stable generation")
 	var foreign = ClassDB.instantiate("TBMapDocument")
 	expect_failure(doc, doc.restore_history_state(foreign.capture_history_state()), state(doc), "SNAPSHOT_MISMATCH", "restore_history_state")
 	for repeat in 3:
@@ -762,6 +779,23 @@ func brush_data(doc, id: int) -> Dictionary:
 			return brush
 	return {}
 
+func face_edit_target(brush: Dictionary, face: int) -> Dictionary:
+	return {"brush_id": brush.id, "face": face, "topology_revision": brush.topology_revision}
+
+func face_uv_data(doc, brush: Dictionary) -> Array:
+	var result: Array = []
+	for face in brush.faces:
+		result.append(doc.get_face_uv(brush.id, face.index, brush.topology_revision).value)
+	return result
+
+func check_unchanged_brush_geometry(before: Dictionary, after: Dictionary, message: String) -> void:
+	for key in ["id", "entity_id", "aabb_min", "aabb_max", "vertices", "edges", "edge_vertex_indices"]:
+		checks.check(after[key] == before[key], message + " " + key)
+	checks.check(after.faces.size() == before.faces.size(), message + " face count")
+	for index in mini(after.faces.size(), before.faces.size()):
+		for key in ["index", "winding", "vertex_indices", "center", "normal"]:
+			checks.check(after.faces[index][key] == before.faces[index][key], message + " face %d %s" % [index, key])
+
 func assert_solid(doc, id: int, expected_volume: float = -1.0) -> void:
 	var b = brush_data(doc, id)
 	if not checks.check(not b.is_empty(), "solid has stable draw handle"):
@@ -935,6 +969,115 @@ func test_operations() -> void:
 		var expected = Vector2(p.dot(face_uv.u_axis) / face_uv.scale.x + face_uv.shift.x, p.dot(face_uv.v_axis) / face_uv.scale.y + face_uv.shift.y) / Vector2(128, 64)
 		checks.check(preview.uvs[i].is_equal_approx(expected), "Valve analytic UV normalization")
 	test_entities_and_clipboard(doc)
+
+func test_apply_face_edits() -> void:
+	var doc = ClassDB.instantiate("TBMapDocument")
+	var first: int = doc.create_cuboid(Vector3.ZERO, Vector3.ONE * 16, "first/original").value
+	var second: int = doc.create_cuboid(Vector3(32, 0, 0), Vector3(48, 16, 16), "second/original").value
+	var events := {"map": 0, "preview": 0, "dirty": 0}
+	doc.map_changed.connect(func(_revision): events.map += 1)
+	doc.preview_changed.connect(func(): events.preview += 1)
+	doc.dirty_changed.connect(func(_dirty): events.dirty += 1)
+
+	var first_before := brush_data(doc, first)
+	var second_before := brush_data(doc, second)
+	var first_uvs := face_uv_data(doc, first_before)
+	var second_uvs := face_uv_data(doc, second_before)
+	var revision_before: int = doc.get_revision()
+	var texture_edits := [face_edit_target(first_before, 0), face_edit_target(second_before, 1)]
+	texture_edits[0].texture = "batch/first"
+	texture_edits[1].texture = "batch/second"
+	var result: Dictionary = doc.apply_face_edits(texture_edits)
+	expect_ok(result, "multi-face texture batch")
+	checks.check(result.changed and doc.get_revision() == revision_before + 1 and events == {"map": 1, "preview": 0, "dirty": 0}, "texture batch commits one revision and signal")
+	var first_after := brush_data(doc, first)
+	var second_after := brush_data(doc, second)
+	checks.check(first_after.faces[0].texture == "batch/first" and second_after.faces[1].texture == "batch/second", "texture batch updates every target")
+	checks.check(first_after.faces[1].texture == "first/original" and second_after.faces[0].texture == "second/original", "texture batch leaves untargeted textures unchanged")
+	check_unchanged_brush_geometry(first_before, first_after, "texture batch preserves first geometry")
+	check_unchanged_brush_geometry(second_before, second_after, "texture batch preserves second geometry")
+	checks.check(face_uv_data(doc, first_after) == first_uvs and face_uv_data(doc, second_after) == second_uvs, "texture batch preserves all UV data")
+
+	first_before = first_after
+	second_before = second_after
+	var textures_before := [first_before.faces.map(func(face): return face.texture), second_before.faces.map(func(face): return face.texture)]
+	var uv_edits := [face_edit_target(first_before, 2), face_edit_target(second_before, 3)]
+	uv_edits[0].uv = {"shift": Vector2(4, -8), "rotation": 15.0, "scale": Vector2(0.5, 2)}
+	uv_edits[1].uv = {"shift": Vector2(-3, 9), "rotation": -30.0, "scale": Vector2(4, 0.25)}
+	revision_before = doc.get_revision()
+	result = doc.apply_face_edits(uv_edits)
+	expect_ok(result, "multi-face UV batch")
+	checks.check(result.changed and doc.get_revision() == revision_before + 1 and events == {"map": 2, "preview": 0, "dirty": 0}, "UV batch commits one revision and signal")
+	first_after = brush_data(doc, first)
+	second_after = brush_data(doc, second)
+	var first_after_uvs := face_uv_data(doc, first_after)
+	var second_after_uvs := face_uv_data(doc, second_after)
+	checks.check(first_after_uvs[2].shift == Vector2(4, -8) and first_after_uvs[2].rotation == 15.0 and first_after_uvs[2].scale == Vector2(0.5, 2), "first batched UV is exact")
+	checks.check(second_after_uvs[3].shift == Vector2(-3, 9) and second_after_uvs[3].rotation == -30.0 and second_after_uvs[3].scale == Vector2(4, 0.25), "second batched UV is exact")
+	checks.check(first_after_uvs[0] == first_uvs[0] and second_after_uvs[0] == second_uvs[0], "UV batch leaves untargeted UV data unchanged")
+	checks.check([first_after.faces.map(func(face): return face.texture), second_after.faces.map(func(face): return face.texture)] == textures_before, "UV batch preserves all textures")
+	check_unchanged_brush_geometry(first_before, first_after, "UV batch preserves first geometry")
+	check_unchanged_brush_geometry(second_before, second_after, "UV batch preserves second geometry")
+
+	first_before = first_after
+	var stale_revision: int = first_before.topology_revision
+	var combined := face_edit_target(first_before, 4)
+	combined.texture = "combined/material"
+	combined.uv = {"shift": Vector2(12, 6), "rotation": 45, "scale": Vector2(2, 3)}
+	revision_before = doc.get_revision()
+	result = doc.apply_face_edits([combined])
+	expect_ok(result, "combined texture and UV face edit")
+	first_after = brush_data(doc, first)
+	var combined_uv: Dictionary = doc.get_face_uv(first, 4, first_after.topology_revision).value
+	checks.check(result.changed and doc.get_revision() == revision_before + 1 and events == {"map": 3, "preview": 0, "dirty": 0}, "combined edit commits one revision and signal")
+	checks.check(first_after.faces[4].texture == "combined/material" and combined_uv.shift == Vector2(12, 6) and combined_uv.rotation == 45 and combined_uv.scale == Vector2(2, 3), "combined edit applies both fields")
+	check_unchanged_brush_geometry(first_before, first_after, "combined edit preserves geometry")
+
+	var unchanged := state(doc)
+	var events_before := events.duplicate()
+	result = doc.apply_face_edits([])
+	expect_ok(result, "empty face edit batch")
+	checks.check(not result.changed, "empty face edit batch is unchanged")
+	var current_uv: Dictionary = doc.get_face_uv(first, 4, first_after.topology_revision).value
+	var no_op := face_edit_target(first_after, 4)
+	no_op.texture = first_after.faces[4].texture
+	no_op.uv = {"shift": current_uv.shift, "rotation": current_uv.rotation, "scale": current_uv.scale}
+	result = doc.apply_face_edits([no_op])
+	expect_ok(result, "no-op face edit batch")
+	checks.check(not result.changed and state(doc) == unchanged and events == events_before, "empty and no-op batches preserve revision state and signals")
+
+	var duplicate_a := face_edit_target(first_after, 0)
+	duplicate_a.texture = "duplicate/a"
+	var duplicate_b := face_edit_target(first_after, 0)
+	duplicate_b.texture = "duplicate/b"
+	expect_failure(doc, doc.apply_face_edits([duplicate_a, duplicate_b]), unchanged, "INVALID_ARGUMENT", "apply_face_edits")
+	checks.check(events == events_before, "duplicate rejection emits no signals")
+
+	var valid_before_stale := face_edit_target(first_after, 5)
+	valid_before_stale.texture = "must/not/commit"
+	var stale := {"brush_id": second, "face": 4, "topology_revision": stale_revision, "texture": "stale/not/commit"}
+	expect_failure(doc, doc.apply_face_edits([valid_before_stale, stale]), unchanged, "STALE_COMPONENT", "apply_face_edits")
+	checks.check(state(doc) == unchanged and events == events_before, "stale target atomically rejects preceding valid edit")
+	var invalid := face_edit_target(first_after, 5)
+	invalid.brush_id = 999999
+	expect_failure(doc, doc.apply_face_edits([valid_before_stale, invalid]), unchanged, "INVALID_ID", "apply_face_edits")
+	checks.check(state(doc) == unchanged and events == events_before, "invalid target atomically rejects preceding valid edit")
+
+	var valve = ClassDB.instantiate("TBMapDocument")
+	if not expect_ok(valve.load_map("res://fixtures/valve_cube.map"), "load Valve face batch fixture"):
+		return
+	var valve_brush: Dictionary = valve.get_draw_data()[0]
+	var valve_before := state(valve)
+	var valve_events := {"map": 0, "preview": 0, "dirty": 0}
+	valve.map_changed.connect(func(_revision): valve_events.map += 1)
+	valve.preview_changed.connect(func(): valve_events.preview += 1)
+	valve.dirty_changed.connect(func(_dirty): valve_events.dirty += 1)
+	var valve_texture := face_edit_target(valve_brush, 0)
+	valve_texture.texture = "must/not/commit"
+	var valve_uv := face_edit_target(valve_brush, 1)
+	valve_uv.uv = {"shift": Vector2.ONE, "rotation": 0, "scale": Vector2.ONE}
+	expect_failure(valve, valve.apply_face_edits([valve_texture, valve_uv]), valve_before, "UNSUPPORTED_PROJECTION", "apply_face_edits")
+	checks.check(valve.get_draw_data()[0].faces[0].texture == valve_brush.faces[0].texture and valve_events == {"map": 0, "preview": 0, "dirty": 0}, "Valve UV rejection is atomic and emits no signals")
 
 func component(b: Dictionary, kind: String, index: int) -> Dictionary:
 	return {"brush_id": b.id, "kind": kind, "index": index, "topology_revision": b.topology_revision}

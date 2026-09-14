@@ -16,6 +16,14 @@
 				Clears all child nodes and imports the map specified in the properties to Godot nodes as new child nodes.
 			</description>
 		</method>
+		<method name="build_visual_preview_checked">
+			<return type="Dictionary" />
+			<param index="0" name="document" type="TBMapDocument" />
+			<param index="1" name="target" type="Node3D" />
+			<description>
+				Builds visual-only map geometry from the current in-memory document into an ownerless target. Existing target children are replaced only after a successful build.
+			</description>
+		</method>
 		<method name="clear">
 			<return type="void" />
 			<description>

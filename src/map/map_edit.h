@@ -27,6 +27,7 @@ struct LMEditEntity {
 };
 struct LMMapEdit {
 	std::vector<LMEditEntity> entities;
+	LMMapEdit() = default;
 	explicit LMMapEdit(const LMMapData &map);
 	std::string text(size_t reserve = 0) const;
 	LMEditEntity *entity(int64_t id);

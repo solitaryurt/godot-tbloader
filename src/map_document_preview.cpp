@@ -31,10 +31,15 @@ struct TBMapDocument::PreviewCache {
 		std::vector<Triangle> triangles;
 		String hash;
 	};
-	std::shared_ptr<LMMapData> source;
+	std::weak_ptr<LMMapData> source;
 	double scale = 1.0;
+	double chunk_size = 0.0;
+	int filter_mask = 0;
+	int chunk_triangles = 0;
+	std::vector<int64_t> hidden_ids;
 	std::vector<Chunk> chunks;
 	std::map<String, size_t> lookup;
+	Dictionary manifest;
 };
 
 namespace {
@@ -144,12 +149,28 @@ String chunk_hash(const Chunk &chunk, const LMMapData &map, double scale) {
 }
 
 Dictionary TBMapDocument::prepare_preview_chunks(double scale, const PackedInt64Array &hidden_ids, int filter_mask, int chunk_triangles, double chunk_size) {
-	preview_cache.reset();
-	if (!std::isfinite(scale) || scale <= 0 || !std::isfinite(chunk_size) || chunk_size <= 0 || chunk_triangles <= 0 || filter_mask < 0 || (filter_mask & ~(FILTER_ENTITIES | FILTER_CAULK | FILTER_CLIPS | FILTER_HINT_SKIP))) return Dictionary();
+	if (!std::isfinite(scale) || scale <= 0 || !std::isfinite(chunk_size) || chunk_size <= 0 || chunk_triangles <= 0 || filter_mask < 0 || (filter_mask & ~(FILTER_ENTITIES | FILTER_CAULK | FILTER_CLIPS | FILTER_HINT_SKIP))) {
+		preview_cache.reset();
+		return Dictionary();
+	}
+	std::vector<int64_t> hidden_key;
+	hidden_key.reserve(hidden_ids.size());
+	for (int i = 0; i < hidden_ids.size(); ++i) hidden_key.push_back(hidden_ids[i]);
+	std::sort(hidden_key.begin(), hidden_key.end());
+	hidden_key.erase(std::unique(hidden_key.begin(), hidden_key.end()), hidden_key.end());
+	if (preview_cache && preview_cache->source.lock() == map && preview_cache->scale == scale &&
+			preview_cache->chunk_size == chunk_size && preview_cache->chunk_triangles == chunk_triangles &&
+			preview_cache->filter_mask == filter_mask && preview_cache->hidden_ids == hidden_key) {
+		return preview_cache->manifest;
+	}
 
 	auto prepared = std::make_shared<PreviewCache>();
 	prepared->source = map;
 	prepared->scale = scale;
+	prepared->chunk_size = chunk_size;
+	prepared->chunk_triangles = chunk_triangles;
+	prepared->filter_mask = filter_mask;
+	prepared->hidden_ids = hidden_key;
 	std::unordered_set<int64_t> hidden;
 	for (int i = 0; i < hidden_ids.size(); ++i) hidden.insert(hidden_ids[i]);
 
@@ -243,12 +264,32 @@ Dictionary TBMapDocument::prepare_preview_chunks(double scale, const PackedInt64
 	manifest["schema"] = 1;
 	manifest["triangle_count"] = total_triangles;
 	manifest["chunks"] = manifest_chunks;
+	prepared->manifest = manifest;
 	preview_cache = std::move(prepared);
 	return manifest;
 }
 
+void TBMapDocument::retain_preview_cache() {
+	if (!preview_cache) return;
+	preview_history.erase(std::remove_if(preview_history.begin(), preview_history.end(), [&](const auto &cached) {
+		return cached->source.expired() || cached->source.lock() == preview_cache->source.lock();
+	}), preview_history.end());
+	preview_history.push_back(preview_cache);
+	if (preview_history.size() > 2) preview_history.erase(preview_history.begin());
+}
+
+void TBMapDocument::restore_preview_cache() {
+	preview_cache.reset();
+	for (auto it = preview_history.rbegin(); it != preview_history.rend(); ++it) {
+		if ((*it)->source.lock() == map) {
+			preview_cache = *it;
+			break;
+		}
+	}
+}
+
 Dictionary TBMapDocument::get_preview_chunk(const String &chunk_id) const {
-	if (!preview_cache || preview_cache->source != map) return Dictionary();
+	if (!preview_cache || preview_cache->source.lock() != map) return Dictionary();
 	const auto found = preview_cache->lookup.find(chunk_id);
 	if (found == preview_cache->lookup.end()) return Dictionary();
 	const auto &chunk = preview_cache->chunks[found->second];

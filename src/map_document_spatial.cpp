@@ -18,6 +18,7 @@ int material_filter(const char *texture);
 }
 
 struct TBMapDocument::SpatialIndex {
+	std::weak_ptr<LMMapData> source;
 	struct Bounds { vec3 mins{}, maxs{}; };
 	struct Entry {
 		Bounds bounds;
@@ -66,7 +67,8 @@ struct TBMapDocument::SpatialIndex {
 		return node_index;
 	}
 
-	explicit SpatialIndex(const LMMapData &map) {
+	explicit SpatialIndex(const std::shared_ptr<LMMapData> &source_map) : source(source_map) {
+		const LMMapData &map = *source_map;
 		int source_order = 0;
 		for (int e = 0; e < map.entity_count; ++e) {
 			const auto &entity = map.entities[e];
@@ -188,10 +190,29 @@ int material_filter(const char *texture) {
 
 void TBMapDocument::invalidate_spatial_index() { spatial_index.reset(); }
 
+void TBMapDocument::retain_spatial_index() {
+	if (!spatial_index) return;
+	spatial_history.erase(std::remove_if(spatial_history.begin(), spatial_history.end(), [&](const auto &cached) {
+		return cached->source.expired() || cached->source.lock() == spatial_index->source.lock();
+	}), spatial_history.end());
+	spatial_history.push_back(spatial_index);
+	if (spatial_history.size() > 2) spatial_history.erase(spatial_history.begin());
+}
+
+void TBMapDocument::restore_spatial_index() {
+	spatial_index.reset();
+	for (auto it = spatial_history.rbegin(); it != spatial_history.rend(); ++it) {
+		if ((*it)->source.lock() == map) {
+			spatial_index = *it;
+			break;
+		}
+	}
+}
+
 void TBMapDocument::invalidate_preview_cache() { preview_cache.reset(); }
 
 const TBMapDocument::SpatialIndex &TBMapDocument::get_spatial_index() const {
-	if (!spatial_index) spatial_index = std::make_shared<SpatialIndex>(*map);
+	if (!spatial_index) spatial_index = std::make_shared<SpatialIndex>(map);
 	return *spatial_index;
 }
 

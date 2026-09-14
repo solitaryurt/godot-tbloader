@@ -6,6 +6,7 @@ signal message(text: String)
 signal action_recorded(token: RefCounted)
 
 const Action = preload("res://addons/tbloader/src/editor/map_action.gd")
+const HISTORY_CACHE_LIMIT = 4
 var document = ClassDB.instantiate("TBMapDocument")
 var selected = PackedInt64Array()
 var points = PackedInt64Array()
@@ -51,7 +52,15 @@ var _draw_valid = false
 var _entity_valid = false
 var _marker_valid = false
 var _pending_brush_translation: Dictionary = {}
+var _history_caches: Dictionary = {}
+var _history_cache_order: Array = []
 var change_kind = ""
+
+func notify_changed(kind: String = "content") -> void:
+	var previous: String = change_kind
+	change_kind = kind
+	changed.emit()
+	change_kind = previous
 
 func _init() -> void:
 	document.map_changed.connect(_map_changed)
@@ -63,8 +72,10 @@ func _map_changed(_revision: int) -> void:
 		patch_draw_translation(_pending_brush_translation.ids, _pending_brush_translation.delta)
 	else:
 		_draw_valid = false
+		_draw_index = {}
+		_draw_positions = {}
 		_entity_valid = false
-		_brush_entity_ids.clear()
+		_brush_entity_ids = {}
 		_marker_valid = false
 	preview_generation += 1
 
@@ -90,8 +101,13 @@ func _sync_visibility_generation() -> bool:
 
 func patch_draw_translation(ids: PackedInt64Array, movement: Vector3) -> void:
 	var topology_revision: int = document.get_topology_revision()
+	# Preserve the historical array before replacing translated entries. Revision
+	# tokens are rebound whenever a cached state becomes current.
+	_draw_cache = _draw_cache.duplicate()
+	_draw_index = _draw_index.duplicate()
 	for cached in _draw_cache:
 		cached.topology_revision = topology_revision
+		_draw_index[cached.id] = cached
 	for id in ids:
 		if not _draw_index.has(id):
 			continue
@@ -123,8 +139,8 @@ func translate_brushes(ids: PackedInt64Array, movement: Vector3) -> Dictionary:
 func _preview_changed() -> void:
 	# Rebuilds can replace topology caches without changing canonical map text.
 	_draw_valid = false
-	_draw_index.clear()
-	_draw_positions.clear()
+	_draw_index = {}
+	_draw_positions = {}
 	preview_generation += 1
 
 func dispose() -> void:
@@ -138,6 +154,8 @@ func dispose() -> void:
 	_entity_cache.clear()
 	_brush_entity_ids.clear()
 	_marker_cache.clear()
+	_history_caches.clear()
+	_history_cache_order.clear()
 
 func draw_data() -> Array:
 	if not _draw_valid:
@@ -167,16 +185,57 @@ func entity_data() -> Array:
 	return _entity_cache
 
 func capture() -> Dictionary:
-	return {"native": document.capture_history_state(), "selected_brush_ids": selected.duplicate(),
-		"points": points.duplicate(),
-		"components": components.filter(func(c): return component_valid(c, brush(c.brush_id))).duplicate(true),
-		"workzone": workzone}
+	var native = document.capture_history_state()
+	var captured_components := components.filter(func(c): return component_valid(c, brush(c.brush_id))).duplicate(true)
+	_remember_history_cache(native)
+	return {"native": native, "selected_brush_ids": selected.duplicate(), "points": points.duplicate(),
+		"components": captured_components, "workzone": workzone}
+
+func _remember_history_cache(state: RefCounted) -> void:
+	var state_id := state.get_instance_id()
+	var cached := {}
+	if _draw_valid:
+		cached.draw = _draw_cache
+		cached.draw_index = _draw_index
+		cached.draw_positions = _draw_positions
+	if _entity_valid:
+		cached.entities = _entity_cache
+		cached.brush_entity_ids = _brush_entity_ids
+	if _marker_valid:
+		cached.markers = _marker_cache
+	if cached.is_empty():
+		return
+	if _history_caches.has(state_id):
+		_history_cache_order.erase(state_id)
+	_history_caches[state_id] = cached
+	_history_cache_order.append(state_id)
+	while _history_cache_order.size() > HISTORY_CACHE_LIMIT:
+		_history_caches.erase(_history_cache_order.pop_front())
+
+func _restore_history_cache(state: RefCounted) -> void:
+	var cached: Dictionary = _history_caches.get(state.get_instance_id(), {})
+	if cached.has("draw"):
+		_draw_cache = cached.draw.duplicate()
+		_draw_index = cached.draw_index.duplicate()
+		_draw_positions = cached.draw_positions.duplicate()
+		var topology_revision: int = document.get_topology_revision()
+		for item in _draw_cache:
+			item.topology_revision = topology_revision
+		_draw_valid = true
+	if cached.has("entities"):
+		_entity_cache = cached.entities
+		_brush_entity_ids = cached.brush_entity_ids.duplicate()
+		_entity_valid = true
+	if cached.has("markers"):
+		_marker_cache = cached.markers
+		_marker_valid = true
 
 func restore(state: Dictionary) -> void:
 	var result: Dictionary = document.restore_history_state(state.native)
 	if not result.ok:
 		report(result)
 		return
+	_restore_history_cache(state.native)
 	save_enabled = true
 	selected = state.selected_brush_ids.duplicate()
 	points = state.points.duplicate()
@@ -188,7 +247,7 @@ func restore(state: Dictionary) -> void:
 	prune(false)
 	_sync_selection_generation()
 	_sync_visibility_generation()
-	changed.emit()
+	notify_changed()
 
 func report(result: Dictionary) -> bool:
 	if not result.ok:
@@ -208,7 +267,7 @@ func transact(label: String, operation: Callable, kind := "") -> bool:
 	prune()
 	var after = capture()
 	if document.is_history_state_current(before.native):
-		changed.emit()
+		notify_changed()
 		return false
 	var token = Action.new()
 	save_enabled = true
@@ -224,9 +283,7 @@ func transact(label: String, operation: Callable, kind := "") -> bool:
 	manager.add_undo_reference(token)
 	manager.commit_action(false)
 	action_recorded.emit(token)
-	change_kind = kind
-	changed.emit()
-	change_kind = ""
+	notify_changed(kind if not kind.is_empty() else "content")
 	return true
 
 func brush(id: int) -> Dictionary:
@@ -252,6 +309,12 @@ func nearest_visible_ray_hit(origin: Vector3, direction: Vector3, max_distance: 
 	return document.query_ray_nearest_visible(origin, direction, max_distance,
 		hidden_brush_ids(), visibility_filter_mask())
 
+func apply_face_edits(edits: Array) -> Dictionary:
+	var result: Dictionary = document.apply_face_edits(edits)
+	if result.ok and result.changed:
+		rebind_components()
+	return result
+
 func hidden_brush_ids() -> PackedInt64Array:
 	var result := PackedInt64Array()
 	for id in hidden:
@@ -275,7 +338,7 @@ func rebind_components() -> void:
 			component.topology_revision = item.topology_revision
 
 func select_component(component: Dictionary, toggle: bool) -> void:
-	prune(false)
+	prune_selection(false)
 	if component.is_empty():
 		if not toggle:
 			components.clear()
@@ -288,8 +351,7 @@ func select_component(component: Dictionary, toggle: bool) -> void:
 	elif not components.has(component):
 		components = [component]
 	_sync_selection_generation()
-	_sync_visibility_generation()
-	changed.emit()
+	notify_changed("selection")
 
 func move_components(movement: Vector3) -> Dictionary:
 	var old: Dictionary = {}
@@ -322,9 +384,8 @@ func vertex_at(item: Dictionary, position: Vector3) -> int:
 	return -1
 
 func prune(sync_generations := true) -> void:
-	var existing: Dictionary = {}
-	for item in draw_data():
-		existing[item.id] = true
+	draw_data()
+	var existing: Dictionary = _draw_index
 	for id in hidden.keys():
 		if not existing.has(id):
 			hidden.erase(id)
@@ -352,6 +413,33 @@ func prune(sync_generations := true) -> void:
 		_sync_selection_generation()
 		_sync_visibility_generation()
 
+func prune_selection(sync_generation := true) -> void:
+	draw_data()
+	var valid := PackedInt64Array()
+	for id in selected:
+		var item: Dictionary = _draw_index.get(id, {})
+		if brush_visible(item):
+			valid.append(id)
+	selected = valid
+	components = components.filter(func(c): return component_valid(c, _draw_index.get(c.brush_id, {})))
+	var marker_ids: Dictionary = {}
+	for marker in point_markers():
+		marker_ids[marker.id] = true
+	valid = PackedInt64Array()
+	if marker_visible():
+		for id in points:
+			if marker_ids.has(id):
+				valid.append(id)
+	points = valid
+	var first := true
+	for id in selected:
+		var item: Dictionary = _draw_index[id]
+		var bounds := AABB(item.aabb_min, item.aabb_max - item.aabb_min)
+		workzone = bounds if first else workzone.merge(bounds)
+		first = false
+	if sync_generation:
+		_sync_selection_generation()
+
 func select(ids: PackedInt64Array, point_ids: PackedInt64Array = PackedInt64Array()) -> void:
 	var previous_selected: PackedInt64Array = selected.duplicate()
 	var previous_points: PackedInt64Array = points.duplicate()
@@ -359,12 +447,11 @@ func select(ids: PackedInt64Array, point_ids: PackedInt64Array = PackedInt64Arra
 	selected = ids
 	points = point_ids
 	components.clear()
-	prune(false)
+	prune_selection(false)
 	_sync_selection_generation()
-	_sync_visibility_generation()
 	if selected == previous_selected and points == previous_points and components == previous_components:
 		return
-	changed.emit()
+	notify_changed("selection")
 
 func hide_selection(reveal: bool) -> void:
 	if reveal:
@@ -376,7 +463,7 @@ func hide_selection(reveal: bool) -> void:
 		components.clear()
 	_sync_selection_generation()
 	_sync_visibility_generation()
-	changed.emit()
+	notify_changed("visibility")
 
 func set_visibility_filter(category: String, hide: bool) -> void:
 	if not visibility_filters.has(category) or visibility_filters[category] == hide:
@@ -385,7 +472,7 @@ func set_visibility_filter(category: String, hide: bool) -> void:
 	prune(false)
 	_sync_selection_generation()
 	_sync_visibility_generation()
-	changed.emit()
+	notify_changed("visibility")
 
 func material_filtered(texture: String) -> bool:
 	var name := texture.to_lower().replace("\\", "/").get_file().get_basename()
@@ -419,6 +506,8 @@ func brush_has_entity_owner(item: Dictionary) -> bool:
 	return _brush_entity_ids.has(owner_id)
 
 func hidden_count() -> int:
+	if not visibility_filters.entities and not visibility_filters.caulk and not visibility_filters.clips and not visibility_filters.hint_skip:
+		return hidden.size()
 	var ids: Dictionary = hidden.duplicate()
 	for item in draw_data():
 		if not brush_visible(item):
