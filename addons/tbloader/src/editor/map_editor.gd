@@ -494,7 +494,7 @@ func apply_clip(split: bool, hidden_axis := -1, camera_direction := Vector3.ZERO
 
 func refresh_cut_views() -> void:
 	for graph in graphs:
-		graph.queue_redraw()
+		graph.queue_selection_redraw()
 	for camera in cameras:
 		camera.rebuild_cut_overlay()
 
@@ -748,7 +748,8 @@ func _session_changed(origin: RefCounted) -> void:
 			refresh_visibility()
 		elif origin.change_kind == "brush_translation":
 			for graph in graphs:
-				graph.queue_redraw()
+				graph.queue_static_redraw()
+				graph.queue_selection_redraw()
 			for camera in cameras:
 				camera.refresh()
 			refresh_status()
@@ -879,7 +880,7 @@ func refresh() -> void:
 	if session == null:
 		return
 	for graph in graphs:
-		graph.queue_redraw()
+		graph.queue_view_redraw()
 	sync_texture_sizes()
 	for camera in cameras:
 		camera.refresh()
@@ -893,7 +894,7 @@ func refresh() -> void:
 
 func refresh_selection() -> void:
 	for graph in graphs:
-		graph.queue_redraw()
+		graph.queue_selection_redraw()
 	for camera in cameras:
 		camera.refresh_selection()
 	refresh_status()
@@ -906,7 +907,7 @@ func refresh_selection() -> void:
 
 func refresh_visibility() -> void:
 	for graph in graphs:
-		graph.queue_redraw()
+		graph.queue_view_redraw()
 	for camera in cameras:
 		camera.refresh()
 	refresh_status()
@@ -1024,15 +1025,21 @@ func route_key(event: InputEventKey, graph: Control) -> bool:
 					Vector3.ZERO if is_instance_valid(graph) else active_camera_direction())
 			KEY_BRACKETLEFT:
 				session.grid = maxf(0.125, session.grid / 2)
+				for view in graphs:
+					view.queue_static_redraw()
 			KEY_BRACKETRIGHT:
 				session.grid = minf(1024, session.grid * 2)
+				for view in graphs:
+					view.queue_static_redraw()
 			_:
 				if key >= KEY_1 and key <= KEY_9:
 					session.grid = pow(2, key - KEY_1)
+					for view in graphs:
+						view.queue_static_redraw()
 				else:
 					return false
 	for view in graphs:
-		view.queue_redraw()
+		view.queue_selection_redraw()
 	refresh_status()
 	return true
 
@@ -2001,6 +2008,12 @@ func restore_recovery() -> void:
 		restored_indices.append(index)
 	if restored.is_empty():
 		return
+	# Godot cannot remove individual expired global history entries. Retire their
+	# payloads before recovery disposes the old sessions; callbacks remain no-ops.
+	for token in tokens:
+		if sessions.has(token.session):
+			token.retire()
+	tokens = tokens.filter(func(token): return token.session != null)
 	for origin in sessions:
 		origin.dispose()
 	sessions.clear()

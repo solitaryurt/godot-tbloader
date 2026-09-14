@@ -18,12 +18,18 @@ int material_filter(const char *texture);
 }
 
 struct TBMapDocument::SpatialIndex {
-	std::weak_ptr<LMMapData> source;
+	std::shared_ptr<LMMapData> source;
+	std::shared_ptr<const TBMapDocumentState::BaseEditorGeometry> base_geometry;
+	std::shared_ptr<const EditorState> overlay;
+	int64_t state_generation = 0;
 	struct Bounds { vec3 mins{}, maxs{}; };
 	struct Entry {
 		Bounds bounds;
-		int entity = 0;
-		int brush = 0;
+		int64_t brush_id = 0;
+		int64_t entity_id = 0;
+		const LMBrush *brush = nullptr;
+		std::shared_ptr<const LMEditorBrushGeometry> geometry;
+		std::shared_ptr<const EditorState::BrushRecord> compact;
 		int source_order = 0;
 		int face_filter_begin = 0;
 		bool owned = false;
@@ -67,7 +73,7 @@ struct TBMapDocument::SpatialIndex {
 		return node_index;
 	}
 
-	explicit SpatialIndex(const std::shared_ptr<LMMapData> &source_map) : source(source_map) {
+	explicit SpatialIndex(const std::shared_ptr<LMMapData> &source_map, const std::shared_ptr<const TBMapDocumentState::BaseEditorGeometry> &base_store, const std::shared_ptr<const EditorState> &source_overlay, int64_t generation) : source(source_map), base_geometry(base_store), overlay(source_overlay), state_generation(generation) {
 		const LMMapData &map = *source_map;
 		int source_order = 0;
 		for (int e = 0; e < map.entity_count; ++e) {
@@ -75,21 +81,28 @@ struct TBMapDocument::SpatialIndex {
 			for (int p = 0; p < entity.primitive_count; ++p) {
 				const auto &primitive = entity.primitives[p];
 				if (primitive.is_patch) continue;
-				const auto &brush = entity.brushes[primitive.index];
-				const auto &geometry = map.entity_geo[e].brushes[primitive.index];
+				const auto &base_brush = entity.brushes[primitive.index];
+				const LMBrush *brush = &base_brush;
+				std::shared_ptr<const LMEditorBrushGeometry> geometry;
+				auto base_found = base_store->brushes.find(base_brush.id); if (base_found != base_store->brushes.end()) geometry = base_found->second;
+				std::shared_ptr<const EditorState::BrushRecord> compact;
+				if (overlay) {
+					auto found = overlay->brushes.find(base_brush.id);
+					if (found != overlay->brushes.end()) { compact = found->second; brush = &compact->brush; geometry = compact->geometry; }
+				}
 				Bounds bounds{}; bool first = true;
-				for (int f = 0; f < geometry.face_count; ++f) for (int v = 0; v < geometry.faces[f].vertex_count; ++v) {
-					const vec3 point = geometry.faces[f].vertices[v].vertex;
+				auto include = [&](vec3 point) {
 					if (first) { bounds.mins = bounds.maxs = point; first = false; }
 					else {
 						bounds.mins = {std::min(bounds.mins.x, point.x), std::min(bounds.mins.y, point.y), std::min(bounds.mins.z, point.z)};
 						bounds.maxs = {std::max(bounds.maxs.x, point.x), std::max(bounds.maxs.y, point.y), std::max(bounds.maxs.z, point.z)};
 					}
-				}
+				};
+				if (geometry) for (const vec3 point : geometry->positions) include(point);
 				if (!first) {
 					const int filter_begin = face_filters.size();
-					for (int f = 0; f < brush.face_count; ++f) face_filters.push_back(material_filter(map.textures[brush.faces[f].texture_idx].name));
-					entries.push_back({bounds, e, primitive.index, source_order++, filter_begin, entity_owned(entity)});
+					for (int f = 0; f < brush->face_count; ++f) face_filters.push_back(material_filter(compact ? compact->materials[f].c_str() : map.textures[brush->faces[f].texture_idx].name));
+					entries.push_back({bounds, brush->id, entity.id, brush, geometry, compact, source_order++, filter_begin, entity_owned(entity)});
 				}
 			}
 		}
@@ -98,6 +111,80 @@ struct TBMapDocument::SpatialIndex {
 		if (!entries.empty()) build_node(0, entries.size());
 	}
 };
+
+void TBMapDocument::rebind_spatial_indexes(const std::shared_ptr<LMMapData> &previous) {
+	auto rebind = [&](std::shared_ptr<SpatialIndex> &index) {
+		if (!index || index->source != previous) return;
+		index->source = map;
+		for (auto &entry : index->entries) {
+			const auto *location = live_location(entry.brush_id, 'b');
+			if (!location) { index.reset(); return; }
+			const auto &base = map->entities[location->entity].brushes[location->index];
+			entry.entity_id = map->entities[location->entity].id;
+			entry.brush = &base;
+			auto base_found = index->base_geometry->brushes.find(entry.brush_id); entry.geometry = base_found == index->base_geometry->brushes.end() ? nullptr : base_found->second;
+			entry.compact.reset();
+			if (index->overlay) {
+				auto found = index->overlay->brushes.find(entry.brush_id);
+				if (found != index->overlay->brushes.end()) { entry.compact = found->second; entry.brush = &entry.compact->brush; entry.geometry = entry.compact->geometry; }
+			}
+		}
+	};
+	rebind(spatial_index);
+	for (auto &index : spatial_history) rebind(index);
+}
+
+void TBMapDocument::rebind_spatial_context() {
+	spatial_history.clear();
+	if (!spatial_index) return;
+	if (spatial_index->state_generation != state_generation) { spatial_index.reset(); return; }
+	spatial_index->source = map;
+	spatial_index->base_geometry = base_geometry;
+	spatial_index->overlay = editor;
+	for (auto &entry : spatial_index->entries) {
+		const auto *location = live_location(entry.brush_id, 'b');
+		if (!location) { spatial_index.reset(); return; }
+		const auto &base = map->entities[location->entity].brushes[location->index];
+		entry.entity_id = map->entities[location->entity].id;
+		entry.brush = &base;
+		entry.compact.reset();
+		auto base_found = base_geometry->brushes.find(entry.brush_id);
+		entry.geometry = base_found == base_geometry->brushes.end() ? nullptr : base_found->second;
+		if (editor) {
+			auto found = editor->brushes.find(entry.brush_id);
+			if (found != editor->brushes.end()) { entry.compact = found->second; entry.brush = &entry.compact->brush; entry.geometry = entry.compact->geometry; }
+		}
+		for (int f = 0; f < entry.brush->face_count; ++f) spatial_index->face_filters[entry.face_filter_begin + f] =
+				material_filter(entry.compact ? entry.compact->materials[f].c_str() : map->textures[entry.brush->faces[f].texture_idx].name);
+	}
+}
+
+void TBMapDocument::append_spatial_cache_counters(Dictionary &out) const {
+	int64_t stale = 0;
+	out["spatial_entries"] = spatial_index ? static_cast<int64_t>(spatial_index->entries.size()) : 0;
+	out["spatial_nodes"] = spatial_index ? static_cast<int64_t>(spatial_index->nodes.size()) : 0;
+	if (spatial_index) {
+		stale += spatial_index->source != map || spatial_index->base_geometry != base_geometry || spatial_index->overlay != editor;
+		for (const auto &entry : spatial_index->entries) {
+			const auto *location = live_location(entry.brush_id, 'b');
+			if (!location) { ++stale; continue; }
+			const auto &base = map->entities[location->entity].brushes[location->index];
+			const LMBrush *brush = &base;
+			std::shared_ptr<const LMEditorBrushGeometry> geometry;
+			auto base_found = base_geometry->brushes.find(entry.brush_id);
+			if (base_found != base_geometry->brushes.end()) geometry = base_found->second;
+			std::shared_ptr<const EditorState::BrushRecord> compact;
+			if (editor) {
+				auto found = editor->brushes.find(entry.brush_id);
+				if (found != editor->brushes.end()) { compact = found->second; brush = &compact->brush; geometry = compact->geometry; }
+			}
+			if (entry.brush != brush || entry.geometry != geometry || entry.compact != compact) ++stale;
+			for (int f = 0; f < brush->face_count; ++f) if (spatial_index->face_filters[entry.face_filter_begin + f] !=
+					material_filter(compact ? compact->materials[f].c_str() : map->textures[brush->faces[f].texture_idx].name)) ++stale;
+		}
+	}
+	out["spatial_stale_context_refs"] = stale;
+}
 
 namespace {
 double component(vec3 value, int axis) { return axis == 0 ? value.x : axis == 1 ? value.y : value.z; }
@@ -190,10 +277,25 @@ int material_filter(const char *texture) {
 
 void TBMapDocument::invalidate_spatial_index() { spatial_index.reset(); }
 
+void TBMapDocument::clear_spatial_caches() { spatial_index.reset(); spatial_history.clear(); }
+
+void TBMapDocument::advance_spatial_index(const std::shared_ptr<const EditorState> &next, const std::vector<int64_t> &ids, LMEditorBrushDirtyDomain domains, int64_t generation) {
+	if (!spatial_index) return;
+	if ((domains & LMEditorBrushDirtyDomain::SPATIAL) != LMEditorBrushDirtyDomain::NONE || (domains & LMEditorBrushDirtyDomain::TOPOLOGY) != LMEditorBrushDirtyDomain::NONE) { spatial_index.reset(); return; }
+	auto updated = std::make_shared<SpatialIndex>(*spatial_index); updated->overlay = next; updated->state_generation = generation;
+	if ((domains & LMEditorBrushDirtyDomain::MATERIAL) != LMEditorBrushDirtyDomain::NONE) for (int64_t id : ids) for (auto &entry : updated->entries) if (entry.brush_id == id) {
+		auto found = next ? next->brushes.find(id) : decltype(next->brushes.find(id)){};
+		if (next && found != next->brushes.end()) { entry.compact = found->second; entry.brush = &entry.compact->brush; entry.geometry = entry.compact->geometry; }
+		else { const auto *location = live_location(id, 'b'); entry.compact.reset(); entry.brush = &map->entities[location->entity].brushes[location->index]; auto base_found = updated->base_geometry->brushes.find(id); entry.geometry = base_found == updated->base_geometry->brushes.end() ? nullptr : base_found->second; }
+		for (int f = 0; f < entry.brush->face_count; ++f) updated->face_filters[entry.face_filter_begin + f] = material_filter(entry.compact ? entry.compact->materials[f].c_str() : map->textures[entry.brush->faces[f].texture_idx].name);
+	}
+	spatial_index = std::move(updated);
+}
+
 void TBMapDocument::retain_spatial_index() {
 	if (!spatial_index) return;
 	spatial_history.erase(std::remove_if(spatial_history.begin(), spatial_history.end(), [&](const auto &cached) {
-		return cached->source.expired() || cached->source.lock() == spatial_index->source.lock();
+		return cached->state_generation == spatial_index->state_generation;
 	}), spatial_history.end());
 	spatial_history.push_back(spatial_index);
 	if (spatial_history.size() > 2) spatial_history.erase(spatial_history.begin());
@@ -202,17 +304,17 @@ void TBMapDocument::retain_spatial_index() {
 void TBMapDocument::restore_spatial_index() {
 	spatial_index.reset();
 	for (auto it = spatial_history.rbegin(); it != spatial_history.rend(); ++it) {
-		if ((*it)->source.lock() == map) {
+		if ((*it)->state_generation == state_generation) {
 			spatial_index = *it;
 			break;
 		}
 	}
 }
 
-void TBMapDocument::invalidate_preview_cache() { preview_cache.reset(); }
+void TBMapDocument::invalidate_preview_cache() { preview_cache.reset(); preview_history_restored = false; }
 
 const TBMapDocument::SpatialIndex &TBMapDocument::get_spatial_index() const {
-	if (!spatial_index) spatial_index = std::make_shared<SpatialIndex>(map);
+	if (!spatial_index || spatial_index->state_generation != state_generation) spatial_index = std::make_shared<SpatialIndex>(map, base_geometry, editor, state_generation);
 	return *spatial_index;
 }
 
@@ -233,7 +335,7 @@ PackedInt64Array TBMapDocument::query_brushes_2d(int hidden_axis, Vector3 mins, 
 		} else { stack.push_back(node.left); stack.push_back(node.right); }
 	}
 	std::sort(matches.begin(), matches.end(), [&](int a, int b) { return index.entries[a].source_order < index.entries[b].source_order; });
-	for (int match : matches) result.push_back(map->entities[index.entries[match].entity].brushes[index.entries[match].brush].id);
+	for (int match : matches) result.push_back(index.entries[match].brush_id);
 	return result;
 }
 
@@ -257,16 +359,13 @@ Array TBMapDocument::query_ray(Vector3 origin, Vector3 direction, double max_dis
 	std::vector<Hit> hits;
 	for (int candidate : candidates) {
 		const auto &entry = index.entries[candidate];
-		const auto &brush = map->entities[entry.entity].brushes[entry.brush];
-		const auto &geometry = map->entity_geo[entry.entity].brushes[entry.brush];
-		for (int f = 0; f < geometry.face_count; ++f) {
-			const auto &face = geometry.faces[f];
+		const auto &brush = *entry.brush;
+		for (int f = 0; f < brush.face_count; ++f) {
 			double nearest = max_distance + 1; bool found = false;
-			for (int i = 0; i + 2 < face.index_count; i += 3) {
-				double distance;
-				if (ray_triangle(ray_origin, ray_direction, face.vertices[face.indices[i]].vertex,
-						face.vertices[face.indices[i + 1]].vertex, face.vertices[face.indices[i + 2]].vertex,
-						max_distance, distance)) { nearest = std::min(nearest, distance); found = true; }
+			if (entry.geometry) {
+				const auto &face = entry.geometry->faces[f];
+				for (uint32_t i = 0; i + 2 < face.index_count; i += 3) { double distance; const auto &g = *entry.geometry;
+					if (ray_triangle(ray_origin, ray_direction, g.positions[g.corners[g.face_index(f, i)].position], g.positions[g.corners[g.face_index(f, i + 1)].position], g.positions[g.corners[g.face_index(f, i + 2)].position], max_distance, distance)) { nearest = std::min(nearest, distance); found = true; } }
 			}
 			if (found) hits.push_back({nearest, candidate, f});
 		}
@@ -278,11 +377,11 @@ Array TBMapDocument::query_ray(Vector3 origin, Vector3 direction, double max_dis
 	});
 	for (const Hit &hit : hits) {
 		const auto &entry = index.entries[hit.entry];
-		const auto &entity = map->entities[entry.entity]; const auto &brush = entity.brushes[entry.brush]; const auto &face = brush.faces[hit.face];
+		const auto &brush = *entry.brush; const auto &face = brush.faces[hit.face];
 		Dictionary item;
-		item["brush_id"] = brush.id; item["entity_id"] = entity.id; item["face_index"] = hit.face; item["distance"] = hit.distance;
+		item["brush_id"] = entry.brush_id; item["entity_id"] = entry.entity_id; item["face_index"] = hit.face; item["distance"] = hit.distance;
 		item["position"] = origin + direction * hit.distance; item["normal"] = vector(face.plane_normal);
-		item["texture"] = String::utf8(map->textures[face.texture_idx].name);
+		item["texture"] = String::utf8(entry.compact ? entry.compact->materials[hit.face].c_str() : index.source->textures[face.texture_idx].name);
 		result.push_back(item);
 	}
 	return result;
@@ -350,33 +449,24 @@ Dictionary TBMapDocument::query_ray_nearest_visible(Vector3 origin, Vector3 dire
 			const auto &entry = index.entries[candidate];
 			double entry_near;
 			if (!ray_bounds_near(entry.bounds, ray_origin, ray_direction, nearest, entry_near)) continue;
-			const auto &entity = map->entities[entry.entity];
-			const auto &brush = entity.brushes[entry.brush];
+			const auto &brush = *entry.brush;
 			if (hidden(brush.id) || ((filter_mask & 1) && entry.owned)) continue;
-			const auto &geometry = map->entity_geo[entry.entity].brushes[entry.brush];
-			for (int f = 0; f < geometry.face_count; ++f) {
+			for (int f = 0; f < brush.face_count; ++f) {
 				if (filter_mask & index.face_filters[entry.face_filter_begin + f]) continue;
-				const auto &face = geometry.faces[f];
-				for (int triangle = 0; triangle + 2 < face.index_count; triangle += 3) {
-					double distance;
-					if (ray_triangle(ray_origin, ray_direction, face.vertices[face.indices[triangle]].vertex,
-							face.vertices[face.indices[triangle + 1]].vertex, face.vertices[face.indices[triangle + 2]].vertex,
-							nearest, distance) && distance <= nearest && better(distance, candidate, f)) {
-						nearest = distance;
-						best_entry = candidate;
-						best_face = f;
-					}
+				if (entry.geometry) {
+					const auto &face = entry.geometry->faces[f]; const auto &g = *entry.geometry;
+					for (uint32_t triangle = 0; triangle + 2 < face.index_count; triangle += 3) { double distance;
+						if (ray_triangle(ray_origin, ray_direction, g.positions[g.corners[g.face_index(f, triangle)].position], g.positions[g.corners[g.face_index(f, triangle + 1)].position], g.positions[g.corners[g.face_index(f, triangle + 2)].position], nearest, distance) && distance <= nearest && better(distance, candidate, f)) { nearest = distance; best_entry = candidate; best_face = f; } }
 				}
 			}
 		}
 	}
 	if (best_entry < 0) return result;
 	const auto &entry = index.entries[best_entry];
-	const auto &entity = map->entities[entry.entity];
-	const auto &brush = entity.brushes[entry.brush];
+	const auto &brush = *entry.brush;
 	const auto &face = brush.faces[best_face];
-	result["brush_id"] = brush.id; result["entity_id"] = entity.id; result["face_index"] = best_face; result["distance"] = nearest;
+	result["brush_id"] = brush.id; result["entity_id"] = entry.entity_id; result["face_index"] = best_face; result["distance"] = nearest;
 	result["position"] = origin + direction * nearest; result["normal"] = vector(face.plane_normal);
-	result["texture"] = String::utf8(map->textures[face.texture_idx].name);
+	result["texture"] = String::utf8(entry.compact ? entry.compact->materials[best_face].c_str() : index.source->textures[face.texture_idx].name);
 	return result;
 }

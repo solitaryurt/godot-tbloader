@@ -53,6 +53,7 @@ public:
 	LMMapData(const LMMapData &) = delete;
 	LMMapData &operator=(const LMMapData &) = delete;
 	size_t retained_bytes() const;
+	std::shared_ptr<LMMapData> source_clone() const;
 	std::shared_ptr<LMMapData> deep_clone() const;
 	void swap(LMMapData &other);
 	void map_data_free_geometry();

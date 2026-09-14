@@ -5,12 +5,14 @@
 #include "face.h"
 #include "map_edit.h"
 #include "brush_topology.h"
+#include "editor_brush_geometry.h"
 #include <cmath>
 #include <cassert>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <set>
 #include <map>
@@ -22,6 +24,11 @@ static std::string fixture(const std::string &name) {
 	return { std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>() };
 }
 static void equal_vector(vec3 a, vec3 b) { assert(a.x == b.x && a.y == b.y && a.z == b.z); }
+static LMEditorBrushBuildContext editor_context(const LMMapData &map, std::vector<LMEditorTextureSize> &sizes) {
+	sizes.reserve(map.texture_count);
+	for (int i = 0; i < map.texture_count; ++i) sizes.push_back({map.textures[i].width, map.textures[i].height});
+	return {sizes.data(), sizes.size()};
+}
 static LMEditPrimitive pyramid(int sides, double apex_z, const std::string &texture) {
 	LMEditPrimitive brush;
 	std::vector<vec3> ring;
@@ -109,6 +116,124 @@ static void check_topology_order(const LMBrush &brush, const LMBrushGeometry &ge
 	for (size_t i = 0; i < vertices.size(); ++i) equal_vector(topology.vertices[i], vertices[i]);
 }
 
+static size_t generated_brush_bytes(const LMBrushGeometry &geometry) {
+	size_t bytes = sizeof(geometry) + size_t(geometry.face_count) * sizeof(LMFaceGeometry);
+	for (int f = 0; f < geometry.face_count; ++f) {
+		bytes += size_t(geometry.faces[f].vertex_count) * sizeof(LMFaceVertex);
+		bytes += size_t(geometry.faces[f].index_count) * sizeof(int);
+	}
+	return bytes;
+}
+
+static void equal_geometry(const LMMapData &a, const LMMapData &b) {
+	assert(a.geometry_entity_count == b.geometry_entity_count);
+	for (int e = 0; e < a.geometry_entity_count; ++e) {
+		assert(a.entity_geo[e].brush_count == b.entity_geo[e].brush_count && a.entity_geo[e].patch_count == b.entity_geo[e].patch_count);
+		for (int k = 0; k < a.entity_geo[e].brush_count; ++k) {
+			const auto &x = a.entity_geo[e].brushes[k]; const auto &y = b.entity_geo[e].brushes[k]; assert(x.face_count == y.face_count);
+			for (int f = 0; f < x.face_count; ++f) {
+				assert(x.faces[f].vertex_count == y.faces[f].vertex_count && x.faces[f].index_count == y.faces[f].index_count);
+				for (int v = 0; v < x.faces[f].vertex_count; ++v) assert(!memcmp(&x.faces[f].vertices[v], &y.faces[f].vertices[v], sizeof(LMFaceVertex)));
+				for (int i = 0; i < x.faces[f].index_count; ++i) assert(x.faces[f].indices[i] == y.faces[f].indices[i]);
+			}
+		}
+		for (int p = 0; p < a.entity_geo[e].patch_count; ++p) {
+			const auto &x = a.entity_geo[e].patches[p]; const auto &y = b.entity_geo[e].patches[p];
+			assert(x.vertex_count == y.vertex_count && x.index_count == y.index_count);
+			for (int v = 0; v < x.vertex_count; ++v) assert(!memcmp(&x.vertices[v], &y.vertices[v], sizeof(LMFaceVertex)));
+			for (int i = 0; i < x.index_count; ++i) assert(x.indices[i] == y.indices[i]);
+		}
+	}
+}
+
+static void check_editor_geometry_parity(const LMMapData &map, const LMBrush &brush, const LMBrushGeometry &geometry) {
+	const auto expected = lm_extract_brush_topology(brush, geometry);
+	std::vector<LMEditorTextureSize> sizes;
+	const auto built = lm_build_editor_brush_geometry(brush, editor_context(map, sizes));
+	assert(built && built.geometry.faces.size() == static_cast<size_t>(brush.face_count));
+	const auto &actual = built.geometry;
+	assert(lm_validate_editor_brush_geometry(brush, actual));
+	assert(actual.positions.size() == expected.vertices.size() && actual.edges.size() == expected.edges.size());
+	size_t expected_corners = 0;
+	for (int f = 0; f < geometry.face_count; ++f) expected_corners += geometry.faces[f].vertex_count;
+	assert(actual.corners.size() == expected_corners);
+	assert(actual.positions.capacity() == actual.positions.size() && actual.corners.capacity() == actual.corners.size());
+	assert(actual.faces.capacity() == actual.faces.size() && actual.edges.capacity() == actual.edges.size());
+	assert(actual.has_bounds == !expected.vertices.empty());
+	for (size_t i = 0; i < expected.vertices.size(); ++i) equal_vector(actual.positions[i], expected.vertices[i]);
+	if (actual.has_bounds) { equal_vector(actual.mins, expected.mins); equal_vector(actual.maxs, expected.maxs); }
+	for (size_t i = 0; i < expected.edges.size(); ++i) {
+		assert(actual.edges[i].a == static_cast<uint32_t>(expected.edges[i].first));
+		assert(actual.edges[i].b == static_cast<uint32_t>(expected.edges[i].second));
+		uint32_t uses = 0;
+		uint32_t first = UINT32_MAX, second = UINT32_MAX;
+		for (uint32_t f = 0; f < expected.faces.size(); ++f) for (size_t v = 0; v < expected.faces[f].vertex_indices.size(); ++v) {
+			const auto &face = expected.faces[f];
+			int a = face.vertex_indices[v], b = face.vertex_indices[(v + 1) % face.vertex_indices.size()];
+			if (a > b) std::swap(a, b);
+			if (a == expected.edges[i].first && b == expected.edges[i].second) {
+				if (uses == 0) first = f; else if (uses == 1) second = f;
+				++uses;
+			}
+		}
+		assert(actual.edges[i].use_count == uses && actual.edges[i].first_face == first);
+		assert(actual.edges[i].second_face == second);
+	}
+	for (int f = 0; f < brush.face_count; ++f) {
+		const auto &source = geometry.faces[f]; const auto &face = actual.faces[f];
+		assert(face.corner_count == static_cast<uint32_t>(source.vertex_count) && face.index_count == static_cast<uint32_t>(source.index_count));
+		assert(face.texture_idx == brush.faces[f].texture_idx); equal_vector(face.plane_normal, brush.faces[f].plane_normal);
+		equal_vector(face.center, expected.faces[f].center);
+		for (int v = 0; v < source.vertex_count; ++v) {
+			const auto &corner = actual.corners[face.corner_begin + v];
+			assert(corner.position == static_cast<uint32_t>(expected.faces[f].vertex_indices[v]));
+			assert(corner.uv.u == source.vertices[v].uv.u && corner.uv.v == source.vertices[v].uv.v);
+		}
+		for (int i = 0; i < source.index_count; ++i) assert(actual.face_index(f, i) - face.corner_begin == static_cast<uint32_t>(source.indices[i]));
+	}
+}
+
+static void check_uv_only_update(const LMMapData &map, const LMBrush &brush) {
+	std::vector<LMEditorTextureSize> old_sizes;
+	const auto old_context = editor_context(map, old_sizes);
+	auto built = lm_build_editor_brush_geometry(brush, old_context);
+	assert(built && lm_validate_editor_brush_geometry(brush, built.geometry));
+	auto original = std::make_shared<const LMEditorBrushGeometry>(std::move(built.geometry));
+	const auto before = lm_editor_brush_instrumentation();
+	const auto shared = lm_update_editor_brush_uvs(brush, original, old_context, old_context);
+	assert(shared && shared.geometry == original && shared.updated_faces == 0 && shared.copied_bytes == 0);
+	const LMVertexUV original_uv = original->corners[0].uv;
+	assert(lm_update_editor_brush_uvs(brush, original, old_context, {}).status == LMEditorBrushBuildStatus::INVALID_TEXTURE_CONTEXT);
+	assert(lm_update_editor_brush_uvs(brush, original, old_context, old_context, 1).status == LMEditorBrushBuildStatus::SOURCE_TOKEN_MISMATCH);
+	auto stale = std::make_shared<LMEditorBrushGeometry>(*original);
+	++stale->faces[0].texture_idx;
+	assert(lm_update_editor_brush_uvs(brush, stale, old_context, old_context).status == LMEditorBrushBuildStatus::SOURCE_TOKEN_MISMATCH);
+	assert(original->corners[0].uv.u == original_uv.u && original->corners[0].uv.v == original_uv.v);
+
+	std::vector<LMEditorTextureSize> changed_sizes = old_sizes;
+	const int changed_texture = brush.faces[0].texture_idx;
+	changed_sizes[changed_texture].width *= 2;
+	changed_sizes[changed_texture].height *= 3;
+	const LMEditorBrushBuildContext changed_context{changed_sizes.data(), changed_sizes.size()};
+	const auto updated = lm_update_editor_brush_uvs(brush, original, old_context, changed_context);
+	assert(updated && updated.geometry != original && updated.updated_faces > 0 && updated.copied_bytes == updated.geometry->retained_bytes());
+	const auto after = lm_editor_brush_instrumentation();
+	assert(after.builds == before.builds);
+	const auto fresh = lm_build_editor_brush_geometry(brush, changed_context);
+	assert(fresh && lm_validate_editor_brush_geometry(brush, fresh.geometry));
+	const auto &actual = *updated.geometry;
+	assert(actual.positions.size() == original->positions.size() && actual.faces.size() == original->faces.size() &&
+			actual.edges.size() == original->edges.size() && actual.corners.size() == original->corners.size());
+	assert(!memcmp(actual.positions.data(), original->positions.data(), actual.positions.size() * sizeof(vec3)));
+	assert(!memcmp(actual.faces.data(), original->faces.data(), actual.faces.size() * sizeof(LMEditorBrushFace)));
+	assert(!memcmp(actual.edges.data(), original->edges.data(), actual.edges.size() * sizeof(LMEditorBrushEdge)));
+	assert(!memcmp(&actual.mins, &original->mins, sizeof(vec3)) && !memcmp(&actual.maxs, &original->maxs, sizeof(vec3)) && actual.has_bounds == original->has_bounds);
+	for (size_t corner = 0; corner < actual.corners.size(); ++corner) {
+		assert(actual.corners[corner].position == original->corners[corner].position);
+		assert(actual.corners[corner].uv.u == fresh.geometry.corners[corner].uv.u && actual.corners[corner].uv.v == fresh.geometry.corners[corner].uv.v);
+	}
+}
+
 int main() {
 	// A real bevel with a 1e-6 angle still has a crease. The old intersection
 	// cutoff discarded that crease and generated an open top region.
@@ -125,6 +250,9 @@ int main() {
 		LMGeoGenerator(data).run();
 		const auto &brush = data->entities[0].brushes[0];
 		const auto &geo = data->entity_geo[0].brushes[0];
+		std::vector<LMEditorTextureSize> compact_sizes;
+		const auto compact = lm_build_editor_brush_geometry(brush, editor_context(*data, compact_sizes));
+		assert(compact && lm_validate_editor_brush_geometry(brush, compact.geometry));
 		const auto topology = lm_extract_brush_topology(brush, geo);
 		assert(topology.vertices.size() == 10 && topology.edges.size() == 15 && topology.faces.size() == 7);
 		std::map<std::pair<int, int>, int> uses;
@@ -177,6 +305,17 @@ int main() {
 		LMGeoGenerator geo(map);
 		geo.run();
 		{
+			auto source_only = map->source_clone();
+			assert(source_only->entity_geo == nullptr && source_only->geometry_entity_count == 0);
+			assert(source_only->retained_bytes() < map->retained_bytes());
+			equal_maps(*map, *source_only);
+			assert(lm_write_map(*source_only) == canonical);
+			for (int t = 0; t < source_only->texture_count; ++t) { source_only->textures[t].width = 127; source_only->textures[t].height = 61; }
+			auto reference = map->deep_clone();
+			for (int t = 0; t < reference->texture_count; ++t) { reference->textures[t].width = 127; reference->textures[t].height = 61; }
+			LMGeoGenerator(source_only).run(); LMGeoGenerator(reference).run();
+			equal_geometry(*source_only, *reference);
+
 			auto clone = map->deep_clone();
 			equal_maps(*map, *clone);
 			assert(lm_write_map(*clone) == canonical);
@@ -186,7 +325,17 @@ int main() {
 			}
 		}
 		for (int e = 0; e < map->entity_count; ++e) for (int b = 0; b < map->entities[e].brush_count; ++b)
-			check_topology_order(map->entities[e].brushes[b], map->entity_geo[e].brushes[b]);
+			check_topology_order(map->entities[e].brushes[b], map->entity_geo[e].brushes[b]),
+			check_editor_geometry_parity(*map, map->entities[e].brushes[b], map->entity_geo[e].brushes[b]),
+			check_uv_only_update(*map, map->entities[e].brushes[b]);
+		if (!strcmp(name, "classic_cube")) {
+			std::vector<LMEditorTextureSize> sizes;
+			const auto &brush = map->entities[0].brushes[0]; const auto &geometry = map->entity_geo[0].brushes[0];
+			const auto compact = lm_build_editor_brush_geometry(brush, editor_context(*map, sizes));
+			const size_t compact_bytes = compact.geometry.retained_bytes(); const size_t generated_bytes = generated_brush_bytes(geometry);
+			assert(compact_bytes < generated_bytes);
+			std::cout << "EDITOR_BRUSH_BYTES:" << compact_bytes << ":" << generated_bytes << "\n";
+		}
 		if (!strcmp(name, "patches")) {
 			assert(map->entity_geo[0].patches[0].vertex_count == 25);
 			assert(map->entity_geo[0].patches[1].vertex_count == 35);
@@ -267,6 +416,95 @@ int main() {
 		}
 		edit.world().primitives.pop_back();
 		assert(edit.text() == preserved);
+	}
+	{
+		// Duplicate and non-contributing source planes retain repeated/empty spans.
+		LMMapEdit edit(*std::make_shared<LMMapData>());
+		auto redundant = lm_edit_cuboid({0, 0, 0}, {16, 16, 16}, "redundant");
+		redundant.faces.push_back(redundant.faces[0]);
+		auto outside = redundant.faces[0];
+		outside.texture = "zero-only";
+		const vec3 normal = vec3_normalize(vec3_cross(vec3_sub(outside.plane.plane_points.v2, outside.plane.plane_points.v1),
+				vec3_sub(outside.plane.plane_points.v1, outside.plane.plane_points.v0)));
+		outside.plane.plane_points.v0 = vec3_add(outside.plane.plane_points.v0, vec3_mul_double(normal, 16));
+		outside.plane.plane_points.v1 = vec3_add(outside.plane.plane_points.v1, vec3_mul_double(normal, 16));
+		outside.plane.plane_points.v2 = vec3_add(outside.plane.plane_points.v2, vec3_mul_double(normal, 16));
+		redundant.faces.push_back(outside);
+		edit.world().primitives.push_back(redundant);
+		auto data = std::make_shared<LMMapData>();
+		assert(LMMapParser(data).load_from_text(edit.text())); LMGeoGenerator(data).run();
+		const auto &brush = data->entities[0].brushes[0]; const auto &geometry = data->entity_geo[0].brushes[0];
+		std::vector<LMEditorTextureSize> sizes; const auto context = editor_context(*data, sizes);
+		const auto compact = lm_build_editor_brush_geometry(brush, context);
+		assert(compact && lm_validate_editor_brush_geometry(brush, compact.geometry));
+		assert(compact.geometry.faces[0].corner_count == 4 && compact.geometry.faces[6].corner_count == 0 && compact.geometry.faces[7].corner_count == 0);
+		assert(std::all_of(compact.geometry.edges.begin(), compact.geometry.edges.end(), [](const auto &edge) { return edge.use_count == 2; }));
+		assert(compact.geometry.positions.size() == 8 && geometry.faces[0].vertex_count == 4 && geometry.faces[7].vertex_count == 0);
+		assert(compact.geometry.retained_bytes() < generated_brush_bytes(geometry));
+		auto compact_pointer = std::make_shared<const LMEditorBrushGeometry>(compact.geometry);
+		std::vector<LMEditorTextureSize> zero_changed_sizes = sizes;
+		const int zero_texture = brush.faces[7].texture_idx;
+		assert(brush.faces[0].texture_idx != zero_texture);
+		zero_changed_sizes[zero_texture] = {17, 29};
+		const LMEditorBrushBuildContext zero_changed_context{zero_changed_sizes.data(), zero_changed_sizes.size()};
+		const auto zero_only = lm_update_editor_brush_uvs(brush, compact_pointer, context, zero_changed_context);
+		assert(zero_only && zero_only.geometry == compact_pointer && zero_only.updated_faces == 0 && zero_only.copied_bytes == 0);
+
+		// Rebuild changed source directly; no LMBrushGeometry participates in either build.
+		std::vector<LMFace> local_faces(brush.faces, brush.faces + brush.face_count);
+		LMBrush local = brush; local.faces = local_faces.data();
+		const auto before = lm_build_editor_brush_geometry(local, context);
+		local_faces[0].uv_standard.u += 8;
+		const auto uv_changed = lm_build_editor_brush_geometry(local, context);
+		assert(before && uv_changed && before.geometry.positions.size() == uv_changed.geometry.positions.size());
+		assert(before.geometry.corners[0].uv.u != uv_changed.geometry.corners[0].uv.u);
+		const vec3 delta = vec3_mul_double(local_faces[0].plane_normal, -1);
+		local_faces[0].plane_points.v0 = vec3_add(local_faces[0].plane_points.v0, delta);
+		local_faces[0].plane_points.v1 = vec3_add(local_faces[0].plane_points.v1, delta);
+		local_faces[0].plane_points.v2 = vec3_add(local_faces[0].plane_points.v2, delta);
+		local_faces[0].plane_dist = vec3_dot(local_faces[0].plane_normal, local_faces[0].plane_points.v0);
+		const auto moved = lm_build_editor_brush_geometry(local, context);
+		assert(moved && moved.geometry.positions.size() != 0);
+		assert(moved.geometry.mins.x != before.geometry.mins.x || moved.geometry.maxs.x != before.geometry.maxs.x ||
+				moved.geometry.mins.y != before.geometry.mins.y || moved.geometry.maxs.y != before.geometry.maxs.y ||
+				moved.geometry.mins.z != before.geometry.mins.z || moved.geometry.maxs.z != before.geometry.maxs.z);
+
+		std::vector<LMFace> extreme_faces(brush.faces, brush.faces + 6);
+		const double extreme_scale = std::numeric_limits<double>::max() / 32;
+		for (auto &face : extreme_faces) {
+			face.plane_points.v0 = vec3_mul_double(face.plane_points.v0, extreme_scale);
+			face.plane_points.v1 = vec3_mul_double(face.plane_points.v1, extreme_scale);
+			face.plane_points.v2 = vec3_mul_double(face.plane_points.v2, extreme_scale);
+			face.plane_dist = vec3_dot(face.plane_normal, face.plane_points.v0);
+		}
+		LMBrush extreme = brush; extreme.face_count = extreme_faces.size(); extreme.faces = extreme_faces.data();
+		assert(lm_build_editor_brush_geometry(extreme, context).status == LMEditorBrushBuildStatus::NONFINITE_SOURCE);
+	}
+	{
+		LMBrush brush{}; LMEditorBrushBuildContext context{};
+		assert(lm_build_editor_brush_geometry(brush, context));
+		brush.face_count = 1;
+		assert(lm_build_editor_brush_geometry(brush, context).status == LMEditorBrushBuildStatus::INVALID_FACE_STORAGE);
+		LMFace source_face{}; brush.faces = &source_face; source_face.uv_extra = {0, 1, 1};
+		assert(lm_build_editor_brush_geometry(brush, context).status == LMEditorBrushBuildStatus::INVALID_TEXTURE_CONTEXT);
+		LMEditorTextureSize texture{64, 64}; context = {&texture, 1}; source_face.texture_idx = 0;
+		source_face.plane_dist = std::numeric_limits<double>::infinity();
+		assert(lm_build_editor_brush_geometry(brush, context).status == LMEditorBrushBuildStatus::NONFINITE_SOURCE);
+		std::vector<LMFace> too_many(65, source_face); brush.faces = too_many.data(); brush.face_count = too_many.size();
+		assert(lm_build_editor_brush_geometry(brush, context).status == LMEditorBrushBuildStatus::LIMIT_EXCEEDED);
+	}
+	{
+		// Small source coordinates can still define a bounded near-parallel wedge
+		// whose far intersections exceed the editor's coordinate contract.
+		auto wedge = lm_edit_cuboid({0, 0, 0}, {1, 1, 1}, "pathological");
+		wedge.faces.erase(wedge.faces.begin() + 2); // Remove y max.
+		const double epsilon = 1e-12;
+		wedge.faces[0].plane.plane_points = {{1, 0, 0}, {1 - epsilon, 1, 1}, {1 - epsilon, 1, 0}};
+		LMMapEdit edit(*std::make_shared<LMMapData>()); edit.world().primitives.push_back(wedge);
+		auto data = std::make_shared<LMMapData>(); assert(LMMapParser(data).load_from_text(edit.text()));
+		std::vector<LMEditorTextureSize> sizes; const auto context = editor_context(*data, sizes);
+		const auto compact = lm_build_editor_brush_geometry(data->entities[0].brushes[0], context);
+		assert(compact && !lm_validate_editor_brush_geometry(data->entities[0].brushes[0], compact.geometry));
 	}
 	{
 		auto cube = lm_edit_cuboid({0, 0, 0}, {16, 32, 8}, "rotate/material");
@@ -354,6 +592,58 @@ int main() {
 		const size_t parsed_bytes = map->retained_bytes();
 		LMGeoGenerator(map).run();
 		assert(parsed_bytes > source.size() && map->retained_bytes() > parsed_bytes);
+		size_t sampled = 0;
+		for (int e = 0; e < map->entity_count; ++e) for (int b = 0; b < map->entities[e].brush_count; ++b) {
+			if ((sampled++ % 97) == 0) {
+				check_editor_geometry_parity(*map, map->entities[e].brushes[b], map->entity_geo[e].brushes[b]);
+				check_uv_only_update(*map, map->entities[e].brushes[b]);
+			}
+		}
+		assert(sampled > 100);
+		lm_reset_editor_brush_instrumentation();
+		{
+			LMEditorBrushCacheSlot slot;
+			const auto &brush = map->entities[0].brushes[0]; const auto &geometry = map->entity_geo[0].brushes[0];
+			std::vector<LMEditorTextureSize> sizes; const auto context = editor_context(*map, sizes);
+			const LMEditorBrushSourceToken first{brush.id, 1, 1};
+			assert(slot.ensure_geometry(brush, context, first));
+			const size_t retained = slot.retained_bytes(); assert(retained > sizeof(LMEditorBrushGeometry));
+			assert(slot.ensure_geometry(brush, context, first, LMEditorBrushDirtyDomain::TOPOLOGY));
+			LMBrush wrong_brush = brush; ++wrong_brush.id;
+			const auto before_wrong = lm_editor_brush_instrumentation();
+			assert(slot.ensure_geometry(wrong_brush, context, first).status == LMEditorBrushBuildStatus::SOURCE_TOKEN_MISMATCH);
+			const auto after_wrong = lm_editor_brush_instrumentation();
+			assert(after_wrong.builds == before_wrong.builds && after_wrong.cache_hits == before_wrong.cache_hits);
+			assert(slot.ensure_geometry(brush, context, first));
+			const auto original_uv = slot.ensure_geometry(brush, context, first).geometry.corners[0].uv;
+			std::vector<LMEditorTextureSize> changed_sizes = sizes; changed_sizes[brush.faces[0].texture_idx].width *= 2;
+			const LMEditorBrushBuildContext changed_context{changed_sizes.data(), changed_sizes.size()};
+			const LMEditorBrushSourceToken changed_context_token{brush.id, 1, 2};
+			const auto &dimension_changed = slot.ensure_geometry(brush, changed_context, changed_context_token);
+			assert(dimension_changed && (dimension_changed.geometry.corners[0].uv.u != original_uv.u ||
+					dimension_changed.geometry.corners[0].uv.v != original_uv.v));
+			slot.invalidate(LMEditorBrushDirtyDomain::UVS);
+			assert((slot.dirty_domains() & LMEditorBrushDirtyDomain::PREVIEW) != LMEditorBrushDirtyDomain::NONE);
+			slot.invalidate(LMEditorBrushDirtyDomain::MATERIAL);
+			assert((slot.dirty_domains() & LMEditorBrushDirtyDomain::PREVIEW) != LMEditorBrushDirtyDomain::NONE);
+			assert((slot.dirty_domains() & LMEditorBrushDirtyDomain::SPATIAL) == LMEditorBrushDirtyDomain::NONE);
+			assert(slot.ensure_geometry(brush, changed_context, changed_context_token, LMEditorBrushDirtyDomain::TOPOLOGY));
+			assert(slot.ensure_geometry(brush, changed_context, changed_context_token, LMEditorBrushDirtyDomain::PREVIEW));
+			assert(slot.ensure_geometry(brush, changed_context, {brush.id, 2, 2}));
+			LMEditorBrushBuildContext bad_context{};
+			assert(slot.ensure_geometry(brush, bad_context, {brush.id, 3, 3}).status == LMEditorBrushBuildStatus::INVALID_TEXTURE_CONTEXT);
+			assert(!slot.has_geometry() && slot.dirty_domains() == LMEditorBrushDirtyDomain::ALL);
+			assert(slot.ensure_geometry(brush, context, {brush.id, 3, 3}));
+			slot.invalidate(LMEditorBrushDirtyDomain::POSITIONS);
+			const auto position_dependencies = LMEditorBrushDirtyDomain::POSITIONS | LMEditorBrushDirtyDomain::UVS | LMEditorBrushDirtyDomain::BOUNDS |
+					LMEditorBrushDirtyDomain::SPATIAL | LMEditorBrushDirtyDomain::PREVIEW;
+			assert((slot.dirty_domains() & position_dependencies) == position_dependencies);
+			slot.invalidate(LMEditorBrushDirtyDomain::TOPOLOGY);
+			assert(slot.dirty_domains() == LMEditorBrushDirtyDomain::ALL);
+			const auto counters = lm_editor_brush_instrumentation();
+			assert(counters.builds == 7 && counters.cache_hits == 3 && counters.retained_bytes == slot.retained_bytes());
+		}
+		assert(lm_editor_brush_instrumentation().retained_bytes == 0);
 		for (int repeat = 0; repeat < 3; ++repeat) {
 			LMMapEdit edit(*map);
 			edit.world().primitives.push_back(lm_edit_cuboid({ -64, -64, -64 }, { 64, 64, 64 }, "common/caulk"));

@@ -331,6 +331,14 @@ func run() -> void:
 	var count: int = ui.tokens.size()
 	mouse(graph, graph.project(Vector3.ZERO), true)
 	motion(graph, graph.project(Vector3(32, 0, 0)))
+	await get_tree().process_frame
+	RenderingServer.force_draw()
+	graph.reset_render_counters()
+	graph.queue_selection_redraw()
+	await get_tree().process_frame
+	RenderingServer.force_draw()
+	checks.check(graph.render_counters().selection_mask_points > 0 and graph.render_counters().static_edge_builds == 0,
+		"sparse move gesture masks the original gray selection without rebuilding static edges")
 	checks.check(text() == created, "gesture motion is disposable preview")
 	key(KEY_ESCAPE)
 	checks.check(text() == created and ui.tokens.size() == count and graph.gesture == "", "Esc cancel no history")
@@ -341,6 +349,14 @@ func run() -> void:
 	checks.check(ui.tool == "Rotate" and ui.tool_buttons.Rotate.button_pressed, "R activates toolbar Rotate tool")
 	mouse(graph, graph.project(rotation_center + Vector3(32, 0, 0)), true)
 	motion(graph, graph.project(rotation_center + Vector3(0, 32, 0)))
+	await get_tree().process_frame
+	RenderingServer.force_draw()
+	graph.reset_render_counters()
+	graph.queue_selection_redraw()
+	await get_tree().process_frame
+	RenderingServer.force_draw()
+	checks.check(graph.render_counters().selection_mask_points > 0 and graph.render_counters().static_edge_builds == 0,
+		"sparse rotate gesture masks the original gray selection without rebuilding static edges")
 	checks.check(graph.gesture == "rotate" and is_equal_approx(rad_to_deg(graph.rotation_angle), 90) and text() == rotation_before, "rotate drag shows snapped disposable preview around selection pivot")
 	mouse(graph, graph.project(rotation_center + Vector3(0, 32, 0)), false)
 	var rotation_after: String = text()
@@ -1158,11 +1174,161 @@ func automatic_scene_journey(plugin: EditorPlugin) -> void:
 func tohunga_editor_journey() -> void:
 	print("TB_UI_STAGE: local Tohunga editor regression")
 	var previous_session = ui.session
+	var delta_session = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	checks.check(delta_session.document.load_map("res://fixtures/tohunga.map").ok, "draw delta session loads Tohunga")
+	var delta_draw: Array = delta_session.draw_data()
+	var unchanged_id: int = delta_draw[2].id
+	var unchanged_dictionary: Dictionary = delta_draw[2]
+	var unchanged_data: Dictionary = unchanged_dictionary.duplicate(true)
+	var first_id: int = delta_draw[0].id
+	var second_id: int = delta_draw[1].id
+	var token: int = delta_draw[0].topology_revision
+	var delta_before: Dictionary = delta_session.capture()
+	var duplicate_min: Vector3 = delta_session.brush(first_id).aabb_min
+	var counters_before: Dictionary = delta_session.draw_cache_counters()
+	checks.check(delta_session.translate_brushes(PackedInt64Array([first_id, first_id]), Vector3.RIGHT).ok
+		and delta_session.brush(first_id).aabb_min == duplicate_min + Vector3.RIGHT,
+		"duplicate session selection patches translated draw data exactly once")
+	var counters_after: Dictionary = delta_session.draw_cache_counters()
+	checks.check(counters_after.touched_draw_entries - counters_before.touched_draw_entries == 1
+		and counters_after.full_cache_iterations == counters_before.full_cache_iterations
+		and counters_after.full_cache_duplicates == counters_before.full_cache_duplicates,
+		"connected one-brush translation touches one draw entry with no full-cache work")
+	delta_session.restore(delta_before)
+	counters_before = delta_session.draw_cache_counters()
+	checks.check(delta_session.document.set_face_texture(first_id, 0, "delta/direct", token).ok,
+		"direct connected local edit reaches MapSession draw delta")
+	counters_after = delta_session.draw_cache_counters()
+	checks.check(counters_after.touched_draw_entries - counters_before.touched_draw_entries == 1
+		and counters_after.full_cache_iterations == counters_before.full_cache_iterations
+		and counters_after.full_cache_duplicates == counters_before.full_cache_duplicates
+		and delta_session.brush(first_id).faces[0].texture == "delta/direct",
+		"direct local edit replaces one indexed draw entry only")
+	var direct_after: Dictionary = delta_session.capture()
+	for history_state in [delta_before, direct_after]:
+		counters_before = delta_session.draw_cache_counters()
+		delta_session.restore(history_state)
+		counters_after = delta_session.draw_cache_counters()
+		checks.check(counters_after.touched_draw_entries - counters_before.touched_draw_entries == 1
+			and counters_after.full_cache_iterations == counters_before.full_cache_iterations
+			and counters_after.full_cache_duplicates == counters_before.full_cache_duplicates,
+			"one-brush undo/redo touches one draw entry with no full-cache work")
+	delta_session.restore(delta_before)
+	delta_session.select(PackedInt64Array([first_id, unchanged_id]))
+	var first_component := {"brush_id": first_id, "kind": "face", "index": 0,
+		"topology_revision": delta_session.brush(first_id).topology_revision}
+	var unchanged_component := {"brush_id": unchanged_id, "kind": "face", "index": 0,
+		"topology_revision": delta_session.brush(unchanged_id).topology_revision}
+	delta_session.components = [first_component, unchanged_component]
+	var component_before: Dictionary = delta_session.capture()
+	checks.check(delta_session.document.translate_face(first_id, 0,
+			delta_session.brush(first_id).faces[0].normal, first_component.topology_revision).ok,
+		"connected topology edit changes the selected target brush")
+	checks.check(not delta_session.component_valid(first_component, delta_session.brush(first_id))
+		and delta_session.component_valid(unchanged_component, delta_session.brush(unchanged_id)),
+		"independent selected component stays valid while changed brush token becomes stale")
+	delta_session.rebind_components()
+	var component_after: Dictionary = delta_session.capture()
+	for history_state in [component_before, component_after]:
+		counters_before = delta_session.draw_cache_counters()
+		delta_session.restore(history_state)
+		counters_after = delta_session.draw_cache_counters()
+		checks.check(delta_session.components.size() == 2
+			and delta_session.components.all(func(component): return delta_session.component_valid(component, delta_session.brush(component.brush_id)))
+			and counters_after.touched_draw_entries - counters_before.touched_draw_entries == 1
+			and counters_after.full_cache_iterations == counters_before.full_cache_iterations,
+			"component selection undo/redo rebinds only against per-brush tokens")
+	delta_session.restore(delta_before)
+	checks.check(delta_session.document.apply_face_edits([
+		{"brush_id": first_id, "face": 0, "topology_revision": token, "texture": "delta/one"},
+		{"brush_id": second_id, "face": 0, "topology_revision": token, "texture": "delta/two"}]).ok,
+		"two-brush metadata edit commits through draw delta")
+	checks.check(delta_session.brush(first_id).faces[0].texture == "delta/one" and delta_session.brush(second_id).faces[0].texture == "delta/two",
+		"two changed brush dictionaries cross into the session cache")
+	checks.check(is_same(delta_session.brush(unchanged_id), unchanged_dictionary) and delta_session.brush(unchanged_id) == unchanged_data,
+		"unchanged draw dictionary identity and data remain intact")
+	var delta_after: Dictionary = delta_session.capture()
+	var reads_before_history: int = delta_session.draw_cache_counters().full_draw_reads
+	delta_session.restore(delta_before)
+	delta_session.restore(delta_after)
+	checks.check(delta_session.draw_cache_counters().full_draw_reads == reads_before_history
+		and delta_session.brush(first_id).faces[0].texture == "delta/one", "local undo and redo patch without full get_draw_data")
+	checks.check(not delta_session.get_property_list().any(func(property): return property.name in ["_history_caches", "_history_cache_order"])
+		and delta_session.draw_cache_counters().history_cache_retained_bytes == 0, "session retains no full history cache payloads")
+	var resets_before: int = delta_session.draw_cache_counters().full_draw_resets
+	checks.check(delta_session.document.create_cuboid(Vector3(-8, -8, -8), Vector3(8, 8, 8), "common/caulk").ok
+		and not delta_session._draw_valid and delta_session._draw_cache.is_empty(), "structural fallback clears the stale draw payload")
+	delta_session.draw_data()
+	checks.check(delta_session.draw_cache_counters().full_draw_resets == resets_before + 1, "structural fallback rebuilds on demand")
+	var texture_cache_before: Dictionary = delta_session.draw_cache_counters()
+	var retained_draw: Array = delta_session.draw_data()
+	var retained_entities: Array = delta_session.entity_data()
+	var retained_markers: Array = delta_session.point_markers()
+	checks.check(delta_session.document.set_texture_sizes({"baseline/checker": Vector2i(64, 32)}).ok, "session applies UV-only texture dimensions")
+	var texture_cache_after: Dictionary = delta_session.draw_cache_counters()
+	checks.check(delta_session._draw_valid and delta_session._entity_valid and delta_session._marker_valid
+		and is_same(delta_session.draw_data(), retained_draw) and is_same(delta_session.entity_data(), retained_entities)
+		and is_same(delta_session.point_markers(), retained_markers)
+		and texture_cache_after.full_draw_resets == texture_cache_before.full_draw_resets
+		and texture_cache_after.full_draw_reads == texture_cache_before.full_draw_reads
+		and texture_cache_after.preview_uv_cache_retentions == texture_cache_before.preview_uv_cache_retentions + 1,
+		"texture dimensions retain draw/entity/marker caches with zero full draw resets or reads")
+	checks.check(delta_session.document.rebuild().ok and not delta_session._draw_valid,
+		"explicit preview rebuild still clears the session draw cache")
+	delta_session.dispose()
 	checks.check(ui.open_path("res://fixtures/tohunga.map"), "editor opens local Tohunga fixture")
 	var canonical := text()
 	var brushes: Array = ui.session.document.get_draw_data()
 	checks.check(brushes.size() > 100 and ui.session.document.get_entities().size() > 1, "editor exposes Tohunga brush and entity topology")
 	if brushes.size() >= 2:
+		var graph = ui.graph_a
+		ui.session.select(PackedInt64Array())
+		graph.frame_selection()
+		ui.session.select(PackedInt64Array([brushes[0].id]))
+		graph.rebuild_dense_edge_cache()
+		graph.gesture = "move"
+		graph.delta = Vector3(ui.session.grid, 0, 0)
+		await get_tree().process_frame
+		RenderingServer.force_draw()
+		graph.reset_render_counters()
+		graph.queue_selection_redraw()
+		await get_tree().process_frame
+		RenderingServer.force_draw()
+		checks.check(graph.render_counters().selection_mask_points > 0 and graph.render_counters().static_edge_builds == 0,
+			"dense move gesture masks the original gray selection without rebuilding global static storage")
+		graph.gesture = "rotate"
+		graph.rotation_pivot = graph.selection_center()
+		graph.rotation_angle = PI / 4.0
+		await get_tree().process_frame
+		RenderingServer.force_draw()
+		graph.reset_render_counters()
+		graph.queue_selection_redraw()
+		await get_tree().process_frame
+		RenderingServer.force_draw()
+		checks.check(graph.render_counters().selection_mask_points > 0 and graph.render_counters().static_edge_builds == 0,
+			"dense rotate gesture masks the original gray selection without rebuilding global static storage")
+		graph.cancel()
+		var dense_before: Dictionary = ui.session.capture()
+		var dense_move := Vector3(ui.session.grid, 0, 0)
+		checks.check(ui.session.translate_brushes(ui.session.selected, dense_move).ok, "prepare Tohunga dense cache translation state")
+		graph.apply_dense_translation(dense_move)
+		var dense_after: Dictionary = ui.session.capture()
+		graph.reset_render_counters()
+		for repeat in 2:
+			ui.session.restore(dense_before)
+			await get_tree().process_frame
+			RenderingServer.force_draw()
+			ui.session.restore(dense_after)
+			await get_tree().process_frame
+			RenderingServer.force_draw()
+		var dense_history_counts: Dictionary = graph.render_counters()
+		checks.check(dense_history_counts.static_edge_restores == 4 and dense_history_counts.static_edge_builds == 0
+			and dense_history_counts.dense_cache_states == 2,
+			"repeated Tohunga undo/redo redraws restore dense static arrays without a 5,060-brush rebuild")
+		checks.check(dense_history_counts.dense_cache_retained_bytes > 0,
+			"Tohunga dense two-state history accounts its bounded retained payload")
+		ui.session.restore(dense_before)
+		graph.restore_dense_edge_cache()
 		var preview_nodes: Array[Node] = ui.camera_view.map_geometry.get_children()
 		ui.camera_view.apply_pick(brushes[0].id, 0, -1, false)
 		ui.camera_view.apply_pick(brushes[1].id, 0, -1, true)
@@ -1223,6 +1389,93 @@ func review_edit(label: String) -> void:
 func review_regressions(plugin: EditorPlugin) -> void:
 	print("TB_UI_STAGE: independent-review lifecycle regressions")
 	var original = ui.session
+	var Session = load("res://addons/tbloader/src/editor/map_session.gd")
+	var Action = load("res://addons/tbloader/src/editor/map_action.gd")
+	var direct = Session.new()
+	var direct_before: Dictionary = direct.capture()
+	direct.document.create_cuboid(Vector3.ZERO, Vector3.ONE * 8, "review/direct")
+	var direct_after: Dictionary = direct.capture()
+	var direct_token = Action.new()
+	direct_token.session = direct
+	direct_token.before = direct_before
+	direct_token.after = direct_after
+	direct_token.epoch = direct.document.get_epoch()
+	direct_token.before_generation = direct_before.native.get_state_generation()
+	direct_token.after_generation = direct_after.native.get_state_generation()
+	direct_token.restore(false)
+	direct.document.create_cuboid(Vector3.ONE * 16, Vector3.ONE * 24, "review/stale")
+	var direct_stale_text: String = direct.document.export_text().value
+	direct_token.restore(true)
+	checks.check(direct_token.session == null and direct.document.export_text().value == direct_stale_text,
+		"direct stale snapshot fallback callback retires without restoring out of order")
+	direct.dispose()
+
+	var global_stale = Session.new()
+	ui.set_session(global_stale)
+	checks.check(global_stale.transact("Global stale fallback fixture", func(): return global_stale.document.create_cuboid(Vector3.ZERO, Vector3.ONE * 8, "review/global")),
+		"record actual global structural fallback action")
+	var global_token = ui.tokens.back()
+	global_stale.document.create_cuboid(Vector3.ONE * 16, Vector3.ONE * 24, "review/out-of-band")
+	var global_stale_text: String = global_stale.document.export_text().value
+	checks.check(history.undo() and global_token.session == null and global_stale.document.export_text().value == global_stale_text,
+		"actual global stale history callback advances cursor as a safe retired no-op")
+	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
+	var accounting_before: Dictionary = ui.session.capture()
+	var small_envelope_bytes: int = ui.session.ui_envelope_retained_bytes(accounting_before)
+	ui.session.selected = PackedInt64Array(range(4096))
+	ui.session.points = PackedInt64Array(range(8192))
+	ui.session.components = []
+	for index in 2048:
+		ui.session.components.append({"brush_id": 0, "kind": "face", "index": index,
+			"topology_revision": 1, "label": "large-component-selection"})
+	var large_envelope := {"selected_brush_ids": ui.session.selected, "points": ui.session.points,
+		"components": ui.session.components, "workzone": ui.session.workzone}
+	var large_envelope_bytes: int = ui.session.ui_envelope_retained_bytes(large_envelope)
+	checks.check(large_envelope_bytes > small_envelope_bytes + (4096 + 8192) * 8
+		and large_envelope_bytes > 2048 * ui.session.UI_COMPONENT_DICTIONARY_BYTES,
+		"UI envelope accounting scales with large brush/point selections and component dictionaries")
+	ui.session.selected = PackedInt64Array()
+	ui.session.points = PackedInt64Array()
+	ui.session.components = []
+	var accounting_id: int = ui.session.document.create_cuboid(Vector3.ZERO, Vector3.ONE * 32, "accounting/a").value
+	var accounting_structural: Dictionary = ui.session.capture()
+	var structural_bytes: int = ui.session.history_action_bytes(accounting_before, accounting_structural)
+	var accounting_token: int = ui.session.brush(accounting_id).topology_revision
+	var rollback_text: String = ui.session.document.export_text().value
+	var rollback_generation: int = ui.session.document.get_state_generation()
+	var rollback_tokens: int = ui.tokens.size()
+	checks.check(not ui.session.transact("Atomic rollback review", func():
+		var moved: Dictionary = ui.session.document.translate_brushes(PackedInt64Array([accounting_id]), Vector3.RIGHT)
+		if not moved.ok:
+			return moved
+		return ui.session.document.set_face_texture(9223372036854775807, 0, "bad", accounting_token)
+	) and ui.session.document.export_text().value == rollback_text
+		and ui.session.document.get_state_generation() == rollback_generation and ui.tokens.size() == rollback_tokens,
+		"failed second command rolls back the first mutation without recording history")
+	var fatal_rollback = Session.new()
+	var fatal_messages: Array[String] = []
+	fatal_rollback.message.connect(func(value: String): fatal_messages.append(value))
+	checks.check(not fatal_rollback.transact("Fatal rollback review", func():
+		var replaced: Dictionary = fatal_rollback.document.import_text(FileAccess.get_file_as_string("res://fixtures/classic_cube.map"))
+		if not replaced.ok:
+			return replaced
+		return fatal_rollback.document.set_entity_property(9223372036854775807, "bad", "value")
+	) and fatal_messages.any(func(value): return value.begins_with("FATAL_TRANSACTION_ROLLBACK:")),
+		"epoch-changing partial failure reports explicit fatal rollback instead of claiming atomic restoration")
+	fatal_rollback.dispose()
+	checks.check(ui.session.document.translate_brushes(PackedInt64Array([accounting_id]), Vector3.RIGHT).ok, "prepare first shared accounting state")
+	var accounting_local_one: Dictionary = ui.session.capture()
+	var local_one_bytes: int = ui.session.history_action_bytes(accounting_structural, accounting_local_one)
+	checks.check(ui.session.document.translate_brushes(PackedInt64Array([accounting_id]), Vector3.RIGHT).ok, "prepare second shared accounting state")
+	var accounting_local_two: Dictionary = ui.session.capture()
+	var local_two_bytes: int = ui.session.history_action_bytes(accounting_local_one, accounting_local_two)
+	checks.check(structural_bytes > ui.session.ui_envelope_retained_bytes(accounting_before) + ui.session.ui_envelope_retained_bytes(accounting_structural)
+		and local_one_bytes < accounting_structural.native.get_retained_bytes() + accounting_local_one.native.get_retained_bytes()
+			+ ui.session.ui_envelope_retained_bytes(accounting_structural) + ui.session.ui_envelope_retained_bytes(accounting_local_one)
+		and local_two_bytes < accounting_local_one.native.get_retained_bytes() + accounting_local_two.native.get_retained_bytes()
+			+ ui.session.ui_envelope_retained_bytes(accounting_local_one) + ui.session.ui_envelope_retained_bytes(accounting_local_two)
+		and accounting_token > 0,
+		"history actions charge symmetric unique roots while structural actions retain independent states")
 	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
 	checks.check(ui.save_path("res://discard-regression.map"), "discard regression establishes named baseline")
 	for outcome in ["cancel", "invalid"]:
@@ -1424,6 +1677,14 @@ func session_manifest_regression() -> void:
 	checks.check(clean_a.document.import_text(canonical).ok
 		and clean_a.document.save_map("user://session-clean-a.map").ok, "session manifest clean path A fixture")
 	ui.set_session(clean_a)
+	var recovery_brush: int = clean_a.draw_data()[0].id
+	checks.check(clean_a.transact("Recovery token lifetime", func(): return clean_a.document.translate_brushes(PackedInt64Array([recovery_brush]), Vector3.RIGHT)),
+		"recovery lifetime fixture records local memento")
+	var recovery_token = ui.tokens.back()
+	var recovery_change_ref = weakref(recovery_token.change)
+	var recovery_session_ref = weakref(clean_a)
+	var recovery_document_ref = weakref(clean_a.document)
+	recovery_token.restore(false)
 	var dirty = load("res://addons/tbloader/src/editor/map_session.gd").new()
 	checks.check(dirty.document.import_text(canonical).ok, "session manifest dirty fixture imports")
 	dirty.document.create_cuboid(Vector3.ZERO, Vector3.ONE * 8, "common/caulk")
@@ -1459,7 +1720,13 @@ func session_manifest_regression() -> void:
 		{"type": "path", "path": "user://session-corrupt.map"},
 		{"type": "recovery", "text": dirty_text, "source": "user://dirty-source.map"},
 	]})
+	clean_a = null
 	ui.restore_recovery()
+	checks.check(recovery_token.session == null and recovery_token.change == null, "recovery replacement retires removed-session history payload")
+	recovery_token = null
+	checks.check(recovery_change_ref.get_ref() == null, "recovery replacement releases removed local change lifetime")
+	checks.check(recovery_session_ref.get_ref() == null, "recovery replacement releases removed session lifetime")
+	checks.check(recovery_document_ref.get_ref() == null, "recovery replacement releases removed document lifetime")
 	checks.check(ui.sessions.size() == 2 and ui.sessions[0].document.get_path().ends_with("session-clean-b.map")
 		and ui.session == ui.sessions[0], "missing/corrupt active path falls forward to the next valid tab")
 	checks.check(ui.sessions[1].document.export_text().value == dirty_text and ui.sessions[1].document.get_path().is_empty()
@@ -1752,13 +2019,32 @@ func grid_draw_batch_regression() -> void:
 	graph.orientation = 2
 	graph.origin = Vector3.ZERO
 	graph.zoom = 1
+	checks.check(graph.clip_contents and graph.static_layer.get_parent() == graph
+		and graph.selection_layer.get_parent() == graph and graph.camera_layer.get_parent() == graph
+		and graph.tool_layer.get_parent() == graph and [graph.static_layer, graph.selection_layer,
+		graph.camera_layer, graph.tool_layer].all(func(layer): return layer.mouse_filter == Control.MOUSE_FILTER_IGNORE)
+		and graph.static_layer.get_index() < graph.selection_layer.get_index()
+		and graph.selection_layer.get_index() < graph.camera_layer.get_index()
+		and graph.camera_layer.get_index() < graph.tool_layer.get_index(),
+		"retained graph layers preserve clipping, mouse pass-through, and visual z-order")
 	var selected: int = scratch.document.create_cuboid(Vector3(-48, -32, -16), Vector3(-16, 32, 16), "selected/material").value
-	scratch.document.create_cuboid(Vector3(16, -32, -16), Vector3(48, 32, 16), "unselected/material")
+	var unselected: int = scratch.document.create_cuboid(Vector3(16, -32, -16), Vector3(48, 32, 16), "unselected/material").value
 	scratch.changed.emit()
 	scratch.select(PackedInt64Array([selected]))
 	graph.rebuild_dense_edge_cache()
-	checks.check(graph.dense_selected_edges.size() == 24 and graph.dense_unselected_edges.size() == 24, "dense grid cache separates selected and unselected cube edges")
+	checks.check(graph.dense_base_edges.size() == 48 and graph.dense_edge_ranges[selected].y == 24
+		and graph.dense_edge_ranges[unselected].y == 24 and graph.selected_edge_data().size() == 24,
+		"dense grid stores every visible base edge once and derives selected edges separately")
 	var dense_key: String = graph.dense_edge_cache_key
+	var dense_base: PackedVector2Array = graph.dense_base_edges
+	var selected_brush: Dictionary = scratch.brush(selected)
+	checks.check(graph.selected_edge_data(false)[0].is_equal_approx(graph.project(selected_brush.edges[0])),
+		"sparse selected visual data projects the same source edge as dense map-space data")
+	scratch.select(PackedInt64Array([unselected]))
+	checks.check(graph.current_dense_edge_key() == dense_key and graph.dense_base_edges == dense_base
+		and graph.selected_edge_data().size() == 24,
+		"selection changes preserve dense base storage while changing selected visual data")
+	scratch.select(PackedInt64Array([selected]))
 	graph.origin = Vector3(100, 200, 0)
 	graph.zoom = 0.25
 	checks.check(graph.current_dense_edge_key() == dense_key, "dense grid cache survives pan and zoom changes")
@@ -1768,10 +2054,96 @@ func grid_draw_batch_regression() -> void:
 	graph.origin = Vector3.ZERO
 	graph.zoom = 1
 	graph.gesture = ""
-	graph.queue_redraw()
+	graph.queue_view_redraw()
 	await get_tree().process_frame
 	RenderingServer.force_draw()
 	checks.check(graph.gesture == "" and scratch.selected == PackedInt64Array([selected]), "selected and unselected static grid edges redraw together")
+	graph.reset_render_counters()
+	scratch.select(PackedInt64Array([unselected]))
+	await get_tree().process_frame
+	RenderingServer.force_draw()
+	var selection_counts: Dictionary = graph.render_counters()
+	checks.check(selection_counts.static_redraws == 0 and selection_counts.static_edge_builds == 0
+		and selection_counts.selection_redraws > 0 and selection_counts.camera_redraws == 0,
+		"selection change redraws only selection/tool layer and never rebuilds static edges")
+	graph.reset_render_counters()
+	graph.set_camera_pose(Vector3(123, 45, 6), Vector3(1, 2, 3))
+	await get_tree().process_frame
+	RenderingServer.force_draw()
+	var camera_counts: Dictionary = graph.render_counters()
+	checks.check(camera_counts.static_redraws == 0 and camera_counts.static_edge_builds == 0
+		and camera_counts.selection_redraws == 0 and camera_counts.camera_redraws > 0,
+		"camera movement redraws only the lightweight camera marker layer")
+	graph.rebuild_dense_edge_cache()
+	graph.reset_render_counters()
+	var cache_a: Dictionary = scratch.capture()
+	var cache_a_edges: PackedVector2Array = graph.dense_base_edges.duplicate()
+	var cache_a_ranges: Dictionary = graph.dense_edge_ranges.duplicate()
+	var cache_movement := Vector3(16, 0, 0)
+	var cache_move: Dictionary = scratch.translate_brushes(PackedInt64Array([unselected]), cache_movement)
+	graph.apply_dense_translation(cache_movement)
+	var cache_b: Dictionary = scratch.capture()
+	var cache_b_edges: PackedVector2Array = graph.dense_base_edges.duplicate()
+	var patched_counts: Dictionary = graph.render_counters()
+	checks.check(cache_move.ok and cache_a_edges != cache_b_edges and patched_counts.static_edge_builds == 0
+		and patched_counts.dense_cache_states == 2
+		and patched_counts.dense_cache_retained_bytes == 2 * (48 * 8 + 2 * 16),
+		"translation retains exactly two selection-independent base arrays and brush-range payloads")
+	graph.reset_render_counters()
+	for repeat in 3:
+		scratch.restore(cache_a)
+		checks.check(graph.restore_dense_edge_cache() and graph.dense_base_edges == cache_a_edges
+			and graph.dense_edge_ranges == cache_a_ranges, "dense cache restores exact undo state %d" % repeat)
+		scratch.restore(cache_b)
+		checks.check(graph.restore_dense_edge_cache() and graph.dense_base_edges == cache_b_edges,
+			"dense cache restores exact redo state %d" % repeat)
+	var history_counts: Dictionary = graph.render_counters()
+	checks.check(history_counts.static_edge_restores == 6 and history_counts.static_edge_builds == 0
+		and history_counts.dense_cache_states == 2,
+		"repeated dense undo/redo restores two-state history without rebuilding static edges")
+	scratch.hidden[selected] = true
+	graph.reset_render_counters()
+	checks.check(not graph.restore_dense_edge_cache(), "visibility mismatch cannot restore a stale dense edge state")
+	graph.rebuild_dense_edge_cache()
+	checks.check(graph.render_counters().static_edge_builds == 1, "visibility mismatch rebuilds dense static edges")
+	scratch.hidden.clear()
+	graph.rebuild_dense_edge_cache()
+	graph.orientation = 1
+	graph.reset_render_counters()
+	checks.check(not graph.restore_dense_edge_cache(), "orientation mismatch cannot restore an absent dense edge state")
+	graph.rebuild_dense_edge_cache()
+	checks.check(graph.render_counters().static_edge_builds == 1, "orientation mismatch rebuilds dense static edges")
+	scratch.document.create_cuboid(Vector3(80, -16, -16), Vector3(112, 16, 16), "content/material")
+	graph.reset_render_counters()
+	checks.check(not graph.restore_dense_edge_cache(), "full content generation mismatch cannot restore a stale dense edge state")
+	graph.rebuild_dense_edge_cache()
+	checks.check(graph.render_counters().static_edge_builds == 1 and graph.render_counters().dense_cache_states == 2,
+		"full content mismatch rebuilds while dense history remains bounded")
+	graph.orientation = 2
+	graph.rebuild_dense_edge_cache()
+	scratch.select(PackedInt64Array([selected]))
+	graph.queue_view_redraw()
+	await get_tree().process_frame
+	RenderingServer.force_draw()
+	var static_before: Dictionary = graph.static_edge_signature()
+	var brush_before: Vector3 = scratch.brush(selected).aabb_min
+	var camera_movement := Vector3(16, 0, 0)
+	graph.reset_render_counters()
+	ui.camera_view.camera_gesture = "move"
+	ui.camera_view.camera_delta = camera_movement
+	ui.camera_view.finish_camera_left()
+	scratch.select(PackedInt64Array())
+	await get_tree().process_frame
+	RenderingServer.force_draw()
+	var camera_move_counts: Dictionary = graph.render_counters()
+	var static_after: Dictionary = graph.static_edge_signature()
+	checks.check(scratch.selected.is_empty() and scratch.brush(selected).aabb_min == brush_before + camera_movement
+		and camera_move_counts.static_redraws > 0 and camera_move_counts.static_edge_builds > 0
+		and static_after.generation == scratch.document.get_state_generation()
+		and static_after.points == static_before.points
+		and Vector2(static_after.sum).is_equal_approx(Vector2(static_before.sum) + graph.map_edge_point(camera_movement) * 24.0),
+		"camera whole-brush move rebuilds current static gray geometry before deselection exposes it")
+	scratch.select(PackedInt64Array([selected]))
 	graph.gesture = "move"
 	graph.delta = Vector3(16, 0, 0)
 	ui.camera_view.preview_grid_move(graph.delta)
@@ -1802,14 +2174,14 @@ func grid_draw_batch_regression() -> void:
 	duplicate_camera.queue_free()
 	graph.gesture = "move"
 	graph.delta = Vector3(16, 0, 0)
-	graph.queue_redraw()
+	graph.queue_selection_redraw()
 	await get_tree().process_frame
 	RenderingServer.force_draw()
 	checks.check(graph.gesture == "move" and graph.delta == Vector3(16, 0, 0), "move preview redraws with batched ordinary edges")
 	graph.gesture = "rotate"
 	graph.rotation_pivot = graph.selection_center()
 	graph.rotation_angle = deg_to_rad(45)
-	graph.queue_redraw()
+	graph.queue_selection_redraw()
 	await get_tree().process_frame
 	RenderingServer.force_draw()
 	checks.check(graph.gesture == "rotate" and is_equal_approx(graph.rotation_angle, deg_to_rad(45)), "rotate preview redraws with batched ordinary edges")
@@ -1874,6 +2246,9 @@ func grid_draw_batch_regression() -> void:
 		"no-grid clip routing is safe and leaving Cut clears shared camera state")
 	scratch.save_enabled = false
 	ui.set_session(original)
+	graph.current_dense_edge_key()
+	checks.check(graph.render_counters().dense_cache_states == 0 and graph.dense_base_edges.is_empty(),
+		"detaching a document releases its dense edge history")
 	ui.graph_a.grab_focus()
 
 func vertex_hull_drag_journey() -> void:

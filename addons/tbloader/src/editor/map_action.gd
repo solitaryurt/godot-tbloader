@@ -5,20 +5,35 @@ extends RefCounted
 var session: RefCounted
 var before: Dictionary
 var after: Dictionary
+var before_ui: Dictionary
+var after_ui: Dictionary
+var change: RefCounted
 var epoch: int
+var before_generation: int
+var after_generation: int
 var bytes: int
 var reporter: Callable
 
 func restore(use_after: bool) -> void:
-	if session == null or session.document.get_epoch() != epoch:
+	var expected_generation := before_generation if use_after else after_generation
+	if session == null or session.document.get_epoch() != epoch or session.document.get_state_generation() != expected_generation:
+		var report_callback := reporter
 		retire()
-		if reporter.is_valid():
-			reporter.call("Map history expired; the originating session is no longer retained.")
+		if report_callback.is_valid():
+			report_callback.call("Map history expired or is out of order; the originating state is no longer current.")
 		return
-	session.restore(after if use_after else before)
+	if change != null:
+		session.restore_document_change(change, use_after, after_ui if use_after else before_ui)
+	else:
+		session.restore(after if use_after else before)
 
 func retire() -> void:
+	# EditorUndoRedoManager cannot remove one expired global entry. Its cursor may
+	# still visit this payload-free token, which deliberately remains a safe no-op.
 	session = null
 	before.clear()
 	after.clear()
+	before_ui.clear()
+	after_ui.clear()
+	change = null
 	bytes = 0

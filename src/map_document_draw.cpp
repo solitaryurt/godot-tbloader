@@ -5,6 +5,7 @@
 #include <godot_cpp/variant/packed_vector3_array.hpp>
 #include <godot_cpp/variant/packed_vector2_array.hpp>
 #include <cmath>
+#include <map>
 #include <vector>
 
 using namespace godot;
@@ -15,26 +16,57 @@ Vector3 vector(vec3 v) { return Vector3(v.x, v.y, v.z); }
 Array TBMapDocument::get_draw_data() const {
 	Array out;
 	for (int e = 0; e < map->entity_count; ++e) for (int b = 0; b < map->entities[e].brush_count; ++b) {
-		const auto &brush = map->entities[e].brushes[b]; const auto &geo = map->entity_geo[e].brushes[b];
-		const auto topology = lm_extract_brush_topology(brush, geo);
+		const auto view = current_brush_geometry(e, b); const auto &brush = *view.brush;
 		Dictionary entry; Array faces; PackedVector3Array vertices, edges; PackedInt32Array edge_indices;
-		for (const auto &point : topology.vertices) vertices.push_back(vector(point));
-		for (const auto &edge : topology.edges) {
-			edge_indices.push_back(edge.first); edge_indices.push_back(edge.second);
-			edges.push_back(vector(topology.vertices[edge.first])); edges.push_back(vector(topology.vertices[edge.second]));
-		}
-		for (int f = 0; f < brush.face_count; ++f) {
-			const auto &face = topology.faces[f]; Dictionary data; PackedVector3Array winding; PackedInt32Array indices;
-			for (const auto &point : face.winding) winding.push_back(vector(point));
-			for (int index : face.vertex_indices) indices.push_back(index);
-			data["index"] = f; data["winding"] = winding; data["vertex_indices"] = indices;
-			data["center"] = vector(face.center); data["normal"] = vector(brush.faces[f].plane_normal);
-			data["texture"] = String::utf8(map->textures[brush.faces[f].texture_idx].name); faces.push_back(data);
+		vec3 mins{}, maxs{};
+		if (view.compact) {
+			const auto &geometry = *view.compact;
+			for (const auto &point : geometry.positions) vertices.push_back(vector(point));
+			for (const auto &edge : geometry.edges) {
+				edge_indices.push_back(edge.a); edge_indices.push_back(edge.b);
+				edges.push_back(vector(geometry.positions[edge.a])); edges.push_back(vector(geometry.positions[edge.b]));
+			}
+			for (int f = 0; f < brush.face_count; ++f) {
+				const auto &face = geometry.faces[f]; Dictionary data; PackedVector3Array winding; PackedInt32Array indices;
+				for (uint32_t v = 0; v < face.corner_count; ++v) {
+					const auto &corner = geometry.corners[face.corner_begin + v]; winding.push_back(vector(geometry.positions[corner.position])); indices.push_back(corner.position);
+				}
+				data["index"] = f; data["winding"] = winding; data["vertex_indices"] = indices;
+				data["center"] = vector(face.center); data["normal"] = vector(brush.faces[f].plane_normal);
+				data["texture"] = String::utf8(current_face_texture(e, b, f).c_str()); faces.push_back(data);
+			}
+			mins = geometry.mins; maxs = geometry.maxs;
 		}
 		entry["id"] = brush.id; entry["entity_id"] = map->entities[e].id; entry["topology_revision"] = brush.topology_revision;
-		entry["aabb_min"] = vector(topology.mins); entry["aabb_max"] = vector(topology.maxs); entry["vertices"] = vertices; entry["edges"] = edges;
+		entry["aabb_min"] = vector(mins); entry["aabb_max"] = vector(maxs); entry["vertices"] = vertices; entry["edges"] = edges;
 		entry["edge_vertex_indices"] = edge_indices; entry["faces"] = faces; out.push_back(entry);
 	}
+	return out;
+}
+
+Dictionary TBMapDocument::get_draw_changes() const {
+	Dictionary out = get_last_change();
+	Array brushes;
+	if (!last_change.reset) for (int64_t id : last_change.brush_ids) {
+		const LiveLocation *location = live_location(id, 'b');
+		if (!location) continue;
+		const auto view = current_brush_geometry(location->entity, location->index); const auto &brush = *view.brush;
+		Dictionary entry; Array faces; PackedVector3Array vertices, edges; PackedInt32Array edge_indices; vec3 mins{}, maxs{};
+		if (view.compact) {
+			const auto &geometry = *view.compact;
+			for (const auto &point : geometry.positions) vertices.push_back(vector(point));
+			for (const auto &edge : geometry.edges) { edge_indices.push_back(edge.a); edge_indices.push_back(edge.b); edges.push_back(vector(geometry.positions[edge.a])); edges.push_back(vector(geometry.positions[edge.b])); }
+			for (int f = 0; f < brush.face_count; ++f) {
+				const auto &face = geometry.faces[f]; Dictionary data; PackedVector3Array winding; PackedInt32Array indices;
+				for (uint32_t v = 0; v < face.corner_count; ++v) { const auto &corner = geometry.corners[face.corner_begin + v]; winding.push_back(vector(geometry.positions[corner.position])); indices.push_back(corner.position); }
+				data["index"] = f; data["winding"] = winding; data["vertex_indices"] = indices; data["center"] = vector(face.center); data["normal"] = vector(brush.faces[f].plane_normal); data["texture"] = String::utf8(current_face_texture(location->entity, location->index, f).c_str()); faces.push_back(data);
+			}
+			mins = geometry.mins; maxs = geometry.maxs;
+		}
+		entry["id"] = brush.id; entry["entity_id"] = map->entities[location->entity].id; entry["topology_revision"] = brush.topology_revision;
+		entry["aabb_min"] = vector(mins); entry["aabb_max"] = vector(maxs); entry["vertices"] = vertices; entry["edges"] = edges; entry["edge_vertex_indices"] = edge_indices; entry["faces"] = faces; brushes.push_back(entry);
+	}
+	out["brushes"] = brushes;
 	return out;
 }
 
@@ -45,24 +77,27 @@ Array TBMapDocument::get_preview_data() const {
 		PackedInt32Array indices, faces;
 		PackedInt64Array brushes;
 	};
-	std::vector<Surface> surfaces(map->texture_count);
+	std::map<std::string, Surface> surfaces;
 	for (int e = 0; e < map->entity_count; ++e) for (int b = 0; b < map->entities[e].brush_count; ++b) {
-		const auto &brush = map->entities[e].brushes[b]; const auto &geo = map->entity_geo[e].brushes[b];
+		const auto view = current_brush_geometry(e, b); const auto &brush = *view.brush;
 		for (int f = 0; f < brush.face_count; ++f) {
-			const auto &face = geo.faces[f]; auto &s = surfaces[brush.faces[f].texture_idx]; int base = s.vertices.size();
-			for (int v = 0; v < face.vertex_count; ++v) {
-				s.vertices.push_back(vector(face.vertices[v].vertex));
-				// Editor solid preview uses unambiguous outward plane normals, regardless of _phong.
-				s.normals.push_back(vector(brush.faces[f].plane_normal)); s.uvs.push_back(Vector2(face.vertices[v].uv.u, face.vertices[v].uv.v));
+			const std::string material = current_face_texture(e, b, f); auto &s = surfaces[material]; int base = s.vertices.size(); int index_count = 0;
+			if (view.compact) {
+				const auto &face = view.compact->faces[f]; index_count = face.index_count;
+				for (uint32_t v = 0; v < face.corner_count; ++v) {
+					const auto &corner = view.compact->corners[face.corner_begin + v];
+					s.vertices.push_back(vector(view.compact->positions[corner.position])); s.normals.push_back(vector(brush.faces[f].plane_normal)); s.uvs.push_back(Vector2(corner.uv.u, corner.uv.v));
+				}
+				for (uint32_t i = 0; i < face.index_count; ++i) s.indices.push_back(base + view.compact->face_index(f, i) - face.corner_begin);
 			}
-			for (int i = 0; i < face.index_count; ++i) s.indices.push_back(base + face.indices[i]);
-			for (int i = 0; i < face.index_count / 3; ++i) { s.brushes.push_back(brush.id); s.faces.push_back(f); }
+			for (int i = 0; i < index_count / 3; ++i) { s.brushes.push_back(brush.id); s.faces.push_back(f); }
 		}
 	}
 	Array out;
-	for (int t = 0; t < map->texture_count; ++t) {
-		const auto &s = surfaces[t]; if (s.indices.is_empty()) continue;
-		Dictionary data; data["texture"] = String::utf8(map->textures[t].name); data["texture_size"] = Vector2i(map->textures[t].width, map->textures[t].height);
+	for (const auto &item : surfaces) {
+		const auto &s = item.second; if (s.indices.is_empty()) continue;
+		Vector2i texture_size = texture_sizes.get(String::utf8(item.first.c_str()), Vector2i(1, 1));
+		Dictionary data; data["texture"] = String::utf8(item.first.c_str()); data["texture_size"] = texture_size;
 		data["vertices"] = s.vertices; data["normals"] = s.normals; data["uvs"] = s.uvs; data["indices"] = s.indices;
 		data["triangle_brush_ids"] = s.brushes; data["triangle_face_indices"] = s.faces; out.push_back(data);
 	}
@@ -82,13 +117,12 @@ PackedVector2Array TBMapDocument::get_face_preview_uvs(const Array &targets, con
 		const int64_t token = target["topology_revision"];
 		const LiveLocation *location = live_location(id, 'b');
 		if (!location) continue;
-		const auto &brush = map->entities[location->entity].brushes[location->index];
+		const auto view = current_brush_geometry(location->entity, location->index); const auto &brush = *view.brush;
 		if (brush.topology_revision != token || face_index < 0 || face_index >= brush.face_count ||
-				String::utf8(map->textures[brush.faces[face_index].texture_idx].name) != texture) continue;
-		const auto &face = map->entity_geo[location->entity].brushes[location->index].faces[face_index];
-		for (int index = 0; index < face.index_count; ++index) {
-			const auto &uv = face.vertices[face.indices[index]].uv;
-			out.push_back(Vector2(uv.u - std::floor(uv.u), uv.v - std::floor(uv.v)));
+				String::utf8(current_face_texture(location->entity, location->index, face_index).c_str()) != texture) continue;
+		if (view.compact) {
+			const auto &face = view.compact->faces[face_index];
+			for (uint32_t index = 0; index < face.index_count; ++index) { const auto &uv = view.compact->corners[view.compact->face_index(face_index, index)].uv; out.push_back(Vector2(uv.u - std::floor(uv.u), uv.v - std::floor(uv.v))); }
 		}
 	}
 	return out;

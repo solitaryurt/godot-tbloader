@@ -20,6 +20,28 @@ import run_tests as harness
 MARKER = "TB_CURRENT_EDITOR_PERF_COMPLETE:PASS"
 COUNTS = re.compile(r"^TB_CURRENT_EDITOR_PERF_COUNTS:(\d+):(\d+):(\d+):(\d+)$", re.MULTILINE)
 FIXTURE_SHA256 = "1e9d250d26267ebda5ff52978ebacca23e37a686865fe47f950b0109e7ca8811"
+MIB = 1024 * 1024
+ABSOLUTE_BUDGETS = {
+    "load_native_document_ms": 350,
+    "populate_production_session_caches_ms": 175,
+    "attach_session_and_initial_camera_rebuild_ms": 400,
+    "set_texture_sizes_uv_only_ms": 100,
+    "move_connected_session_translation_ms": 5,
+    "selection_layer_queue_to_frame_post_draw_ms": 10,
+    "camera_marker_queue_to_frame_post_draw_ms": 10,
+    "grid_redraw_queue_to_frame_post_draw_ms": 100,
+    "local_mutation_and_preview_array_max_ms": 10,
+    "memento_undo_redo_p95_ms": 1,
+    "full_visible_rss_growth_mib": 450,
+    "full_visible_godot_static_growth_mib": 375,
+}
+LOCAL_ARRAY_TIMINGS = (
+    "native_preview_translate_one_brush", "native_preview_rotate_one_brush",
+    "native_preview_translate_face_component", "native_rotate_one_brush_local",
+    "native_translate_one_face_local", "native_texture_one_face_local",
+    "native_uv_one_face_local", "native_atomic_two_face_local",
+    "native_move_face_component_local",
+)
 
 
 def write_json(path, value):
@@ -81,11 +103,69 @@ def validate(report, samples):
             or compatibility.get("triangles") != counts.get("preview_triangles")
             or compatibility.get("vertices", 0) <= 0):
         raise harness.GateFailure("invalid compatibility preview measurement")
+    draw_delta = report.get("draw_delta_counters", {})
+    if (draw_delta.get("touched_draw_entries", 0) <= 0
+            or draw_delta.get("full_draw_resets", -1) < 0
+            or draw_delta.get("full_cache_duplicates") != 0
+            or draw_delta.get("history_cache_retained_bytes") != 0):
+        raise harness.GateFailure("invalid draw delta counters")
+    texture_sizes = report.get("set_texture_sizes_counters", {})
+    if (texture_sizes.get("compact_full_builds") != 0
+            or texture_sizes.get("compact_uv_updates", 0) <= 0
+            or texture_sizes.get("compact_uv_copy_bytes", 0) <= 0
+            or texture_sizes.get("brush_builds") != 0):
+        raise harness.GateFailure("invalid texture-size UV-only counters")
+    texture_memory = report.get("set_texture_sizes_memory", {})
+    if any(not isinstance(texture_memory.get(key), int)
+           for key in ("delta_VmRSS_bytes", "delta_godot_static_bytes")):
+        raise harness.GateFailure("missing texture-size memory deltas")
+    texture_draw = report.get("set_texture_sizes_draw_counters", {})
+    if (texture_draw.get("full_draw_resets") != 0 or texture_draw.get("full_draw_reads") != 0
+            or texture_draw.get("preview_uv_cache_retentions") != 1):
+        raise harness.GateFailure("texture-size update invalidated the session draw cache")
+    local_history = report.get("local_history", {})
+    if (local_history.get("retained_bytes_per_action", 0) <= 0
+            or local_history.get("changed_brushes") != 1
+            or local_history.get("restore_touched_brushes") != 1
+            or local_history.get("restore_full_resets") != 0):
+        raise harness.GateFailure("invalid local object-history counters")
     for name, values in report["timings_us"].items():
         values = values if isinstance(values, list) else [values]
         if not values or any(not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0
                              for value in values):
             raise harness.GateFailure(f"invalid timing: {name}")
+
+    timings = report["timings_us"]
+    measured = {}
+    scalar_budgets = {
+        "load_native_document": "load_native_document_ms",
+        "populate_production_session_caches": "populate_production_session_caches_ms",
+        "attach_session_and_initial_camera_rebuild": "attach_session_and_initial_camera_rebuild_ms",
+        "set_texture_sizes_uv_only": "set_texture_sizes_uv_only_ms",
+        "move_connected_session_translation": "move_connected_session_translation_ms",
+        "selection_layer_queue_to_frame_post_draw": "selection_layer_queue_to_frame_post_draw_ms",
+        "camera_marker_queue_to_frame_post_draw": "camera_marker_queue_to_frame_post_draw_ms",
+        "grid_redraw_queue_to_frame_post_draw": "grid_redraw_queue_to_frame_post_draw_ms",
+    }
+    for timing_name, budget_name in scalar_budgets.items():
+        measured[budget_name] = timings[timing_name] / 1000
+    measured["local_mutation_and_preview_array_max_ms"] = max(
+        max(timings[name]) for name in LOCAL_ARRAY_TIMINGS) / 1000
+    memento_values = (timings["apply_document_change_undo_local"],
+                       timings["apply_document_change_redo_local"])
+    measured["memento_undo_redo_p95_ms"] = max(
+        sorted(values)[math.ceil(len(values) * .95) - 1] for values in memento_values) / 1000
+    empty = report["checkpoints"]["empty_editor"]["memory"]
+    final = report["checkpoints"]["full_visible_grids_camera_after_render_sync"]["memory"]
+    measured["full_visible_rss_growth_mib"] = (final["VmRSS_bytes"] - empty["VmRSS_bytes"]) / MIB
+    measured["full_visible_godot_static_growth_mib"] = (
+        final["godot_static_bytes"] - empty["godot_static_bytes"]) / MIB
+    report["regression_budgets"] = {name: {"measured": measured[name], "limit": limit}
+                                    for name, limit in ABSOLUTE_BUDGETS.items()}
+    exceeded = [f"{name}={measured[name]:.3f} > {limit}"
+                for name, limit in ABSOLUTE_BUDGETS.items() if measured[name] > limit]
+    if exceeded:
+        raise harness.GateFailure("absolute regression budget exceeded: " + "; ".join(exceeded))
 
 
 def main():
@@ -94,6 +174,7 @@ def main():
     parser.add_argument("--samples", type=int, default=31)
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--display-driver", choices=("headless", "x11"), default="headless")
+    parser.add_argument("--skip-build", action="store_true", help="use the existing debug extension without running scons")
     args = parser.parse_args()
     if args.samples < 1 or not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error("--samples and --timeout must be positive")
@@ -114,6 +195,15 @@ def main():
         result["git_status"] = subprocess.check_output(["git", "status", "--short"], cwd=harness.ROOT, text=True)
         result["engine"] = str(engine)
         result["engine_sha256"] = harness.sha256(engine)
+        if not args.skip_build:
+            build = subprocess.run(
+                ["scons", "platform=linux", "target=template_debug", "arch=x86_64", "-j2"],
+                cwd=harness.ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                timeout=args.timeout,
+            )
+            (logs / "build.log").write_text(build.stdout)
+            if build.returncode:
+                raise harness.GateFailure(f"debug extension build failed with status {build.returncode}")
         result["runner_sha256"] = {
             name: harness.sha256(harness.HERE / name)
             for name in ("current_editor_performance_runner.py", "current_editor_performance_probe.gd", "run_tests.py")

@@ -68,7 +68,7 @@ size_t LMMapData::retained_bytes() const {
 	return bytes;
 }
 
-std::shared_ptr<LMMapData> LMMapData::deep_clone() const {
+std::shared_ptr<LMMapData> LMMapData::source_clone() const {
 	auto result = std::make_shared<LMMapData>();
 	result->entity_count = entity_count;
 	result->entities = static_cast<LMEntity *>(calloc(entity_count, sizeof(LMEntity)));
@@ -101,6 +101,11 @@ std::shared_ptr<LMMapData> LMMapData::deep_clone() const {
 	}
 	result->worldspawn_layer_count = worldspawn_layer_count;
 	result->worldspawn_layers = clone_array(worldspawn_layers, worldspawn_layer_count);
+	return result;
+}
+
+std::shared_ptr<LMMapData> LMMapData::deep_clone() const {
+	auto result = source_clone();
 	result->geometry_entity_count = geometry_entity_count;
 	result->entity_geo = static_cast<LMEntityGeometry *>(calloc(geometry_entity_count, sizeof(LMEntityGeometry)));
 	for (int e = 0; e < geometry_entity_count; ++e) {

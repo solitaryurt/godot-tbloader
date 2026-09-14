@@ -2,6 +2,7 @@
 extends Control
 
 const OrientationGizmo = preload("res://addons/tbloader/src/editor/orientation_gizmo.gd")
+const GraphViewLayer = preload("res://addons/tbloader/src/editor/graph_view_layer.gd")
 
 var host: Control
 var orientation = 2 # hidden axis: XY=2, XZ=1, YZ=0
@@ -40,15 +41,30 @@ var dense_edge_cache_key = "" # Compatibility/debug token; cache validity uses t
 var dense_cache_document_id = 0
 var dense_cache_revision = -1
 var dense_cache_visibility_generation = -1
-var dense_cache_selection_generation = -1
 var dense_cache_orientation = -1
-var dense_unselected_edges := PackedVector2Array()
-var dense_selected_edges := PackedVector2Array()
+var dense_base_edges := PackedVector2Array()
+var dense_edge_ranges: Dictionary = {}
 var dense_cache_history: Dictionary = {}
 var dense_cache_history_order: Array[String] = []
+var dense_cache_restore_count := 0
+var static_layer: Control
+var selection_layer: Control
+var camera_layer: Control
+var tool_layer: Control
+var static_redraw_count := 0
+var static_edge_build_count := 0
+var static_edge_generation := -1
+var static_edge_point_count := 0
+var static_edge_sum := Vector2.ZERO
+var selection_redraw_count := 0
+var selection_mask_point_count := 0
+var camera_redraw_count := 0
 var orientation_gizmo: Control
 var camera_views: Array[WeakRef] = []
 const DENSE_EDGE_THRESHOLD = 1024
+const DENSE_CACHE_STATE_LIMIT = 2
+const DENSE_EDGE_POINT_BYTES = 8
+const DENSE_EDGE_RANGE_BYTES = 16
 const CONTEXT_DRAG_THRESHOLD = 4.0
 
 func _ready() -> void:
@@ -57,6 +73,10 @@ func _ready() -> void:
 	custom_minimum_size = Vector2(240, 180)
 	clip_contents = true
 	tooltip_text = "Components: Shift-click adds/toggles; Alt-click cycles overlapping handles. Drag a selected handle to move the group; hold Shift during motion to constrain an axis."
+	static_layer = create_draw_layer("StaticMap")
+	selection_layer = create_draw_layer("SelectionTools")
+	camera_layer = create_draw_layer("CameraMarker")
+	tool_layer = create_draw_layer("ToolChrome")
 	orientation_gizmo = OrientationGizmo.new()
 	orientation_gizmo.name = "GridOrientation"
 	orientation_gizmo.signed_axes = false
@@ -74,11 +94,61 @@ func _ready() -> void:
 	add_child(frame_button)
 	update_orientation_gizmo()
 	focus_exited.connect(cancel)
-	focus_entered.connect(func(): host.active_graph = self; host.refresh_status(); queue_redraw())
+	focus_entered.connect(func(): host.active_graph = self; host.refresh_status(); queue_selection_redraw())
+	resized.connect(queue_view_redraw)
+
+func create_draw_layer(kind: String) -> Control:
+	var layer := GraphViewLayer.new()
+	layer.name = kind
+	layer.graph = self
+	layer.layer_kind = kind
+	layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(layer)
+	layer.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	return layer
+
+func queue_static_redraw() -> void:
+	if is_instance_valid(static_layer):
+		static_layer.queue_redraw()
+
+func queue_selection_redraw() -> void:
+	if is_instance_valid(selection_layer):
+		selection_layer.queue_redraw()
+	if is_instance_valid(tool_layer):
+		tool_layer.queue_redraw()
+
+func queue_camera_redraw() -> void:
+	if is_instance_valid(camera_layer):
+		camera_layer.queue_redraw()
+
+func queue_view_redraw() -> void:
+	queue_static_redraw()
+	queue_selection_redraw()
+	queue_camera_redraw()
+
+func render_counters() -> Dictionary:
+	return {"static_redraws": static_redraw_count, "static_edge_builds": static_edge_build_count,
+		"static_edge_restores": dense_cache_restore_count, "dense_cache_states": dense_cache_history.size(),
+		"dense_cache_retained_bytes": dense_cache_retained_bytes_estimate(),
+		"selection_redraws": selection_redraw_count, "selection_mask_points": selection_mask_point_count,
+		"camera_redraws": camera_redraw_count}
+
+func static_edge_signature() -> Dictionary:
+	return {"generation": static_edge_generation, "points": static_edge_point_count, "sum": static_edge_sum}
+
+func reset_render_counters() -> void:
+	static_redraw_count = 0
+	static_edge_build_count = 0
+	dense_cache_restore_count = 0
+	selection_redraw_count = 0
+	selection_mask_point_count = 0
+	camera_redraw_count = 0
 
 func _notification(what: int) -> void:
 	if what in [NOTIFICATION_APPLICATION_FOCUS_OUT, NOTIFICATION_WM_WINDOW_FOCUS_OUT]:
 		cancel()
+	elif what == NOTIFICATION_PREDELETE:
+		clear_dense_edge_cache()
 
 func axes() -> Vector2i:
 	return Vector2i(1 if orientation == 0 else 0, 1 if orientation == 2 else 2)
@@ -93,7 +163,7 @@ func set_camera_pose(position: Vector3, direction: Vector3) -> void:
 	camera_position = position
 	camera_direction = direction
 	camera_pose_valid = true
-	queue_redraw()
+	queue_camera_redraw()
 
 func set_camera_views(views: Array) -> void:
 	camera_views.clear()
@@ -160,7 +230,7 @@ func set_orientation(value: int) -> void:
 	zoom = state.zoom
 	host.clear_cut_state()
 	update_orientation_gizmo()
-	queue_redraw()
+	queue_view_redraw()
 	host.refresh_status()
 
 func update_orientation_gizmo() -> void:
@@ -180,7 +250,7 @@ func zoom_at(position: Vector2, factor: float) -> void:
 	var offset = before - unproject(position)
 	offset[orientation] = 0
 	origin += offset
-	queue_redraw()
+	queue_view_redraw()
 
 func frame_selection() -> void:
 	var selected_items: Array = []
@@ -216,7 +286,7 @@ func frame_selection() -> void:
 	var minimum_extent := maxf(host.session.grid * 4.0, 1.0)
 	zoom = clampf(minf(available.x / maxf(extent.x, minimum_extent), available.y / maxf(extent.y, minimum_extent)), 0.02, 64.0)
 	view_states[orientation] = {"origin": origin, "zoom": zoom}
-	queue_redraw()
+	queue_view_redraw()
 
 func cancel() -> void:
 	gesture = ""
@@ -226,7 +296,7 @@ func cancel() -> void:
 	drag_component.clear()
 	if is_instance_valid(host):
 		host.clear_mutation_preview(self)
-	queue_redraw()
+	queue_selection_redraw()
 
 func preview_result(result: Dictionary) -> void:
 	if is_instance_valid(host):
@@ -379,84 +449,154 @@ func map_edge_point(point: Vector3) -> Vector2:
 	var a := axes()
 	return Vector2(point[a.x], point[a.y])
 
+func dense_edge_key(document_id: int, generation: int, visibility_generation: int, cache_orientation: int) -> String:
+	return "%d:%d:%d:%d" % [document_id, generation, visibility_generation, cache_orientation]
+
 func current_dense_edge_key() -> String:
-	return "%d:%d:%d:%d:%d" % [host.session.document.get_instance_id(),
-		host.session.document.get_state_generation(), host.session.visibility_generation,
-		host.session.selection_generation, orientation]
+	var document_id: int = host.session.document.get_instance_id()
+	if dense_cache_document_id != 0 and dense_cache_document_id != document_id:
+		clear_dense_edge_cache()
+	return dense_edge_key(document_id, host.session.document.get_state_generation(),
+		host.session.visibility_generation, orientation)
 
 func dense_edge_cache_matches() -> bool:
 	return (dense_cache_document_id == host.session.document.get_instance_id()
 		and dense_cache_revision == host.session.document.get_state_generation()
 		and dense_cache_visibility_generation == host.session.visibility_generation
-		and dense_cache_selection_generation == host.session.selection_generation
 		and dense_cache_orientation == orientation)
 
 func capture_dense_edge_cache_state() -> void:
 	dense_cache_document_id = host.session.document.get_instance_id()
 	dense_cache_revision = host.session.document.get_state_generation()
 	dense_cache_visibility_generation = host.session.visibility_generation
-	dense_cache_selection_generation = host.session.selection_generation
 	dense_cache_orientation = orientation
 	dense_edge_cache_key = current_dense_edge_key()
 
-func rebuild_dense_edge_cache() -> void:
-	retain_dense_edge_cache()
-	dense_unselected_edges.clear()
-	dense_selected_edges.clear()
-	for brush in host.session.draw_data():
-		if not host.session.brush_visible(brush):
-			continue
-		for i in range(0, brush.edges.size(), 2):
-			if host.session.selected.has(brush.id):
-				dense_selected_edges.append(map_edge_point(brush.edges[i]))
-				dense_selected_edges.append(map_edge_point(brush.edges[i + 1]))
-			else:
-				dense_unselected_edges.append(map_edge_point(brush.edges[i]))
-				dense_unselected_edges.append(map_edge_point(brush.edges[i + 1]))
-	capture_dense_edge_cache_state()
+func clear_dense_edge_cache() -> void:
+	dense_cache_history.clear()
+	dense_cache_history_order.clear()
+	dense_base_edges = PackedVector2Array()
+	dense_edge_ranges = {}
+	dense_edge_cache_key = ""
+	dense_cache_document_id = 0
+	dense_cache_revision = -1
+	dense_cache_visibility_generation = -1
+	dense_cache_orientation = -1
+	static_edge_generation = -1
+	static_edge_point_count = 0
+	static_edge_sum = Vector2.ZERO
 
 func retain_dense_edge_cache() -> void:
 	if dense_cache_revision < 0 or dense_edge_cache_key.is_empty():
 		return
-	if dense_cache_history.has(dense_edge_cache_key):
-		dense_cache_history_order.erase(dense_edge_cache_key)
-	dense_cache_history[dense_edge_cache_key] = [dense_unselected_edges, dense_selected_edges]
+	dense_cache_history[dense_edge_cache_key] = {
+		"edges": dense_base_edges, "ranges": dense_edge_ranges, "sum": static_edge_sum,
+	}
+	dense_cache_history_order.erase(dense_edge_cache_key)
 	dense_cache_history_order.append(dense_edge_cache_key)
-	while dense_cache_history_order.size() > 2:
+	while dense_cache_history_order.size() > DENSE_CACHE_STATE_LIMIT:
 		dense_cache_history.erase(dense_cache_history_order.pop_front())
 
 func restore_dense_edge_cache() -> bool:
 	var key := current_dense_edge_key()
 	if not dense_cache_history.has(key):
 		return false
-	var cached: Array = dense_cache_history[key]
-	retain_dense_edge_cache()
-	dense_unselected_edges = cached[0]
-	dense_selected_edges = cached[1]
+	var cached: Dictionary = dense_cache_history[key]
+	dense_base_edges = cached.edges
+	dense_edge_ranges = cached.ranges
+	static_edge_sum = cached.sum
 	capture_dense_edge_cache_state()
+	static_edge_generation = dense_cache_revision
+	static_edge_point_count = dense_base_edges.size()
+	dense_cache_history_order.erase(key)
+	dense_cache_history_order.append(key)
+	dense_cache_restore_count += 1
 	return true
 
-func draw_dense_edges(dynamic_selection: bool) -> void:
+func dense_cache_retained_bytes_estimate() -> int:
+	var bytes := 0
+	for cached in dense_cache_history.values():
+		bytes += cached.edges.size() * DENSE_EDGE_POINT_BYTES
+		bytes += cached.ranges.size() * DENSE_EDGE_RANGE_BYTES
+	return bytes
+
+func rebuild_dense_edge_cache() -> void:
+	current_dense_edge_key() # Drops states retained for a detached document.
+	dense_base_edges = PackedVector2Array()
+	dense_edge_ranges = {}
+	static_edge_sum = Vector2.ZERO
+	for brush in host.session.draw_data():
+		if not host.session.brush_visible(brush):
+			continue
+		var start := dense_base_edges.size()
+		for i in range(0, brush.edges.size(), 2):
+			var p := map_edge_point(brush.edges[i])
+			var q := map_edge_point(brush.edges[i + 1])
+			dense_base_edges.append(p)
+			dense_base_edges.append(q)
+			static_edge_sum += p + q
+		dense_edge_ranges[brush.id] = Vector2i(start, dense_base_edges.size() - start)
+	capture_dense_edge_cache_state()
+	static_edge_generation = dense_cache_revision
+	static_edge_point_count = dense_base_edges.size()
+	static_edge_build_count += 1
+	retain_dense_edge_cache()
+
+func draw_dense_edges(canvas: Control) -> void:
 	if not dense_edge_cache_matches() and not restore_dense_edge_cache():
 		rebuild_dense_edge_cache()
 	var a := axes()
 	var canvas_origin: Vector2 = size * 0.5 + Vector2(-origin[a.x], origin[a.y]) * zoom
-	draw_set_transform(canvas_origin, 0.0, Vector2(zoom, -zoom))
-	if not dense_unselected_edges.is_empty():
-		draw_multiline(dense_unselected_edges, Color("9eb2c7"), 1.0 / zoom, true)
-	if not dynamic_selection and not dense_selected_edges.is_empty():
-		draw_multiline(dense_selected_edges, Color("ffb657"), 2.0 / zoom, true)
-	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+	canvas.draw_set_transform(canvas_origin, 0.0, Vector2(zoom, -zoom))
+	if not dense_base_edges.is_empty():
+		canvas.draw_multiline(dense_base_edges, Color("9eb2c7"), 1.0 / zoom, true)
+	canvas.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 func apply_dense_translation(movement: Vector3) -> void:
-	if dense_cache_revision < 0:
+	var document_id: int = host.session.document.get_instance_id()
+	var current_revision: int = host.session.document.get_state_generation()
+	var change: Dictionary = host.session.document.get_last_change()
+	var predecessor_key := dense_edge_key(document_id, change.get("before_generation", -1),
+		host.session.visibility_generation, orientation)
+	if (dense_cache_revision < 0 or dense_cache_document_id != document_id
+		or dense_cache_visibility_generation != host.session.visibility_generation
+		or dense_cache_orientation != orientation or change.get("operation", &"") != &"translate_brushes"
+		or dense_edge_cache_key != predecessor_key or change.get("before_generation", -1) != dense_cache_revision
+		or change.get("generation", -1) != current_revision):
+		queue_static_redraw()
 		return
 	retain_dense_edge_cache()
-	dense_selected_edges = dense_selected_edges.duplicate()
+	dense_base_edges = dense_base_edges.duplicate()
 	var projected := map_edge_point(movement)
-	for i in dense_selected_edges.size():
-		dense_selected_edges[i] += projected
+	for id in change.get("brush_ids", PackedInt64Array()):
+		var edge_range: Vector2i = dense_edge_ranges.get(id, Vector2i(-1, 0))
+		if edge_range.x < 0:
+			continue
+		for i in range(edge_range.x, edge_range.x + edge_range.y):
+			dense_base_edges[i] += projected
+		static_edge_sum += projected * edge_range.y
 	capture_dense_edge_cache_state()
+	static_edge_generation = dense_cache_revision
+	retain_dense_edge_cache()
+	queue_static_redraw()
+	queue_selection_redraw()
+
+func selected_edge_data(map_space := true) -> PackedVector2Array:
+	var result := PackedVector2Array()
+	for id in host.session.selected:
+		var brush: Dictionary = host.session.brush(id)
+		if not host.session.brush_visible(brush):
+			continue
+		var offset = delta if gesture == "move" else Vector3.ZERO
+		for i in range(0, brush.edges.size(), 2):
+			var p: Vector3 = brush.edges[i] + offset
+			var q: Vector3 = brush.edges[i + 1] + offset
+			if gesture == "rotate":
+				p = rotate_point(p, rotation_angle)
+				q = rotate_point(q, rotation_angle)
+			result.append(map_edge_point(p) if map_space else project(p))
+			result.append(map_edge_point(q) if map_space else project(q))
+	return result
 
 func _gui_input(event: InputEvent) -> void:
 	if event is InputEventKey:
@@ -544,7 +684,10 @@ func _gui_input(event: InputEvent) -> void:
 				delta[a.y if absf(delta[a.x]) > absf(delta[a.y]) else a.x] = 0
 		if gesture in ["move", "rotate", "resize", "component"]:
 			update_exact_preview()
-		queue_redraw()
+		if gesture == "pan":
+			queue_view_redraw()
+		else:
+			queue_selection_redraw()
 		accept_event()
 
 func begin_left(event: InputEventMouseButton) -> void:
@@ -578,7 +721,7 @@ func begin_left(event: InputEventMouseButton) -> void:
 		if start.distance_to(center) > 4:
 			rotation_start_angle = (start - center).angle()
 			gesture = "rotate"
-		queue_redraw()
+		queue_selection_redraw()
 		return
 	if (host.tool in ["Face", "Vertex", "Edge"] or event.ctrl_pressed) and not host.session.selected.is_empty():
 		var component = pick_component(start, "Face" if event.ctrl_pressed else host.tool, event.alt_pressed)
@@ -713,7 +856,7 @@ func box_select(end: Vector2) -> void:
 func apply_clip(split: bool) -> void:
 	host.apply_clip(split, orientation)
 
-func draw_component_preview(component: Dictionary, movement: Vector3) -> void:
+func draw_component_preview(canvas: Control, component: Dictionary, movement: Vector3) -> void:
 	var brush: Dictionary = host.session.brush(component.brush_id)
 	if not host.session.component_valid(component, brush):
 		return
@@ -721,33 +864,33 @@ func draw_component_preview(component: Dictionary, movement: Vector3) -> void:
 	if component.kind == "face":
 		var winding: PackedVector3Array = brush.faces[component.index].winding
 		for i in winding.size():
-			draw_line(project(winding[i] + movement), project(winding[(i + 1) % winding.size()] + movement), color, 2, true)
+			canvas.draw_line(project(winding[i] + movement), project(winding[(i + 1) % winding.size()] + movement), color, 2, true)
 	elif component.kind == "edge":
 		var p: Vector3 = brush.vertices[brush.edge_vertex_indices[component.index * 2]] + movement
 		var q: Vector3 = brush.vertices[brush.edge_vertex_indices[component.index * 2 + 1]] + movement
-		draw_line(project(p), project(q), color, 2, true)
-		draw_circle(project((p + q) * 0.5), 5, Color("20252d"))
-		draw_circle(project((p + q) * 0.5), 5, color, false, 2, true)
+		canvas.draw_line(project(p), project(q), color, 2, true)
+		canvas.draw_circle(project((p + q) * 0.5), 5, Color("20252d"))
+		canvas.draw_circle(project((p + q) * 0.5), 5, color, false, 2, true)
 	else:
-		draw_circle(project(brush.vertices[component.index] + movement), 5, Color("20252d"))
-		draw_circle(project(brush.vertices[component.index] + movement), 5, color, false, 2, true)
+		canvas.draw_circle(project(brush.vertices[component.index] + movement), 5, Color("20252d"))
+		canvas.draw_circle(project(brush.vertices[component.index] + movement), 5, color, false, 2, true)
 
-func draw_manipulation_preview() -> void:
+func draw_manipulation_preview(canvas: Control) -> void:
 	var primary: Dictionary = resize_face if gesture == "resize" else drag_component
 	var brush: Dictionary = host.session.brush(primary.get("brush_id", 0))
 	if not host.session.component_valid(primary, brush):
 		return
 	var from := project(component_position(primary, brush))
 	var to := project(component_position(primary, brush) + delta)
-	draw_line(from, to, Color(1.0, 0.85, 0.56, 0.7), 1, true)
-	draw_circle(to, 3, Color("ffda8e"))
+	canvas.draw_line(from, to, Color(1.0, 0.85, 0.56, 0.7), 1, true)
+	canvas.draw_circle(to, 3, Color("ffda8e"))
 	if gesture == "resize":
-		draw_component_preview(resize_face, delta)
+		draw_component_preview(canvas, resize_face, delta)
 	else:
 		for component in host.session.components:
-			draw_component_preview(component, delta)
+			draw_component_preview(canvas, component, delta)
 
-func draw_origin_compass() -> void:
+func draw_origin_compass(canvas: Control) -> void:
 	var center := project(Vector3.ZERO)
 	var visible_axes := axes()
 	var dimensions := [visible_axes.x, visible_axes.y]
@@ -758,19 +901,41 @@ func draw_origin_compass() -> void:
 		var direction: Vector2 = directions[index]
 		var axis: int = dimensions[index]
 		var color: Color = OrientationGizmo.AXIS_COLORS[axis]
-		draw_line(center, center + direction * 18.0, color, 2.0, true)
+		canvas.draw_line(center, center + direction * 18.0, color, 2.0, true)
 		var label: String = ["X", "Y", "Z"][axis]
 		var label_position := center + direction * 23.0
 		if direction == Vector2.RIGHT:
 			label_position += Vector2(0, 4)
 		else:
 			label_position += Vector2(-3, 0)
-		draw_string(font, label_position, label, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, color)
+		canvas.draw_string(font, label_position, label, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, color)
 
-func _draw() -> void:
+func draw_layer(canvas: Control, kind: String) -> void:
 	if host == null or host.session == null:
 		return
-	draw_rect(Rect2(Vector2.ZERO, size), Color("20252d"))
+	match kind:
+		"StaticMap":
+			static_redraw_count += 1
+			draw_static_layer(canvas)
+		"SelectionTools":
+			selection_redraw_count += 1
+			draw_selection_layer(canvas)
+		"CameraMarker":
+			camera_redraw_count += 1
+			draw_camera_layer(canvas)
+		"ToolChrome":
+			selection_redraw_count += 1
+			draw_tool_layer(canvas)
+
+func visible_query() -> Dictionary:
+	var visible_rect := Rect2(Vector2.ZERO, size).grow(10)
+	var query_p := unproject(visible_rect.position)
+	var query_q := unproject(visible_rect.end)
+	var ids: PackedInt64Array = host.session.document.query_brushes_2d(orientation, query_p.min(query_q), query_p.max(query_q))
+	return {"rect": visible_rect, "ids": ids, "dense": ids.size() > DENSE_EDGE_THRESHOLD}
+
+func draw_static_layer(canvas: Control) -> void:
+	canvas.draw_rect(Rect2(Vector2.ZERO, size), Color("20252d"))
 	var a = axes()
 	var step: float = host.session.grid
 	while step * zoom < 8:
@@ -787,83 +952,82 @@ func _draw() -> void:
 			var color = Color("303742") if not is_zero_approx(fmod(v, step * 8)) else Color("424c5b")
 			if is_zero_approx(v):
 				color = OrientationGizmo.AXIS_COLORS[axis].darkened(0.5)
-			draw_line(project(p), project(q), color, 1.0, true)
+			canvas.draw_line(project(p), project(q), color, 1.0, true)
 			v += step
-	draw_origin_compass()
-	var visible_rect := Rect2(Vector2.ZERO, size).grow(10)
-	var query_p := unproject(visible_rect.position)
-	var query_q := unproject(visible_rect.end)
-	var selected_ids: Dictionary = {}
-	for id in host.session.selected:
-		selected_ids[id] = true
-	var candidate_ids: PackedInt64Array = host.session.document.query_brushes_2d(orientation, query_p.min(query_q), query_p.max(query_q))
-	var dense_view := candidate_ids.size() > DENSE_EDGE_THRESHOLD
-	var visible_brushes: Array = []
-	var unselected_edges := PackedVector2Array()
-	var selected_edges := PackedVector2Array()
-	var dynamic_selected_edges := PackedVector2Array()
-	var draw_brushes: Array = []
-	if dense_view:
-		for id in host.session.selected:
-			var selected_brush: Dictionary = host.session.brush(id)
-			if host.session.brush_visible(selected_brush):
-				draw_brushes.append(selected_brush)
-	else:
-		for id in candidate_ids:
-			var candidate: Dictionary = host.session.brush(id)
-			if host.session.brush_visible(candidate):
-				draw_brushes.append(candidate)
-	for brush in draw_brushes:
+	draw_origin_compass(canvas)
+	var query := visible_query()
+	if query.dense:
+		draw_dense_edges(canvas)
+		return
+	var base_edges := PackedVector2Array()
+	static_edge_sum = Vector2.ZERO
+	for id in query.ids:
+		var brush: Dictionary = host.session.brush(id)
+		if not host.session.brush_visible(brush):
+			continue
 		var projected_bounds := Rect2(project(brush.aabb_min), project(brush.aabb_max) - project(brush.aabb_min)).abs()
-		if not dense_view and not visible_rect.intersects(projected_bounds):
+		if not query.rect.intersects(projected_bounds):
+			continue
+		for i in range(0, brush.edges.size(), 2):
+			base_edges.append(project(brush.edges[i]))
+			base_edges.append(project(brush.edges[i + 1]))
+			static_edge_sum += map_edge_point(brush.edges[i]) + map_edge_point(brush.edges[i + 1])
+	static_edge_generation = host.session.document.get_state_generation()
+	static_edge_point_count = base_edges.size()
+	static_edge_build_count += 1
+	if not base_edges.is_empty():
+		canvas.draw_multiline(base_edges, Color("9eb2c7"), 1, true)
+
+func draw_selection_layer(canvas: Control) -> void:
+	var query := visible_query()
+	var selected_edges := PackedVector2Array()
+	var original_edges := PackedVector2Array()
+	var visible_brushes: Array = []
+	for id in host.session.selected:
+		var brush: Dictionary = host.session.brush(id)
+		if not host.session.brush_visible(brush):
+			continue
+		var projected_bounds := Rect2(project(brush.aabb_min), project(brush.aabb_max) - project(brush.aabb_min)).abs()
+		if not query.dense and not query.rect.intersects(projected_bounds):
 			continue
 		visible_brushes.append(brush)
-		var selected: bool = selected_ids.has(brush.id)
-		var offset = delta if selected and gesture == "move" else Vector3.ZERO
+		var offset = delta if gesture == "move" else Vector3.ZERO
 		for i in range(0, brush.edges.size(), 2):
 			var p: Vector3 = brush.edges[i] + offset
 			var q: Vector3 = brush.edges[i + 1] + offset
-			if selected and gesture == "rotate":
+			if gesture in ["move", "rotate"]:
+				original_edges.append(map_edge_point(brush.edges[i]) if query.dense else project(brush.edges[i]))
+				original_edges.append(map_edge_point(brush.edges[i + 1]) if query.dense else project(brush.edges[i + 1]))
+			if gesture == "rotate":
 				p = rotate_point(p, rotation_angle)
 				q = rotate_point(q, rotation_angle)
-			var projected_p := map_edge_point(p) if dense_view else project(p)
-			var projected_q := map_edge_point(q) if dense_view else project(q)
-			if selected and gesture in ["move", "rotate"]:
-				dynamic_selected_edges.append(projected_p)
-				dynamic_selected_edges.append(projected_q)
-			elif selected:
-				selected_edges.append(projected_p)
-				selected_edges.append(projected_q)
-			else:
-				unselected_edges.append(projected_p)
-				unselected_edges.append(projected_q)
-	if dense_view:
-		draw_dense_edges(gesture in ["move", "rotate"])
-		if not dynamic_selected_edges.is_empty():
-			var dense_axes := axes()
-			var canvas_origin: Vector2 = size * 0.5 + Vector2(-origin[dense_axes.x], origin[dense_axes.y]) * zoom
-			draw_set_transform(canvas_origin, 0.0, Vector2(zoom, -zoom))
-			draw_multiline(dynamic_selected_edges, Color("ffb657"), 2.0 / zoom, true)
-			draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
-	else:
-		if not unselected_edges.is_empty():
-			draw_multiline(unselected_edges, Color("9eb2c7"), 1, true)
-		if not selected_edges.is_empty():
-			draw_multiline(selected_edges, Color("ffb657"), 2, true)
-		if not dynamic_selected_edges.is_empty():
-			draw_multiline(dynamic_selected_edges, Color("ffb657"), 2, true)
+			selected_edges.append(map_edge_point(p) if query.dense else project(p))
+			selected_edges.append(map_edge_point(q) if query.dense else project(q))
+	if query.dense and not selected_edges.is_empty():
+		var a := axes()
+		var canvas_origin: Vector2 = size * 0.5 + Vector2(-origin[a.x], origin[a.y]) * zoom
+		canvas.draw_set_transform(canvas_origin, 0.0, Vector2(zoom, -zoom))
+		if not original_edges.is_empty():
+			canvas.draw_multiline(original_edges, Color("20252d"), 3.0 / zoom, true)
+			selection_mask_point_count += original_edges.size()
+		canvas.draw_multiline(selected_edges, Color("ffb657"), 2.0 / zoom, true)
+		canvas.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+	elif not selected_edges.is_empty():
+		if not original_edges.is_empty():
+			canvas.draw_multiline(original_edges, Color("20252d"), 3, true)
+			selection_mask_point_count += original_edges.size()
+		canvas.draw_multiline(selected_edges, Color("ffb657"), 2, true)
 	if host.tool in ["Vertex", "Edge"] or not host.session.components.is_empty():
 		for brush in visible_brushes:
-			var selected: bool = selected_ids.has(brush.id)
-			var color = Color("ffb657") if selected else Color("9eb2c7")
-			if selected and host.tool in ["Vertex", "Edge"]:
+			var color = Color("ffb657")
+			if host.tool in ["Vertex", "Edge"]:
 				var vertices: PackedVector3Array = brush.vertices
 				if host.tool == "Edge":
 					vertices = PackedVector3Array()
 					for i in range(0, brush.edge_vertex_indices.size(), 2):
 						vertices.append((brush.vertices[brush.edge_vertex_indices[i]] + brush.vertices[brush.edge_vertex_indices[i + 1]]) * 0.5)
 				for p in vertices:
-					draw_circle(project(p), 4, color)
+					canvas.draw_circle(project(p), 4, color)
 			for component in host.session.components:
 				if component.brush_id != brush.id or not host.session.component_valid(component, brush):
 					continue
@@ -872,51 +1036,56 @@ func _draw() -> void:
 					for p in brush.faces[component.index].winding:
 						polygon.append(project(p))
 					if polygon.size() >= 3 and absf(brush.faces[component.index].normal[orientation]) > 0.001:
-						draw_colored_polygon(polygon, Color(0.16, 0.5, 1.0, 0.3))
+						canvas.draw_colored_polygon(polygon, Color(0.16, 0.5, 1.0, 0.3))
 					for i in polygon.size():
-						draw_line(polygon[i], polygon[(i + 1) % polygon.size()], Color("69a7ff"), 3, true)
+						canvas.draw_line(polygon[i], polygon[(i + 1) % polygon.size()], Color("69a7ff"), 3, true)
 				elif component.kind == "vertex":
-					draw_circle(project(brush.vertices[component.index]), 6, Color("ffe6a6"))
+					canvas.draw_circle(project(brush.vertices[component.index]), 6, Color("ffe6a6"))
 				else:
 					var p: Vector3 = brush.vertices[brush.edge_vertex_indices[component.index * 2]]
 					var q: Vector3 = brush.vertices[brush.edge_vertex_indices[component.index * 2 + 1]]
-					draw_line(project(p), project(q), Color("ffe6a6"), 3, true)
-					draw_circle(project((p + q) * 0.5), 6, Color("ffe6a6"))
+					canvas.draw_line(project(p), project(q), Color("ffe6a6"), 3, true)
+					canvas.draw_circle(project((p + q) * 0.5), 6, Color("ffe6a6"))
 	if host.session.marker_visible():
 		for marker in host.session.point_markers():
 			var p = project(marker.origin + (delta if gesture == "move" and host.session.points.has(marker.id) else Vector3.ZERO))
 			var color = Color("ffb657") if host.session.points.has(marker.id) else Color("83dfbd")
-			draw_rect(Rect2(p - Vector2.ONE * 6, Vector2.ONE * 12), color, false, 2)
-			draw_string(ThemeDB.fallback_font, p + Vector2(10, -5), marker.classname, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, color)
-	if camera_pose_valid:
-		var camera_color := Color("62c7ff")
-		var camera_center := project(camera_position)
-		var view_direction := projected_camera_direction()
-		draw_circle(camera_center, 7, Color("20252d"))
-		draw_circle(camera_center, 7, camera_color, false, 2, true)
-		if not view_direction.is_zero_approx():
-			var tip := camera_center + view_direction * 28
-			var side := Vector2(-view_direction.y, view_direction.x)
-			draw_line(camera_center, tip, camera_color, 2, true)
-			draw_colored_polygon(PackedVector2Array([tip, tip - view_direction * 9 + side * 5, tip - view_direction * 9 - side * 5]), camera_color)
+			canvas.draw_rect(Rect2(p - Vector2.ONE * 6, Vector2.ONE * 12), color, false, 2)
+			canvas.draw_string(ThemeDB.fallback_font, p + Vector2(10, -5), marker.classname, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, color)
+
+func draw_tool_layer(canvas: Control) -> void:
 	if gesture in ["create", "box"]:
-		draw_rect(Rect2(start, cursor - start).abs(), Color("ffda8e"), false, 2)
+		canvas.draw_rect(Rect2(start, cursor - start).abs(), Color("ffda8e"), false, 2)
 	elif gesture in ["resize", "component"]:
-		draw_manipulation_preview()
+		draw_manipulation_preview(canvas)
 	if host.tool == "Rotate" and not host.session.selected.is_empty():
 		var pivot = project(rotation_pivot if gesture == "rotate" else selection_center())
-		draw_circle(pivot, 7, Color("20252d"))
-		draw_circle(pivot, 7, Color("ffda8e"), false, 2, true)
-		draw_line(pivot - Vector2(11, 0), pivot + Vector2(11, 0), Color("ffda8e"), 1, true)
-		draw_line(pivot - Vector2(0, 11), pivot + Vector2(0, 11), Color("ffda8e"), 1, true)
+		canvas.draw_circle(pivot, 7, Color("20252d"))
+		canvas.draw_circle(pivot, 7, Color("ffda8e"), false, 2, true)
+		canvas.draw_line(pivot - Vector2(11, 0), pivot + Vector2(11, 0), Color("ffda8e"), 1, true)
+		canvas.draw_line(pivot - Vector2(0, 11), pivot + Vector2(0, 11), Color("ffda8e"), 1, true)
 		if gesture == "rotate":
-			draw_line(pivot, cursor, Color("ffda8e"), 2, true)
-			draw_string(ThemeDB.fallback_font, pivot + Vector2(12, -12), "%d°" % roundi(rad_to_deg(rotation_angle)), HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("ffda8e"))
+			canvas.draw_line(pivot, cursor, Color("ffda8e"), 2, true)
+			canvas.draw_string(ThemeDB.fallback_font, pivot + Vector2(12, -12), "%d°" % roundi(rad_to_deg(rotation_angle)), HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("ffda8e"))
 	for i in clip_points.size():
 		var p = project(clip_points[i])
-		draw_circle(p, 5, Color("fc7373"))
-		draw_string(ThemeDB.fallback_font, p + Vector2(8, -8), str(i + 1), HORIZONTAL_ALIGNMENT_LEFT, -1, 14)
+		canvas.draw_circle(p, 5, Color("fc7373"))
+		canvas.draw_string(ThemeDB.fallback_font, p + Vector2(8, -8), str(i + 1), HORIZONTAL_ALIGNMENT_LEFT, -1, 14)
 		if i:
-			draw_line(project(clip_points[i - 1]), p, Color("fc7373"), 2, true)
-	draw_rect(Rect2(0, 0, size.x, 36), Color(0.08, 0.1, 0.14, 0.95))
-	draw_string(ThemeDB.fallback_font, Vector2(38, 23), "Ctrl+Tab  •  %.3f px/u%s" % [zoom, "  • ACTIVE" if has_focus() else ""], HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("b9cfdf"))
+			canvas.draw_line(project(clip_points[i - 1]), p, Color("fc7373"), 2, true)
+	canvas.draw_rect(Rect2(0, 0, size.x, 36), Color(0.08, 0.1, 0.14, 0.95))
+	canvas.draw_string(ThemeDB.fallback_font, Vector2(38, 23), "Ctrl+Tab  •  %.3f px/u%s" % [zoom, "  • ACTIVE" if has_focus() else ""], HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("b9cfdf"))
+
+func draw_camera_layer(canvas: Control) -> void:
+	if not camera_pose_valid:
+		return
+	var camera_color := Color("62c7ff")
+	var camera_center := project(camera_position)
+	var view_direction := projected_camera_direction()
+	canvas.draw_circle(camera_center, 7, Color("20252d"))
+	canvas.draw_circle(camera_center, 7, camera_color, false, 2, true)
+	if not view_direction.is_zero_approx():
+		var tip := camera_center + view_direction * 28
+		var side := Vector2(-view_direction.y, view_direction.x)
+		canvas.draw_line(camera_center, tip, camera_color, 2, true)
+		canvas.draw_colored_polygon(PackedVector2Array([tip, tip - view_direction * 9 + side * 5, tip - view_direction * 9 - side * 5]), camera_color)
