@@ -31,11 +31,13 @@ var _pending_previews: Dictionary = {}
 var _requested_previews: Dictionary = {}
 var _query := ""
 var _folder := "res://"
+var _kind_filter := "All"
 var _selected_path := ""
 var _visible_paths: Array[String] = []
 var _folder_items: Dictionary = {}
 var _updating := false
 var _search: LineEdit
+var _kind_picker: OptionButton
 var _folder_tree: Tree
 var _breadcrumbs: HBoxContainer
 var _list: ItemList
@@ -119,6 +121,19 @@ func set_search(query: String) -> void:
 	if _search != null and _search.text != query:
 		_search.text = query
 	_rebuild_list()
+
+
+func set_kind_filter(value: String) -> void:
+	if not value in ["All", "Textures", "Materials"] or value == _kind_filter:
+		return
+	_kind_filter = value
+	if _kind_picker != null:
+		_kind_picker.select(["All", "Textures", "Materials"].find(value))
+	_rebuild_list()
+
+
+func get_kind_filter() -> String:
+	return _kind_filter
 
 
 ## Folder filters include descendants. Search and folder filtering intersect.
@@ -345,6 +360,13 @@ func _build_ui() -> void:
 	_search.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_search.text_changed.connect(set_search)
 	header.add_child(_search)
+	_kind_picker = OptionButton.new()
+	_kind_picker.name = "ResourceKindFilter"
+	_kind_picker.tooltip_text = "Show textures, materials, or both"
+	for label in ["All", "Textures", "Materials"]:
+		_kind_picker.add_item(label)
+	_kind_picker.item_selected.connect(func(index: int): set_kind_filter(_kind_picker.get_item_text(index)))
+	header.add_child(_kind_picker)
 	var refresh := Button.new()
 	refresh.text = "Refresh"
 	refresh.pressed.connect(rescan_project)
@@ -440,6 +462,9 @@ func _rebuild_list() -> void:
 		if _folder != "res://" and not path.begins_with(_folder + "/"):
 			continue
 		if not _query.is_empty() and not _query in path.to_lower():
+			continue
+		var kind: String = _entries[path].kind
+		if (_kind_filter == "Textures" and kind != "Texture") or (_kind_filter == "Materials" and kind != "Material"):
 			continue
 		_visible_paths.append(path)
 	_visible_paths.sort_custom(func(a: String, b: String): return a.naturalnocasecmp_to(b) < 0)

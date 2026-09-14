@@ -22,11 +22,14 @@ gate and the explicit product/platform limitations at the end remain incomplete.
   the picker exposes retained documents and background undo updates unsaved
   reporting and Save All. Discard retires saving only after successful replacement;
   resuming, editing or restoring history reactivates the document.
-- The global Map Materials bottom panel is contextual: Map mode hosts the indexed
-  browser, shader assignment and classic UV controls; 3D mode retains the rendered
-  material grid for the selected loader. Selection synchronization is non-assigning.
-- N inspector edits ordered keyvals on worldspawn/selected owners/points; point
-  and brush entity creation, point picking/movement, ownership and deletion.
+- Map Materials is one plugin-owned rich rendered-material grid/list shared by the
+  Radiant and 3D toolbar entries, including previews and resource inspection.
+- The persistent UV bottom panel combines a dedicated `UVPane` with the complete
+  indexed material browser; both selection/application and UV edits target Radiant's
+  active document session.
+- The Entities bottom panel follows Radiant's active document and lists every entity,
+  independently of spatial selection. Existing in-layout UV/Entities panes and the N
+  inspector remain available.
 - New/Open/Save/Save As, Save/Discard/Cancel replacement prompt, native external
   conflict reporting, Save All and editor unsaved-status hooks.
 - Explicit loader binding is separate from spatial selection and toolbar.
@@ -54,7 +57,7 @@ gate and the explicit product/platform limitations at the end remain incomplete.
 
 | File under `addons/tbloader/src/` | Responsibility |
 |---|---|
-| `plugin.gd` | Main-screen lifecycle, independent spatial toolbar and legacy materials, editor save hooks |
+| `plugin.gd` | Main-screen lifecycle, independent spatial toolbar, shared bottom panels, editor save hooks |
 | `editor/map_editor.gd` | Quad layout, shortcut router, dialogs, binding, materials/UV and entity inspector, history budget, document ownership and recovery |
 | `editor/map_session.gd` | Native document, selection/hidden/workzone, transactions and snapshot envelopes |
 | `editor/map_action.gd` | Retainable/expirable originating-session history token |

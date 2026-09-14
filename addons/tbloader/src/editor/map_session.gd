@@ -11,7 +11,7 @@ var selected = PackedInt64Array()
 var points = PackedInt64Array()
 var components: Array = []
 var hidden: Dictionary = {}
-var visibility_filters := {"entities": false, "caulk": false, "clips": false}
+var visibility_filters := {"entities": false, "caulk": false, "clips": false, "hint_skip": false}
 var workzone = AABB(Vector3(-64, -64, -64), Vector3(128, 128, 128))
 var loader: WeakRef = weakref(null)
 var scene: WeakRef = weakref(null)
@@ -22,12 +22,28 @@ var texture_root = "res://textures"
 var recovery_source = ""
 var manager: EditorUndoRedoManager
 var save_enabled = true # Successful Discard replacement suppresses Save All until resume/edit/undo.
+var pristine_empty = true
 var was_bound = false
 var scene_managed = false
 var preview_generation = 0
-var visibility_generation = 0
+var selection_generation: int:
+	get:
+		_sync_selection_generation()
+		return _selection_generation
+var visibility_generation: int:
+	get:
+		_sync_visibility_generation()
+		return _visibility_generation
+var _selection_generation = 0
+var _visibility_generation = 0
+var _selected_generation_state := PackedInt64Array()
+var _points_generation_state := PackedInt64Array()
+var _components_generation_state: Array = []
+var _hidden_generation_state: Dictionary = {}
+var _filters_generation_state := {"entities": false, "caulk": false, "clips": false, "hint_skip": false}
 var _draw_cache: Array = []
 var _draw_index: Dictionary = {}
+var _draw_positions: Dictionary = {}
 var _entity_cache: Array = []
 var _brush_entity_ids: Dictionary = {}
 var _marker_cache: Array = []
@@ -42,6 +58,7 @@ func _init() -> void:
 	document.preview_changed.connect(_preview_changed)
 
 func _map_changed(_revision: int) -> void:
+	pristine_empty = false
 	if not _pending_brush_translation.is_empty() and _draw_valid:
 		patch_draw_translation(_pending_brush_translation.ids, _pending_brush_translation.delta)
 	else:
@@ -50,6 +67,26 @@ func _map_changed(_revision: int) -> void:
 		_brush_entity_ids.clear()
 		_marker_valid = false
 	preview_generation += 1
+
+func has_unsaved_changes() -> bool:
+	return document.is_dirty() and not (pristine_empty and document.get_path().is_empty() and recovery_source.is_empty())
+
+func _sync_selection_generation() -> bool:
+	if selected == _selected_generation_state and points == _points_generation_state and components == _components_generation_state:
+		return false
+	_selection_generation += 1
+	_selected_generation_state = selected.duplicate()
+	_points_generation_state = points.duplicate()
+	_components_generation_state = components.duplicate(true)
+	return true
+
+func _sync_visibility_generation() -> bool:
+	if hidden == _hidden_generation_state and visibility_filters == _filters_generation_state:
+		return false
+	_visibility_generation += 1
+	_hidden_generation_state = hidden.duplicate()
+	_filters_generation_state = visibility_filters.duplicate()
+	return true
 
 func patch_draw_translation(ids: PackedInt64Array, movement: Vector3) -> void:
 	var topology_revision: int = document.get_topology_revision()
@@ -72,7 +109,7 @@ func patch_draw_translation(ids: PackedInt64Array, movement: Vector3) -> void:
 			for i in winding.size():
 				winding[i] += movement
 			face.winding = winding
-		var index: int = _draw_cache.find(_draw_index[id])
+		var index: int = _draw_positions.get(id, -1)
 		if index >= 0:
 			_draw_cache[index] = item
 		_draw_index[id] = item
@@ -87,6 +124,7 @@ func _preview_changed() -> void:
 	# Rebuilds can replace topology caches without changing canonical map text.
 	_draw_valid = false
 	_draw_index.clear()
+	_draw_positions.clear()
 	preview_generation += 1
 
 func dispose() -> void:
@@ -96,6 +134,7 @@ func dispose() -> void:
 		document.preview_changed.disconnect(_preview_changed)
 	_draw_cache.clear()
 	_draw_index.clear()
+	_draw_positions.clear()
 	_entity_cache.clear()
 	_brush_entity_ids.clear()
 	_marker_cache.clear()
@@ -104,8 +143,11 @@ func draw_data() -> Array:
 	if not _draw_valid:
 		_draw_cache = document.get_draw_data()
 		_draw_index.clear()
-		for item in _draw_cache:
+		_draw_positions.clear()
+		for position in _draw_cache.size():
+			var item: Dictionary = _draw_cache[position]
 			_draw_index[item.id] = item
+			_draw_positions[item.id] = position
 		_draw_valid = true
 	return _draw_cache
 
@@ -143,7 +185,9 @@ func restore(state: Dictionary) -> void:
 	components = state.components.duplicate(true)
 	rebind_components()
 	workzone = state.workzone
-	prune()
+	prune(false)
+	_sync_selection_generation()
+	_sync_visibility_generation()
 	changed.emit()
 
 func report(result: Dictionary) -> bool:
@@ -204,6 +248,10 @@ func visible_ray_hits(origin: Vector3, direction: Vector3, max_distance: float =
 			result.append(hit)
 	return result
 
+func nearest_visible_ray_hit(origin: Vector3, direction: Vector3, max_distance: float = 1e30) -> Dictionary:
+	return document.query_ray_nearest_visible(origin, direction, max_distance,
+		hidden_brush_ids(), visibility_filter_mask())
+
 func hidden_brush_ids() -> PackedInt64Array:
 	var result := PackedInt64Array()
 	for id in hidden:
@@ -211,7 +259,8 @@ func hidden_brush_ids() -> PackedInt64Array:
 	return result
 
 func visibility_filter_mask() -> int:
-	return int(visibility_filters.entities) | int(visibility_filters.caulk) << 1 | int(visibility_filters.clips) << 2
+	return (int(visibility_filters.entities) | int(visibility_filters.caulk) << 1
+		| int(visibility_filters.clips) << 2 | int(visibility_filters.hint_skip) << 3)
 
 func component_valid(component: Dictionary, item: Dictionary) -> bool:
 	if item.is_empty() or not selected.has(component.brush_id) or not brush_visible(item):
@@ -226,7 +275,7 @@ func rebind_components() -> void:
 			component.topology_revision = item.topology_revision
 
 func select_component(component: Dictionary, toggle: bool) -> void:
-	prune()
+	prune(false)
 	if component.is_empty():
 		if not toggle:
 			components.clear()
@@ -238,6 +287,8 @@ func select_component(component: Dictionary, toggle: bool) -> void:
 			components.append(component)
 	elif not components.has(component):
 		components = [component]
+	_sync_selection_generation()
+	_sync_visibility_generation()
 	changed.emit()
 
 func move_components(movement: Vector3) -> Dictionary:
@@ -270,7 +321,7 @@ func vertex_at(item: Dictionary, position: Vector3) -> int:
 			return i
 	return -1
 
-func prune() -> void:
+func prune(sync_generations := true) -> void:
 	var existing: Dictionary = {}
 	for item in draw_data():
 		existing[item.id] = true
@@ -297,12 +348,22 @@ func prune() -> void:
 		var bounds = AABB(item.aabb_min, item.aabb_max - item.aabb_min)
 		workzone = bounds if first else workzone.merge(bounds)
 		first = false
+	if sync_generations:
+		_sync_selection_generation()
+		_sync_visibility_generation()
 
 func select(ids: PackedInt64Array, point_ids: PackedInt64Array = PackedInt64Array()) -> void:
+	var previous_selected: PackedInt64Array = selected.duplicate()
+	var previous_points: PackedInt64Array = points.duplicate()
+	var previous_components := components.duplicate(true)
 	selected = ids
 	points = point_ids
 	components.clear()
-	prune()
+	prune(false)
+	_sync_selection_generation()
+	_sync_visibility_generation()
+	if selected == previous_selected and points == previous_points and components == previous_components:
+		return
 	changed.emit()
 
 func hide_selection(reveal: bool) -> void:
@@ -313,19 +374,24 @@ func hide_selection(reveal: bool) -> void:
 			hidden[id] = true
 		selected.clear()
 		components.clear()
+	_sync_selection_generation()
+	_sync_visibility_generation()
 	changed.emit()
 
 func set_visibility_filter(category: String, hide: bool) -> void:
 	if not visibility_filters.has(category) or visibility_filters[category] == hide:
 		return
 	visibility_filters[category] = hide
-	visibility_generation += 1
-	prune()
+	prune(false)
+	_sync_selection_generation()
+	_sync_visibility_generation()
 	changed.emit()
 
 func material_filtered(texture: String) -> bool:
 	var name := texture.to_lower().replace("\\", "/").get_file().get_basename()
 	if visibility_filters.caulk and name == "caulk":
+		return true
+	if visibility_filters.hint_skip and name == "hint_skip":
 		return true
 	return visibility_filters.clips and (name == "clip" or name.begins_with("clip") or name.ends_with("clip"))
 

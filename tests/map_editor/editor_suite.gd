@@ -91,10 +91,20 @@ func run() -> void:
 	checks.check(Engine.is_editor_hint() and ClassDB.class_exists("TBMapDocument"), "actual editor and native document")
 	checks.check(plugin._get_plugin_name() == "Radiant", "main screen is named Radiant")
 	checks.check(plugin._has_main_screen() and ui.is_visible_in_tree(), "Radiant main screen attached and visible")
-	checks.check(plugin.materials_panel.is_inside_tree(), "shared materials panel retained")
-	checks.check(plugin.authoring_materials_page == ui.material_workspace and plugin.materials_panel.is_ancestor_of(ui.material_workspace), "Map authoring controls live in the shared bottom panel")
-	checks.check(plugin.authoring_materials_page.visible and not plugin.built_materials_page.visible, "Map screen selects authoring material context")
-	checks.check(plugin.materials_grid.max_columns == 0 and ui.browser._list.max_columns == 0, "material grids use responsive multi-column layout")
+	checks.check(plugin.materials_panel.is_inside_tree() and plugin.uv_panel.is_inside_tree() and plugin.entities_panel.is_inside_tree(), "Map Materials, UV, and Entities bottom panels are retained")
+	checks.check(plugin.built_materials_page.get_parent() == plugin.materials_panel and plugin.materials_grid.max_columns == 0 and plugin.materials_tree.columns == 2, "Map Materials retains the rich responsive grid/list UI")
+	checks.check(plugin.uv_panel == ui.material_workspace and plugin.uv_panel.is_ancestor_of(ui.browser) and plugin.uv_panel.is_ancestor_of(ui.bottom_uv_pane), "UV is a persistent dedicated UVPane with a full material browser")
+	ui.browser.set_search("shared-state")
+	plugin.show_uv()
+	checks.check(ui.material_workspace.get_parent() != null and ui.browser._query == "shared-state", "UV bottom panel keeps its browser and editor state")
+	var shared_materials_panel = plugin.materials_panel
+	plugin.show_materials()
+	checks.check(plugin.materials_panel == shared_materials_panel and ui.material_workspace == plugin.uv_panel and ui.browser._query == "shared-state", "Map Materials opens its one plugin-owned panel without reparenting UV")
+	ui.browser.set_search("")
+	plugin.show_entities_panel()
+	checks.check(plugin.entities_pane.session == ui.session and plugin.entities_pane.entity_list.item_count == ui.session.entity_data().size(), "Entities bottom panel lists every entity in the active session")
+	plugin.show_materials()
+	plugin.hide_bottom_panel()
 	checks.check(ui.slot_types == ["Camera", "Side Grid", "Top Grid", "Front Grid"] and ui.camera_view.get_parent() == ui.view_slots[0] and ui.graph_a.get_parent() == ui.view_slots[2] and not ui.is_ancestor_of(ui.material_workspace), "three-view workspace starts with per-slot camera and grid types")
 	checks.check(plugin.map_control.visible and plugin.map_control.get_child(0).text == "Build Meshes" and plugin.map_control.get_child(2).text == "Open Radiant Editor", "spatial toolbar uses Build Meshes and Open Radiant Editor terminology")
 	checks.check(plugin.map_control.get_child(0).disabled and plugin.map_control.get_child(2).disabled, "spatial loader actions are disabled without a selected TBLoader")
@@ -156,6 +166,15 @@ func run() -> void:
 	checks.check(ui.camera_view.find_children("FrameSelection", "Button", true, false).size() == 1 and ui.graph_a.find_children("FrameSelection", "Button", true, false).size() == 1, "camera and grid panes expose compact frame buttons")
 	checks.check(ui.camera_view.find_child("FrameSelection", true, false).icon != null and ui.graph_a.find_child("FrameSelection", true, false).icon != null,
 		"camera and grid frame-selection buttons use the custom frame icon")
+	checks.check(ui.camera_view.find_child("FrameSelection", true, false).anchor_left == 1.0
+		and ui.camera_view.find_child("FrameSelection", true, false).offset_right <= 0.0
+		and ui.camera_view.find_child("FrameSelection", true, false).offset_left < 0.0
+		and ui.graph_a.find_child("FrameSelection", true, false).anchor_left == 1.0
+		and ui.graph_a.find_child("FrameSelection", true, false).offset_right <= 0.0
+		and ui.graph_a.find_child("FrameSelection", true, false).offset_left < 0.0,
+		"camera and grid frame-selection buttons sit at the far right of their titlebars")
+	checks.check(ui.camera_view.orientation_gizmo.position.y >= 40.0,
+		"camera orientation compass sits below the titlebar")
 	ui.graph_a.orientation_gizmo.axis_selected.emit(0, true)
 	checks.check(ui.graph_a.orientation == 0, "grid orientation gizmo selects the YZ side plane")
 	ui.graph_a.set_orientation(2)
@@ -177,7 +196,10 @@ func run() -> void:
 	var active_session = ui.session
 	var background = load("res://addons/tbloader/src/editor/map_session.gd").new()
 	checks.check(background.document.save_map("user://background-refresh.map").ok, "background refresh fixture starts clean")
+	background.texture_root = "res://textures-other"
 	ui.set_session(background)
+	checks.check(plugin.entities_pane.session == background and plugin.entities_pane.entity_list.item_count == background.entity_data().size()
+		and ui.browser._texture_root == "res://textures-other", "UV browser and all-entity pane follow a document-tab session switch")
 	ui.set_session(active_session)
 	ui.camera_view.rendered_key = "background-refresh-sentinel"
 	background.document.create_cuboid(Vector3.ZERO, Vector3.ONE * 8, "background/material")
@@ -432,14 +454,31 @@ func run() -> void:
 	ui.browser.set_search("checker")
 	ui.browser.set_folder("res://")
 	checks.check(ui.browser.get_visible_paths().has("res://textures/baseline/checker.png"), "real browser search discovers checker")
+	ui.browser.set_search("")
+	ui.browser.set_kind_filter("Materials")
+	checks.check(ui.browser.get_visible_paths() == ["res://textures/baseline/surface.tres"], "UV browser can show only material resources")
+	ui.browser.set_kind_filter("Textures")
+	checks.check(ui.browser.get_visible_paths().has("res://textures/baseline/checker.png"), "UV browser can show only texture resources")
+	ui.browser.set_kind_filter("All")
 	checks.check(ui.browser.set_folder("res://textures/baseline"), "browser folder navigation")
 	checks.check(ui.browser.select_path("res://textures/baseline/checker.png"), "real browser resource selection")
 	checks.check(ui.texture_field.text == "baseline/checker", "browser exact map token handoff")
 	brush = ui.session.brush(id)
 	checks.check(brush.faces.all(func(face): return face.texture == "baseline/checker"), "material click assigns every selected brush face")
 	checks.check(ui.texture_sizes.get("baseline/checker") == Vector2i(64, 32), "production preview resolver uses actual asymmetric texture dimensions")
+	ui.browser.set_kind_filter("Materials")
+	checks.check(ui.browser.select_path("res://textures/baseline/surface.tres"), "UV browser selects a native Material resource")
+	checks.check(ui.texture_field.text == "baseline/surface.tres"
+		and ui.session.brush(id).faces.all(func(face): return face.texture == "baseline/surface.tres"),
+		"Material selection retains its extension and applies the Material token to selected faces")
+	ui.browser.set_kind_filter("Textures")
+	ui.browser.select_path("res://textures/baseline/checker.png")
+	ui.browser.set_kind_filter("All")
 	ui.set_slot_type(1, "UV")
 	var uv_pane = ui.slot_views[1]
+	checks.check(uv_pane.find_child("PaneHeader", false, false) != null
+		and uv_pane.find_child("PaneHeader", false, false).custom_minimum_size.y == 36.0,
+		"in-layout UV pane reserves a titlebar for its leading pane menu icon")
 	checks.check(ui.uv_panes.size() == 1 and uv_pane.texture_field.text == "baseline/checker" and uv_pane.canvas.preview_texture != null, "UV pane receives selected face material and preview ownership")
 	uv_pane.uv_transform_requested.emit(Vector2(5, -2), 15.0, Vector2(0.75, 1.5))
 	var pane_uv: Dictionary = ui.session.document.get_face_uv(id, 0, ui.session.brush(id).topology_revision).value
@@ -464,6 +503,9 @@ func run() -> void:
 	mouse(graph, graph.project(center), true, MOUSE_BUTTON_LEFT, false, true)
 	mouse(graph, graph.project(center), false, MOUSE_BUTTON_LEFT, false, true)
 	checks.check(ui.session.components.size() == 1, "graph face component pick")
+	checks.check(ui.camera_view.overlays.get_node_or_null("SelectedFaceFill") == null
+		and ui.camera_view.overlays.get_node_or_null("SelectedFaceEdges") != null,
+		"camera face selection uses blue boundary edges without a face fill")
 	var face_index: int = ui.session.components[0].index
 	ui.texture_field.text = "common/caulk"
 	ui.assign_texture()
@@ -492,22 +534,42 @@ func run() -> void:
 	ui.set_slot_type(1, "Entities")
 	ui.apply_layout(4)
 	var entity_pane = ui.slot_views[1]
+	checks.check(entity_pane.find_child("PaneHeader", false, false) != null
+		and entity_pane.find_child("PaneHeader", false, false).custom_minimum_size.y == 36.0,
+		"in-layout Entities pane reserves a titlebar for its leading pane menu icon")
 	checks.check(entity_pane.entity_list.item_count == ui.session.entity_data().size() and entity_pane.property_tree.get_root().get_child_count() > 0, "Entity pane shows the all-entity list and one detail editor")
 	ui.show_entities()
-	checks.check(not ui.inspector.visible and entity_pane.entity_list.has_focus(), "N reuses and focuses a visible Entity pane")
+	checks.check(not ui.inspector.visible and plugin.entities_pane.entity_list.has_focus(), "N opens and focuses the persistent Entities bottom panel")
 	ui.set_slot_type(1, "Side Grid")
 	ui.apply_layout(3)
+	graph.grab_focus()
+	key(KEY_S)
+	checks.check(ui.browser.is_visible_in_tree(), "S opens the persistent UV bottom panel")
+	key(KEY_S)
+	checks.check(not plugin.uv_panel.is_visible_in_tree(), "S closes the visible UV bottom panel")
+	key(KEY_S)
+	graph.grab_focus()
 	key(KEY_N)
-	checks.check(ui.inspector.visible and ui.session.entity_targets().size() == 1, "N targets worldspawn with no selection")
+	checks.check(not ui.inspector.visible and plugin.entities_pane.entity_list.has_focus()
+		and ui.session.entity_targets().size() == 1, "N replaces the legacy entity window with the bottom panel")
+	key(KEY_N)
+	checks.check(not plugin.entities_panel.is_visible_in_tree(), "N closes the visible Entities bottom panel")
+	plugin.hide_bottom_panel()
 	ui.entity_key.text = "message"
 	ui.entity_value.text = "UI journey"
 	ui.edit_property(false)
 	checks.check(text().contains("UI journey"), "worldspawn keyval edited through inspector")
-	ui.entity_class.text = "info_player_start"
-	ui.create_point()
+	graph.grab_focus()
+	var entity_click: Vector2 = graph.project(Vector3(32, 48, 0))
+	mouse(graph, entity_click, true, MOUSE_BUTTON_RIGHT)
+	mouse(graph, entity_click, false, MOUSE_BUTTON_RIGHT)
+	checks.check(ui.entity_menu.visible and ui.entity_menu_point == graph.snap_point(Vector3(32, 48,
+		ui.session.workzone.get_center().z)) and ui.entity_menu.is_item_disabled(ui.entity_menu.get_item_index(5)),
+		"RMB grid click opens entity menu at the snapped workzone point and disables brush classes without a brush selection")
+	ui.entity_menu_selected(1)
+	ui.entity_menu.hide()
 	var point_id: int = ui.session.points[0]
-	checks.check(ui.session.point_markers().size() == 1, "point entity created through inspector")
-	ui.inspector.hide()
+	checks.check(ui.session.point_markers().size() == 1, "grid entity menu creates and selects a point entity")
 	graph.grab_focus()
 	var marker: Dictionary = ui.session.point_markers()[0]
 	checks.check(graph.hit_point(graph.project(marker.origin)) == point_id, "point marker graph picking")
@@ -517,8 +579,10 @@ func run() -> void:
 	checks.check(ui.session.point_markers()[0].origin == marker.origin, "point movement undo")
 	key(KEY_Y, true)
 	ui.session.select(PackedInt64Array([id]))
-	ui.entity_class.text = "func_group"
-	ui.group_brushes()
+	ui.open_entity_menu(graph, graph.project(ui.session.workzone.get_center()))
+	checks.check(not ui.entity_menu.is_item_disabled(ui.entity_menu.get_item_index(6)), "grid entity menu enables brush classes for selected brushes")
+	ui.entity_menu_selected(6)
+	ui.entity_menu.hide()
 	var owner_id: int = ui.session.brush(id).entity_id
 	checks.check(ui.session.entity_targets() == PackedInt64Array([owner_id]), "N targets selected brush owner")
 	ui.entity_key.text = "custom_key"
@@ -574,6 +638,9 @@ func run() -> void:
 	var camera = ui.camera_view
 	checks.check(camera.crosshair != null and camera.crosshair.get_child_count() == 4 and not camera.crosshair.is_visible_in_tree(), "inactive map camera hides its centered crosshair")
 	checks.check(camera.viewport.msaa_3d == Viewport.MSAA_4X, "camera preview enables multisample antialiasing")
+	checks.check(camera.ground_grid != null and camera.ground_grid.get_parent() == camera.viewport
+		and camera.ground_grid.get_child_count() >= 2,
+		"camera shows a separate horizontal map-height-zero ground grid")
 	var target_brush: Dictionary = ui.session.draw_data()[0]
 	var target_center: Vector3 = camera.transform_map(target_brush.aabb_min + (target_brush.aabb_max - target_brush.aabb_min) * 0.5)
 	camera.camera.position = target_center + Vector3(0, 0, 5)
@@ -599,7 +666,10 @@ func run() -> void:
 	right.pressed = true
 	right.button_index = MOUSE_BUTTON_RIGHT
 	camera._gui_input(right)
-	checks.check(camera.flying and camera.crosshair.is_visible_in_tree(), "RMB camera capture toggles on with crosshair")
+	var right_release = right.duplicate()
+	right_release.pressed = false
+	camera._input(right_release)
+	checks.check(camera.flying and camera.crosshair.is_visible_in_tree(), "RMB click-release enters persistent FLY mode")
 	ui.session.select(PackedInt64Array())
 	camera._input(left)
 	checks.check(ui.session.selected == PackedInt64Array([expected_hits[0].brush_id]), "captured camera LMB selects the brush under the crosshair")
@@ -626,7 +696,26 @@ func run() -> void:
 	camera._process(0.25)
 	checks.check(camera.camera.position.distance_to(camera_position) > 1, "fly movement frame delta")
 	camera._input(right)
-	checks.check(not camera.flying and camera.held.is_empty() and not camera.crosshair.is_visible_in_tree(), "second RMB releases capture, keys, and crosshair")
+	camera._input(right_release)
+	checks.check(not camera.flying and camera.held.is_empty() and not camera.crosshair.is_visible_in_tree(), "second RMB click-release exits FLY mode")
+	var pan_start: Vector3 = camera.camera.position
+	camera._gui_input(right)
+	var pan_motion := InputEventMouseMotion.new()
+	pan_motion.relative = Vector2(20, -12)
+	camera._input(pan_motion)
+	camera._input(right_release)
+	checks.check(not camera.flying and camera.camera.position.distance_to(pan_start) > 0.01,
+		"RMB hold-drag pans without leaving temporary FLY mode enabled")
+	ui.session.select(PackedInt64Array([expected_hits[0].brush_id]))
+	var grid_key := InputEventKey.new()
+	grid_key.keycode = KEY_G
+	grid_key.pressed = true
+	camera._gui_input(grid_key)
+	checks.check(camera.surface_grid_visible and camera.overlays.has_node("SelectedSurfaceGrid"),
+		"G toggles map-grid lines across selected brush surfaces in the camera")
+	camera._gui_input(grid_key)
+	checks.check(not camera.surface_grid_visible and not camera.overlays.has_node("SelectedSurfaceGrid"),
+		"second G hides selected-brush camera grid lines")
 	if brush_ids.size() >= 2:
 		ui.session.select(PackedInt64Array())
 		var brush_trace = left.duplicate()
@@ -654,18 +743,30 @@ func run() -> void:
 	camera.start_fly()
 	plugin._make_visible(false)
 	checks.check(not camera.flying, "Map tab hide releases camera")
-	checks.check(plugin.built_materials_page.visible and not plugin.authoring_materials_page.visible, "leaving Map restores rendered built-material context")
+	checks.check(plugin.built_materials_page.get_parent() == plugin.materials_panel, "leaving Radiant preserves the plugin-owned Map Materials UI")
 	var loader = ClassDB.instantiate("TBLoader")
 	loader.name = "SpatialMaterialContext"
+	var material_mesh := MeshInstance3D.new()
+	var material_fixture := StandardMaterial3D.new()
+	material_fixture.resource_name = "IntegrationMaterial"
+	var material_geometry := QuadMesh.new()
+	material_geometry.material = material_fixture
+	material_mesh.mesh = material_geometry
+	loader.add_child(material_mesh)
 	plugin._edit(loader)
-	checks.check(plugin.built_materials_page.visible and plugin.materials_context_label.text.contains("SpatialMaterialContext"), "3D material context follows the selected loader")
+	plugin.show_materials()
+	checks.check(plugin.materials_panel == shared_materials_panel and plugin.materials_grid.item_count == 1 and plugin.materials_tree.get_root().get_child_count() == 1, "3D Map Materials opens the shared rich all-material grid/list")
+	plugin.hide_bottom_panel()
 	plugin._make_visible(true)
+	plugin.show_materials()
+	checks.check(plugin.materials_panel == shared_materials_panel and plugin.materials_grid.item_count == 1, "Radiant Map Materials opens the identical rich panel and content")
+	plugin.hide_bottom_panel()
 	checks.check(plugin.map_control.visible and plugin.map_control.get_child(0).disabled and plugin.map_control.get_child(2).disabled, "spatial toolbar remains visible but disabled without a loader selection")
 	# Explicit selection is separate from session binding.
 	var selection_session = ui.session
 	plugin._edit(loader)
 	checks.check(ui.session == selection_session and ui.session.loader.get_ref() == null, "spatial selection never changes document/binding")
-	checks.check(plugin.authoring_materials_page.visible and not plugin.built_materials_page.visible, "spatial selection cannot replace active Map material context")
+	checks.check(plugin.materials_panel == shared_materials_panel, "spatial selection cannot replace the shared Map Materials UI")
 	plugin._edit(null)
 	loader.free()
 	await binding_journey(plugin)
@@ -703,15 +804,19 @@ func run() -> void:
 		checks.check(image.save_png("res://editor-smoke.png") == OK, "Map journey screenshot saved")
 	# Disposable project's history may be cleared only by this harness.
 	manager.clear_history(EditorUndoRedoManager.GLOBAL_HISTORY, false)
+	session_manifest_regression()
 	var recovery = prepare_recovery_regression()
 	var old_ui = weakref(ui)
 	var old_panel = weakref(plugin.materials_panel)
+	var old_uv_panel = weakref(plugin.uv_panel)
+	var old_entities_panel = weakref(plugin.entities_panel)
 	var old_toolbar = weakref(plugin.map_control)
 	ui = null
 	EditorInterface.set_plugin_enabled("tbloader", false)
 	await get_tree().process_frame
 	await get_tree().process_frame
-	checks.check(old_ui.get_ref() == null and old_toolbar.get_ref() == null and old_panel.get_ref() == null, "disable frees all Map controls")
+	checks.check(old_ui.get_ref() == null and old_toolbar.get_ref() == null and old_panel.get_ref() == null
+		and old_uv_panel.get_ref() == null and old_entities_panel.get_ref() == null, "disable frees all Map and bottom-panel controls")
 	EditorInterface.set_plugin_enabled("tbloader", true)
 	await get_tree().process_frame
 	plugin = find_tb_plugin(get_tree().root)
@@ -1099,8 +1204,8 @@ func make_budget_background() -> WeakRef:
 
 func focus_regression() -> void:
 	ui.set_tool("Brush")
-	ui.session.select(PackedInt64Array([ui.session.document.get_draw_data()[0].id]))
 	for graph in [ui.graph_a, ui.graph_b]:
+		ui.session.select(PackedInt64Array([ui.session.document.get_draw_data()[0].id]))
 		var bounds: Dictionary = ui.session.brush(ui.session.selected[0])
 		var center: Vector3 = (bounds.aabb_min + bounds.aabb_max) * 0.5
 		graph.origin = center
@@ -1226,10 +1331,70 @@ func prepare_recovery_regression() -> Dictionary:
 	ui.camera_view.start_fly()
 	return {"named": named, "untitled": untitled, "canonical": canonical, "named_ref": named_ref, "document_ref": named_document, "untitled_ref": untitled_ref, "old_snapshot": old_snapshot}
 
+func session_manifest_regression() -> void:
+	for origin in ui.sessions:
+		origin.save_enabled = false
+	var canonical := FileAccess.get_file_as_string("res://journey-bound.map")
+	var clean_a = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	checks.check(clean_a.document.import_text(canonical).ok
+		and clean_a.document.save_map("user://session-clean-a.map").ok, "session manifest clean path A fixture")
+	ui.set_session(clean_a)
+	var dirty = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	checks.check(dirty.document.import_text(canonical).ok, "session manifest dirty fixture imports")
+	dirty.document.create_cuboid(Vector3.ZERO, Vector3.ONE * 8, "common/caulk")
+	var dirty_text: String = dirty.document.export_text().value
+	ui.set_session(dirty)
+	var pristine = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	ui.set_session(pristine)
+	var clean_b = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	checks.check(clean_b.document.import_text(canonical).ok
+		and clean_b.document.save_map("user://session-clean-b.map").ok, "session manifest clean path B fixture")
+	ui.set_session(clean_b)
+	var scene_clean = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	checks.check(scene_clean.document.import_text(canonical).ok
+		and scene_clean.document.save_map("user://session-scene-clean.map").ok, "session manifest scene path fixture")
+	scene_clean.scene_managed = true
+	ui.set_session(scene_clean)
+	ui.set_session(clean_a)
+	ui.store_recovery()
+	var manifest: Dictionary = EditorInterface.get_base_control().get_meta(ui.RECOVERY_META)
+	checks.check(manifest.version == ui.RECOVERY_VERSION and manifest.active_tab == 0,
+		"versioned session manifest retains the active clean path tab")
+	checks.check(manifest.tabs.size() == 3 and manifest.tabs.map(func(record): return record.type) == ["path", "recovery", "path"]
+		and manifest.tabs[0].path.ends_with("session-clean-a.map") and manifest.tabs[2].path.ends_with("session-clean-b.map"),
+		"session manifest retains clean standalone paths and dirty text in tab order")
+	checks.check(not manifest.tabs.any(func(record): return record.get("path", "").ends_with("session-scene-clean.map")),
+		"session manifest omits pristine untitled and clean scene-managed tabs")
+	var corrupt = FileAccess.open("user://session-corrupt.map", FileAccess.WRITE)
+	corrupt.store_string("not a map")
+	corrupt.close()
+	EditorInterface.get_base_control().set_meta(ui.RECOVERY_META, {"version": ui.RECOVERY_VERSION, "active_tab": 0, "tabs": [
+		{"type": "path", "path": "user://session-missing.map"},
+		{"type": "path", "path": "user://session-clean-b.map"},
+		{"type": "path", "path": "user://session-corrupt.map"},
+		{"type": "recovery", "text": dirty_text, "source": "user://dirty-source.map"},
+	]})
+	ui.restore_recovery()
+	checks.check(ui.sessions.size() == 2 and ui.sessions[0].document.get_path().ends_with("session-clean-b.map")
+		and ui.session == ui.sessions[0], "missing/corrupt active path falls forward to the next valid tab")
+	checks.check(ui.sessions[1].document.export_text().value == dirty_text and ui.sessions[1].document.get_path().is_empty()
+		and ui.sessions[1].recovery_source.ends_with("dirty-source.map") and ui.sessions[1].document.is_dirty(),
+		"dirty manifest tab restores as a detached recovery document")
+	EditorInterface.get_base_control().set_meta(ui.RECOVERY_META, [{"text": dirty_text,
+		"source": "user://legacy-source.map", "root": "res://textures", "grid": 23.0, "texture": "legacy/texture"}])
+	ui.restore_recovery()
+	checks.check(ui.sessions.size() == 1 and ui.session.recovery_source.ends_with("legacy-source.map")
+		and ui.session.grid == 23.0 and ui.session.texture == "legacy/texture"
+		and ui.session.document.export_text().value == dirty_text,
+		"legacy array recovery remains compatible")
+	ui.session.save_enabled = false
+
 func verify_recovery_regression(expected: Dictionary) -> void:
 	checks.check(Input.mouse_mode == Input.MOUSE_MODE_VISIBLE, "disable releases captured mouse")
 	checks.check(expected.named_ref.get_ref() == null and expected.untitled_ref.get_ref() == null and expected.document_ref.get_ref() == null, "disable releases original sessions and native documents even with expired history handles")
 	checks.check(FileAccess.get_file_as_string("res://recovery-named.map") == expected.canonical, "disable/re-enable never overwrites named canonical file")
+	checks.check(ui.session.document.export_text().value == expected.untitled,
+		"disable/re-enable restores the previously active recovery tab")
 	for value in [expected.named, expected.untitled]:
 		var matches = ui.sessions.filter(func(origin): return origin.document.export_text().value == value)
 		checks.check(matches.size() == 1, "re-enable restores exact unresolved named/untitled content once")
@@ -1360,6 +1525,8 @@ func visibility_filter_journey() -> void:
 	var mixed: int = doc.create_cuboid(Vector3(384, 0, 0), Vector3(448, 64, 64), "baseline/checker").value
 	var mixed_brush: Dictionary = scratch.brush(mixed)
 	doc.set_face_texture(mixed, 0, "common/caulk", mixed_brush.topology_revision)
+	mixed_brush = scratch.brush(mixed)
+	doc.set_face_texture(mixed, 1, "common/hint_skip", mixed_brush.topology_revision)
 	var entity_brush: int = doc.create_cuboid(Vector3(512, 0, 0), Vector3(576, 64, 64), "baseline/checker").value
 	doc.group_brushes(PackedInt64Array([entity_brush]), "func_group")
 	var point: int = doc.create_point_entity("info_player_start", Vector3(640, 32, 0)).value
@@ -1377,6 +1544,11 @@ func visibility_filter_journey() -> void:
 	ui.set_tool("Face")
 	checks.check(camera_handle_count(Color("ffb657")) == 5, "camera omits the handle for a material-filtered face on a mixed brush")
 	ui.visibility_buttons.caulk.pressed.emit()
+	ui.visibility_buttons.hint_skip.pressed.emit()
+	checks.check(scratch.visibility_filters.hint_skip and ui.camera_view.triangle_count == 58
+		and graph.hit_brush(graph.project(Vector3(416, 32, 0))) == mixed,
+		"hint_skip toolbar toggle hides matching faces without hiding a mixed brush")
+	ui.visibility_buttons.hint_skip.pressed.emit()
 	ui.visibility_buttons.clips.pressed.emit()
 	checks.check(graph.hit_brush(graph.project(Vector3(160, 32, 0))) == 0 and graph.hit_brush(graph.project(Vector3(288, 32, 0))) == visible, "clip filter hides clip brushes without affecting ordinary materials")
 	checks.check(ui.camera_view.triangle_count == 48, "clip filter removes matching camera triangles")
@@ -1662,6 +1834,48 @@ func vertex_hull_drag_journey() -> void:
 	graph.zoom = 1
 	ui.set_tool("Brush")
 	graph.grab_focus()
+	var unsaved_before_pristine: String = ui.unsaved_status()
+	var pristine_session = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	ui.set_session(pristine_session)
+	checks.check(pristine_session.document.is_dirty() and not pristine_session.has_unsaved_changes()
+		and ui.plugin._get_unsaved_status("") == unsaved_before_pristine,
+		"pristine empty untitled session is not editor-unsaved despite lacking a native baseline")
+	pristine_session.grid = 117
+	ui.store_recovery()
+	var pristine_manifest: Dictionary = EditorInterface.get_base_control().get_meta(ui.RECOVERY_META)
+	checks.check(not pristine_manifest.tabs.any(func(record): return record.get("grid", -1) == 117),
+		"pristine empty untitled session is omitted from plugin-close recovery")
+	var pristine_tab = ui.document_tabs.current_tab
+	ui.close_document_tab(pristine_tab)
+	checks.check(not ui.sessions.has(pristine_session) and not ui.dirty_dialog.visible,
+		"closing a pristine empty untitled tab bypasses save and discard confirmation")
+	var modified_empty = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	ui.set_session(modified_empty)
+	modified_empty.grid = 119
+	var temporary_brush: int = modified_empty.document.create_cuboid(Vector3.ZERO, Vector3.ONE * 16, "common/caulk").value
+	modified_empty.document.delete_brushes(PackedInt64Array([temporary_brush]))
+	checks.check(modified_empty.document.get_draw_data().is_empty() and modified_empty.has_unsaved_changes()
+		and ui.plugin._get_unsaved_status("").contains("Untitled"),
+		"modified map remains unsaved after returning to empty untitled content")
+	ui.store_recovery()
+	var recovery_manifest: Dictionary = EditorInterface.get_base_control().get_meta(ui.RECOVERY_META)
+	checks.check(recovery_manifest.tabs.any(func(record): return record.get("grid", -1) == 119),
+		"modified empty untitled session remains eligible for plugin-close recovery")
+	var modified_empty_tab = ui.document_tabs.current_tab
+	ui.close_document_tab(modified_empty_tab)
+	checks.check(ui.dirty_dialog.visible and ui.sessions.has(modified_empty),
+		"closing a modified empty untitled tab still requests confirmation")
+	ui.dirty_dialog.custom_action.emit("discard")
+	checks.check(not ui.sessions.has(modified_empty), "discard closes the modified empty session")
+	var named_dirty = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	ui.set_session(named_dirty)
+	checks.check(named_dirty.document.save_map("user://named-close-regression.map").ok, "named close fixture establishes a clean path")
+	named_dirty.document.create_cuboid(Vector3.ZERO, Vector3.ONE * 16, "common/caulk")
+	var named_dirty_tab = ui.document_tabs.current_tab
+	ui.close_document_tab(named_dirty_tab)
+	checks.check(named_dirty.document.is_dirty() and named_dirty.has_unsaved_changes() and ui.dirty_dialog.visible,
+		"closing a named dirty tab still requests confirmation")
+	ui.dirty_dialog.custom_action.emit("discard")
 	var close_session = load("res://addons/tbloader/src/editor/map_session.gd").new()
 	checks.check(close_session.document.import_text(original.document.export_text().value).ok, "close-tab fixture imports canonical content")
 	ui.set_session(close_session)
@@ -1829,10 +2043,23 @@ func phase5_journey() -> void:
 	ui.set_tool("Brush")
 	ui.camera_view.apply_pick(id, 0, 0, false, false, true)
 	checks.check(scratch.components.size() == 1 and scratch.components[0].kind == "face", "camera Ctrl-click quick-selects one face outside Face mode")
-	checks.check(ui.camera_view.overlays.has_node("SelectedBrushFill") and ui.camera_view.overlays.has_node("SelectedFaceFill")
-		and ui.camera_view.overlays.get_node("SelectedFaceFill").material_override.albedo_color.b > 0.9
-		and ui.camera_view.overlays.get_node("SelectedFaceFill").material_override.albedo_color.a < 0.5,
-		"camera renders translucent orange brush and blue selected-face fills")
+	ui.camera_view.ctrl_start_hit = {"brush_id": id, "face_index": 1}
+	ui.camera_view.ctrl_gesture = "paint_pending"
+	ui.camera_view.finish_ctrl_gesture()
+	checks.check(scratch.components.size() == 2, "separate camera Ctrl-click adds to the existing face selection")
+	ui.camera_view.ctrl_start_hit = {"brush_id": id, "face_index": 0}
+	ui.camera_view.ctrl_gesture = "paint_pending"
+	ui.camera_view.finish_ctrl_gesture()
+	checks.check(scratch.components.size() == 1 and scratch.components[0].index == 1,
+		"separate camera Ctrl-click toggles a selected face without starting a new selection")
+	key(KEY_ESCAPE)
+	checks.check(scratch.selected.is_empty() and scratch.points.is_empty() and scratch.components.is_empty(),
+		"Escape clears the complete spatial and component selection in one action")
+	ui.camera_view.apply_pick(id, 0, 0, false, false, true)
+	checks.check(ui.camera_view.overlays.has_node("SelectedBrushFill") and ui.camera_view.overlays.has_node("SelectedFaceEdges")
+		and ui.camera_view.overlays.get_node("SelectedFaceEdges").material_override.albedo_color.b > 0.9
+		and ui.camera_view.overlays.get_node("SelectedFaceEdges").material_override.albedo_color.a == 1.0,
+		"camera renders translucent orange brushes and opaque blue selected-face edges")
 	ui.texture_field.text = "common/caulk"
 	ui.assign_texture()
 	checks.check(scratch.brush(id).faces[0].texture == "common/caulk", "camera quick-face selection scopes material assignment")

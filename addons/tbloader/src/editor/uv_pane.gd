@@ -9,6 +9,19 @@ signal reset_requested
 signal fit_requested(scale: Vector2)
 signal projection_requested(mode: String)
 
+class PaneHeader extends Control:
+	var title: String
+
+	func _init(value: String) -> void:
+		title = value
+		custom_minimum_size.y = 36.0
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func _draw() -> void:
+		draw_rect(Rect2(Vector2.ZERO, size), Color(0.08, 0.1, 0.14, 0.95))
+		draw_string(ThemeDB.fallback_font, Vector2(38, 23), title,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("b9cfdf"))
+
 class UVCanvas extends Control:
 	var preview_texture: Texture2D
 	var triangle_uvs := PackedVector2Array()
@@ -126,6 +139,10 @@ func current_transform() -> Dictionary:
 func _build_ui() -> void:
 	name = "UVPane"
 	size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	if _is_layout_pane():
+		var header := PaneHeader.new("UV")
+		header.name = "PaneHeader"
+		add_child(header)
 	var texture_row := HBoxContainer.new()
 	add_child(texture_row)
 	_add_label(texture_row, "Texture")
@@ -193,6 +210,10 @@ func _build_ui() -> void:
 	status_label = Label.new()
 	status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	add_child(status_label)
+
+func _is_layout_pane() -> bool:
+	var parent := get_parent()
+	return parent != null and String(parent.name).begins_with("ViewSlot")
 
 func _add_label(parent: Control, text_value: String) -> Label:
 	var label := Label.new()

@@ -110,6 +110,9 @@ def stage(project):
         shutil.copy2(HERE / name, project)
     shutil.copytree(HERE / "fixtures", project / "fixtures")
     write_checker(project / "textures/baseline/checker.png")
+    (project / "textures/baseline/surface.tres").write_text(
+        '[gd_resource type="StandardMaterial3D" format=3]\n[resource]\nalbedo_color = Color(0.2, 0.4, 0.8, 1)\n'
+    )
     write_checker(project / "textures-other/baseline/checker.png", 16, 128, (20, 220, 60))
     addon = project / "addons" / "tbloader"
     shutil.copytree(

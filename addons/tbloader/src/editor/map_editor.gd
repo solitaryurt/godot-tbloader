@@ -8,6 +8,8 @@ const Browser = preload("res://addons/tbloader/src/editor/material_browser.gd")
 const BakeAction = preload("res://addons/tbloader/src/editor/bake_action.gd")
 const UVPane = preload("res://addons/tbloader/src/editor/uv_pane.gd")
 const EntityPane = preload("res://addons/tbloader/src/editor/entity_pane.gd")
+const POINT_ENTITY_CLASSES := ["info_player_start", "light", "player", "target_speaker"]
+const BRUSH_ENTITY_CLASSES := ["area", "func_group", "nocollision", "trigger_location"]
 
 const PANE_TYPES := ["Camera", "Top Grid", "Front Grid", "Side Grid", "UV", "Entities"]
 
@@ -24,6 +26,7 @@ var active_graph: Control
 var camera_view: Control
 var material_workspace: Control
 var browser: Control
+var bottom_uv_pane: Control
 var status: Label
 var notice: Label
 var binding_label: Label
@@ -83,15 +86,24 @@ var resolver_config: Array = []
 var shutting_down = false
 const RECOVERY_PATH = "user://tbloader-map-recovery.json"
 const RECOVERY_META = "tbloader_map_recovery"
+const RECOVERY_VERSION = 2
 var scan_delay = -1.0
 var fallback_entity_pane: Control
 var cut_points: Array[Vector3] = []
 var cut_flip := false
 var mutation_preview_owner: WeakRef = weakref(null)
+var entity_menu: PopupMenu
+var entity_menu_actions: Dictionary = {}
+var entity_menu_session: WeakRef = weakref(null)
+var entity_menu_point := Vector3.ZERO
 
 func _ready() -> void:
 	size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	size_flags_vertical = Control.SIZE_EXPAND_FILL
+	texture_field = bottom_uv_pane.texture_field
+	uv_fields.assign([bottom_uv_pane.shift_x, bottom_uv_pane.shift_y, bottom_uv_pane.rotation_field,
+		bottom_uv_pane.scale_x, bottom_uv_pane.scale_y])
+	uv_label = bottom_uv_pane.status_label
 	scene_tabs = TabBar.new()
 	scene_tabs.name = "SceneLoaderTabs"
 	scene_tabs.tab_changed.connect(scene_tab_changed)
@@ -139,6 +151,8 @@ func _ready() -> void:
 	loader_actions.UpdateLoaderPath = icon_button(loader_group, "UpdateLoaderPath", "Update loader map path", custom_icon("update_loader_path"), update_loader_path)
 	loader_actions.BuildMeshes = icon_button(loader_group, "BuildMeshes", "Build Meshes from saved map", editor_icon("Bake"), bake)
 	icon_button(loader_group, "Materials", "Open Map Materials", editor_icon("StandardMaterial3D"), func(): plugin.show_materials())
+	icon_button(loader_group, "UVBottomPanel", "Open UV bottom panel (S)", editor_icon("Texture2D"), func(): plugin.show_uv())
+	icon_button(loader_group, "EntitiesBottomPanel", "Open Entities bottom panel (N)", editor_icon("Object"), show_entities)
 	rebuild_on_save = icon_button(loader_group, "BuildMeshesOnSave", "Build meshes on save", custom_icon("bake_on_save"), func(): pass, true)
 	rebuild_on_save.button_pressed = false
 	var layout_group := toolbar_group(toolbar)
@@ -165,9 +179,8 @@ func _ready() -> void:
 	geometry_group.add_child(sides)
 	icon_button(geometry_group, "Prism", "Create prism", editor_icon("PrismMesh"), func(): make_prism(int(sides.value)))
 	icon_button(geometry_group, "Merge", "Merge selected convex brushes", editor_icon("Merge"), merge_selection)
-	icon_button(geometry_group, "Entity", "Entity Inspector (N)", editor_icon("Object"), show_entities)
 	var filter_group := toolbar_group(toolbar)
-	for entry in [["Entities", "entities", "hide_entities"], ["Caulk", "caulk", "hide_caulk"], ["Clips", "clips", "hide_clips"]]:
+	for entry in [["Entities", "entities", "hide_entities"], ["Caulk", "caulk", "hide_caulk"], ["Clips", "clips", "hide_clips"], ["HintSkip", "hint_skip", "hide_hint_skip"]]:
 		var category: String = entry[1]
 		var control := icon_button(filter_group, "Hide%s" % entry[0], "Hide %s in all map views; this does not edit the map" % entry[0].to_lower(),
 			custom_icon(entry[2]), func(): session.set_visibility_filter(category, not session.visibility_filters[category]), true)
@@ -227,9 +240,10 @@ func _ready() -> void:
 	add_child(status)
 	notice = Label.new()
 	notice.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	notice.text = "Drag empty grid: cuboid • R: rotate 15° • Shift click: select • RMB: pan • Shift RMB: box • H: hide • Space: clone"
+	notice.text = "Drag empty grid: cuboid • RMB click: add entity • RMB drag: pan • S: UV • N: Entities • H: hide • Space: clone"
 	add_child(notice)
 	build_dialogs()
+	build_entity_menu()
 	set_session(Session.new())
 	configure_browser(texture_root.text)
 	set_tool("Brush")
@@ -258,36 +272,26 @@ func create_material_workspace() -> Control:
 	button(root_row, "Set", func(): configure_browser(texture_root.text))
 	browser = Browser.new()
 	browser.custom_minimum_size.y = 180
+	browser.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	browser.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	material_workspace.add_child(browser)
+	var split := HSplitContainer.new()
+	split.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	material_workspace.add_child(split)
+	split.add_child(browser)
 	browser.resource_selected.connect(material_selected)
 	browser.mapping_changed.connect(queue_material_refresh)
 	browser.index_changed.connect(func(_count): queue_material_refresh())
-	var surface = HBoxContainer.new()
-	material_workspace.add_child(surface)
-	texture_field = LineEdit.new()
-	texture_field.placeholder_text = "Map shader token"
-	texture_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	surface.add_child(texture_field)
-	button(surface, "Assign", assign_texture)
-	var uv_row = GridContainer.new()
-	uv_row.columns = 3
-	material_workspace.add_child(uv_row)
-	for name_value in ["U ", "V ", "R ", "SU ", "SV "]:
-		var spin = SpinBox.new()
-		spin.min_value = -65536
-		spin.max_value = 65536
-		spin.step = 0.125
-		spin.prefix = name_value
-		spin.custom_minimum_size.x = 68
-		spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		uv_row.add_child(spin)
-		uv_fields.append(spin)
-	uv_fields[3].value = 1
-	uv_fields[4].value = 1
-	uv_apply = button(uv_row, "UV Apply", apply_uv)
-	uv_label = Label.new()
-	material_workspace.add_child(uv_label)
+	bottom_uv_pane = UVPane.new()
+	bottom_uv_pane.custom_minimum_size.x = 360
+	bottom_uv_pane.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	bottom_uv_pane.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	bottom_uv_pane.texture_token_requested.connect(uv_texture_requested)
+	bottom_uv_pane.uv_transform_requested.connect(apply_uv_transform)
+	bottom_uv_pane.match_grid_requested.connect(match_uv_grid)
+	bottom_uv_pane.texture_axis_requested.connect(unsupported_uv_axis)
+	bottom_uv_pane.reset_requested.connect(reset_uv)
+	bottom_uv_pane.fit_requested.connect(unsupported_uv_fit)
+	split.add_child(bottom_uv_pane)
 	return material_workspace
 
 func button(parent: Node, text: String, callback: Callable) -> Button:
@@ -330,6 +334,59 @@ func icon_button(parent: Control, name_value: String, hint: String, icon: Textur
 	control.pressed.connect(callback)
 	parent.add_child(control)
 	return control
+
+
+func build_entity_menu() -> void:
+	entity_menu = PopupMenu.new()
+	entity_menu.name = "GridEntityMenu"
+	entity_menu.id_pressed.connect(entity_menu_selected)
+	add_child(entity_menu)
+
+
+func open_entity_menu(graph: Control, screen_position: Vector2) -> void:
+	if not is_instance_valid(graph) or session == null:
+		return
+	var point: Vector3 = graph.unproject(screen_position)
+	point[graph.orientation] = session.workzone.get_center()[graph.orientation]
+	entity_menu_point = graph.snap_point(point)
+	entity_menu_session = weakref(session)
+	entity_menu_actions.clear()
+	entity_menu.clear()
+	var id := 1
+	for classname in POINT_ENTITY_CLASSES:
+		entity_menu.add_item("Point: " + classname, id)
+		entity_menu_actions[id] = {"kind": "point", "classname": classname}
+		id += 1
+	entity_menu.add_separator("Brush entities")
+	for classname in BRUSH_ENTITY_CLASSES:
+		entity_menu.add_item("Brush: " + classname, id)
+		entity_menu.set_item_disabled(entity_menu.get_item_index(id), session.selected.is_empty())
+		entity_menu_actions[id] = {"kind": "brush", "classname": classname}
+		id += 1
+	var popup_position := Vector2i(graph.get_screen_transform() * screen_position)
+	entity_menu.popup(Rect2i(popup_position, Vector2i(300, 0)))
+
+
+func entity_menu_selected(id: int) -> void:
+	var origin = entity_menu_session.get_ref()
+	if origin == null or origin != session or not entity_menu_actions.has(id):
+		return
+	var action: Dictionary = entity_menu_actions[id]
+	var classname: String = action.classname
+	if action.kind == "point":
+		var point := entity_menu_point
+		origin.transact("Create %s point entity" % classname, func():
+			var result: Dictionary = origin.document.create_point_entity(classname, point)
+			if result.ok:
+				origin.select(PackedInt64Array(), PackedInt64Array([result.value]))
+			return result)
+	else:
+		var brush_ids: PackedInt64Array = origin.selected.duplicate()
+		if brush_ids.is_empty():
+			set_status("Select one or more brushes before creating a brush entity.")
+			return
+		origin.transact("Create %s brush entity" % classname,
+			func(): return origin.document.group_brushes(brush_ids, classname))
 
 func visible_graphs() -> Array[Control]:
 	return graphs.filter(func(graph): return graph.is_inside_tree() and graph.is_visible_in_tree())
@@ -683,7 +740,7 @@ func set_session(value: RefCounted) -> void:
 	texture_field.text = session.texture
 	sync_resolver()
 	refresh()
-	plugin.update_materials_context()
+	plugin.update_bottom_panel_sessions()
 
 func _session_changed(origin: RefCounted) -> void:
 	if origin == session:
@@ -736,7 +793,7 @@ func refresh_status() -> void:
 		return
 	var baked = "meshes never built" if session.baked_text.is_empty() else ("meshes current" if session.baked_text == session.document.export_text().value else "meshes stale")
 	var orientation: String = ["Side", "Front", "Top"][active_graph.orientation] if is_instance_valid(active_graph) else "No grid"
-	status.text = "%s • %s • grid %.3f • %s • %s • %d selected • %d hidden" % ["UNSAVED" if session.document.is_dirty() else "saved", baked, session.grid, tool, orientation, session.selected.size() + session.points.size(), session.hidden_count()]
+	status.text = "%s • %s • grid %.3f • %s • %s • %d selected • %d hidden" % ["UNSAVED" if session.has_unsaved_changes() else "saved", baked, session.grid, tool, orientation, session.selected.size() + session.points.size(), session.hidden_count()]
 	for category in visibility_buttons:
 		visibility_buttons[category].set_pressed_no_signal(session.visibility_filters[category])
 	var loader = session.loader.get_ref()
@@ -750,7 +807,7 @@ func refresh_status() -> void:
 		var filename: String = origin.document.get_path().get_file()
 		if not origin.recovery_source.is_empty():
 			filename = "Recovered " + origin.recovery_source.get_file()
-		document_tabs.add_tab((filename if filename else "Untitled") + (" *" if origin.document.is_dirty() else ""))
+		document_tabs.add_tab((filename if filename else "Untitled") + (" *" if origin.has_unsaved_changes() else ""))
 		var index = document_tabs.tab_count - 1
 		document_tabs.set_tab_metadata(index, weakref(origin))
 		document_tabs.set_tab_button_icon(index, editor_icon("Close"))
@@ -780,7 +837,7 @@ func close_document_tab(index: int) -> void:
 	var origin = reference.get_ref() if reference is WeakRef else null
 	if origin == null or not sessions.has(origin):
 		return
-	if origin.document.is_dirty():
+	if origin.has_unsaved_changes():
 		if origin != session:
 			set_session(origin)
 		request_replace(close_document.bind(origin))
@@ -850,8 +907,12 @@ func route_key(event: InputEventKey, graph: Control) -> bool:
 	var focus = get_viewport().gui_get_focus_owner()
 	if focus is LineEdit or focus is TextEdit or browser.has_browser_focus() or file_dialog.visible or dirty_dialog.visible or inspector.visible:
 		return false
-	if is_visible_in_tree() and not event.ctrl_pressed and event.keycode == KEY_N:
-		show_entities()
+	var plain_shortcut := not event.ctrl_pressed and not event.alt_pressed and not event.shift_pressed and not event.meta_pressed
+	if is_visible_in_tree() and plain_shortcut and event.keycode in [KEY_S, KEY_N]:
+		if event.keycode == KEY_S:
+			plugin.toggle_uv()
+		else:
+			toggle_entities()
 		return true
 	if not is_visible_in_tree() or (not graphs.has(focus) and not cameras.has(focus)):
 		return false
@@ -900,9 +961,8 @@ func route_key(event: InputEventKey, graph: Control) -> bool:
 					graph.cancel()
 				elif cameras.any(func(camera): return camera.camera_gesture != ""):
 					cancel_interaction()
-				elif not session.components.is_empty():
-					session.components.clear()
-					session.changed.emit()
+				elif not session.selected.is_empty() or not session.points.is_empty() or not session.components.is_empty():
+					session.select(PackedInt64Array())
 				elif tool != "Brush":
 					set_tool("Brush")
 				else:
@@ -914,8 +974,6 @@ func route_key(event: InputEventKey, graph: Control) -> bool:
 					clone_selection(graph.axes().x)
 			KEY_DELETE, KEY_BACKSPACE:
 				delete_selection()
-			KEY_N:
-				show_entities()
 			KEY_X:
 				set_tool("Cut")
 			KEY_Q:
@@ -924,6 +982,11 @@ func route_key(event: InputEventKey, graph: Control) -> bool:
 				set_tool("Rotate")
 			KEY_F:
 				set_tool("Face")
+			KEY_G:
+				if cameras.has(focus):
+					focus.toggle_surface_grid()
+				else:
+					return false
 			KEY_E:
 				set_tool("Edge")
 			KEY_V:
@@ -1193,8 +1256,7 @@ func refresh_uv() -> void:
 			texture = target_texture
 		elif first.shift != uv.shift or first.rotation != uv.rotation or first.scale != uv.scale or texture != target_texture:
 			mixed = true
-	uv_apply.disabled = valve or targets.is_empty()
-	uv_label.text = "Valve / mixed projection: UV editing unavailable" if valve else ("Mixed UVs — Apply replaces selected values" if mixed else "Classic UV • %d faces" % targets.size())
+	uv_label.text = "Valve / mixed projection: UV editing unavailable" if valve else ("Mixed UVs — edits replace selected values" if mixed else "Classic UV • %d faces" % targets.size())
 	for field in uv_fields:
 		field.editable = not valve
 	if not first.is_empty():
@@ -1213,6 +1275,7 @@ func refresh_uv() -> void:
 	}
 	var preview := uv_preview(targets, texture)
 	pane_state.merge(preview)
+	bottom_uv_pane.set_state(pane_state)
 	for pane in uv_panes:
 		pane.set_state(pane_state)
 
@@ -1328,21 +1391,15 @@ func build_dialogs() -> void:
 func show_entities() -> void:
 	cancel_interaction()
 	var targets: PackedInt64Array = session.entity_targets()
-	for pane in entity_panes:
-		if pane.is_visible_in_tree():
-			pane.set_session(session)
-			if not targets.is_empty():
-				pane.set_selected_entity_id(targets[0])
-			pane.entity_list.grab_focus()
-			return
-	fallback_entity_pane.set_session(session)
-	if not targets.is_empty():
-		fallback_entity_pane.set_selected_entity_id(targets[0])
-	if DisplayServer.get_name() == "headless":
-		inspector.popup(Rect2i(Vector2i.ZERO, inspector.size))
-	else:
-		inspector.popup_centered()
-	fallback_entity_pane.entity_list.grab_focus()
+	plugin.show_entities_panel()
+	if plugin.entities_pane != null and not targets.is_empty():
+		plugin.entities_pane.set_selected_entity_id(targets[0])
+
+func toggle_entities() -> void:
+	cancel_interaction()
+	var targets: PackedInt64Array = session.entity_targets()
+	if plugin.toggle_entities_panel() and plugin.entities_pane != null and not targets.is_empty():
+		plugin.entities_pane.set_selected_entity_id(targets[0])
 
 func refresh_entities() -> void:
 	var targets: PackedInt64Array = session.entity_targets()
@@ -1386,7 +1443,7 @@ func request_replace(callback: Callable) -> void:
 	cancel_interaction()
 	discard_on_replace = null
 	pending = callback
-	if session.document.is_dirty():
+	if session.has_unsaved_changes():
 		dirty_dialog.popup_centered()
 	else:
 		run_pending()
@@ -1781,7 +1838,7 @@ func save_all(defer_bake = false) -> void:
 	# synchronously too; never redirect a save or bake through the selected loader.
 	var untitled: RefCounted
 	for origin in sessions:
-		if origin == null or not origin.save_enabled or not origin.document.is_dirty():
+		if origin == null or not origin.save_enabled or not origin.has_unsaved_changes():
 			continue
 		var path: String = origin.document.get_path()
 		if path.is_empty():
@@ -1802,7 +1859,7 @@ func save_all(defer_bake = false) -> void:
 func unsaved_status() -> String:
 	var paths = PackedStringArray()
 	for origin in sessions:
-		if origin != null and origin.save_enabled and origin.document.is_dirty():
+		if origin != null and origin.save_enabled and origin.has_unsaved_changes():
 			var path: String = origin.document.get_path()
 			paths.append(path if path else "Untitled (use Radiant > Save As before exiting)")
 	return "Unsaved Map documents: " + ", ".join(paths) if not paths.is_empty() else ""
@@ -1846,16 +1903,39 @@ func shutdown() -> void:
 func store_recovery() -> void:
 	cancel_interaction()
 	var records: Array = []
+	var active_tab := -1
 	for origin in sessions:
-		if origin.save_enabled and origin.document.is_dirty():
-			records.append({"text": origin.document.export_text().value,
+		if origin == null or not origin.save_enabled:
+			continue
+		var record: Dictionary
+		if origin.has_unsaved_changes():
+			record = {"type": "recovery", "text": origin.document.export_text().value,
 				"source": origin.recovery_source if not origin.recovery_source.is_empty() else origin.document.get_path(),
-				"root": origin.texture_root, "grid": origin.grid, "texture": origin.texture})
+				"root": origin.texture_root, "grid": origin.grid, "texture": origin.texture}
+		elif not origin.scene_managed and not origin.document.get_path().is_empty():
+			record = {"type": "path", "path": origin.document.get_path()}
+		else:
+			continue
+		if origin == session:
+			active_tab = records.size()
+		records.append(record)
+	if active_tab < 0 and not records.is_empty():
+		# If the active scene/pristine tab is intentionally omitted, prefer the
+		# persisted tab that occupied the same position, then the previous one.
+		var active_session_index := sessions.find(session)
+		var persisted_before := 0
+		for index in maxi(active_session_index, 0):
+			var origin = sessions[index]
+			if origin != null and origin.save_enabled and (origin.has_unsaved_changes()
+					or not origin.scene_managed and not origin.document.get_path().is_empty()):
+				persisted_before += 1
+		active_tab = mini(persisted_before, records.size() - 1)
+	var manifest := {"version": RECOVERY_VERSION, "active_tab": active_tab, "tabs": records}
 	# Plain data fallback survives plugin disable even if recovery storage fails.
-	EditorInterface.get_base_control().set_meta(RECOVERY_META, records)
+	EditorInterface.get_base_control().set_meta(RECOVERY_META, manifest)
 	var file = FileAccess.open(RECOVERY_PATH + ".tmp", FileAccess.WRITE)
 	if file != null:
-		file.store_string(JSON.stringify(records))
+		file.store_string(JSON.stringify(manifest))
 		file.flush()
 		var error = file.get_error()
 		file.close()
@@ -1865,25 +1945,70 @@ func store_recovery() -> void:
 
 func restore_recovery() -> void:
 	var base = EditorInterface.get_base_control()
-	var records = base.get_meta(RECOVERY_META) if base.has_meta(RECOVERY_META) else null
-	if records == null and FileAccess.file_exists(RECOVERY_PATH):
-		records = JSON.parse_string(FileAccess.get_file_as_string(RECOVERY_PATH))
-	if not records is Array or records.is_empty():
+	var stored = base.get_meta(RECOVERY_META) if base.has_meta(RECOVERY_META) else null
+	if stored == null and FileAccess.file_exists(RECOVERY_PATH):
+		stored = JSON.parse_string(FileAccess.get_file_as_string(RECOVERY_PATH))
+	var records: Array
+	var active_tab := -1
+	var legacy := stored is Array
+	if legacy:
+		records = stored
+		active_tab = records.size() - 1
+	elif stored is Dictionary and int(stored.get("version", 0)) == RECOVERY_VERSION and stored.get("tabs") is Array:
+		records = stored.tabs
+		active_tab = int(stored.get("active_tab", -1))
+	else:
+		return
+	if records.is_empty():
 		return
 	# Recovery deliberately starts a new epoch. No snapshot IDs or scene targets
 	# are transplanted into a new native document; Save As establishes its baseline.
+	var restored: Array = []
+	var restored_indices: Array[int] = []
+	var recovered_any := false
+	for index in records.size():
+		var record = records[index]
+		if not record is Dictionary:
+			continue
+		var candidate = Session.new()
+		var record_type: String = "recovery" if legacy else record.get("type", "")
+		if record_type == "path":
+			var path = record.get("path", "")
+			if not path is String or path.is_empty() or not FileAccess.file_exists(path):
+				candidate.dispose()
+				continue
+			if not candidate.document.load_map(path).ok:
+				candidate.dispose()
+				continue
+		elif record_type == "recovery":
+			if not record.get("text") is String or not candidate.document.import_text(record.text).ok:
+				candidate.dispose()
+				continue
+			candidate.recovery_source = record.get("source", "")
+			candidate.texture_root = record.get("root", "res://textures")
+			candidate.grid = record.get("grid", 16.0)
+			candidate.texture = record.get("texture", "common/caulk")
+			recovered_any = true
+		else:
+			candidate.dispose()
+			continue
+		restored.append(candidate)
+		restored_indices.append(index)
+	if restored.is_empty():
+		return
 	for origin in sessions:
 		origin.dispose()
 	sessions.clear()
-	for record in records:
-		if not record is Dictionary or not record.get("text") is String:
-			continue
-		var recovered = Session.new()
-		if not recovered.document.import_text(record.text).ok:
-			continue
-		recovered.recovery_source = record.get("source", "")
-		recovered.texture_root = record.get("root", "res://textures")
-		recovered.grid = record.get("grid", 16.0)
-		recovered.texture = record.get("texture", "common/caulk")
-		set_session(recovered)
-	set_status("Recovered unsaved Map copies. Use Save As to choose destinations; original files were not modified.")
+	session = null
+	for candidate in restored:
+		set_session(candidate)
+	var selected := restored_indices.find(active_tab)
+	if selected < 0:
+		selected = restored_indices.find_custom(func(index): return index > active_tab)
+	if selected < 0:
+		selected = restored.size() - 1
+	set_session(restored[selected])
+	if recovered_any:
+		set_status("Restored previous Map tabs, including detached unsaved copies. Use Save As to choose recovery destinations.")
+	else:
+		set_status("Restored previous Map tabs.")

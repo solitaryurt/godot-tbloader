@@ -3,6 +3,19 @@ extends VBoxContainer
 
 signal entity_selected(entity_id: int)
 
+class PaneHeader extends Control:
+	var title: String
+
+	func _init(value: String) -> void:
+		title = value
+		custom_minimum_size.y = 36.0
+		mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	func _draw() -> void:
+		draw_rect(Rect2(Vector2.ZERO, size), Color(0.08, 0.1, 0.14, 0.95))
+		draw_string(ThemeDB.fallback_font, Vector2(38, 23), title,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("b9cfdf"))
+
 var selected_entity_id: int = -1
 var session: RefCounted
 
@@ -81,6 +94,10 @@ func _build_ui() -> void:
 	name = "EntityPane"
 	size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	size_flags_vertical = Control.SIZE_EXPAND_FILL
+	if _is_layout_pane():
+		var header := PaneHeader.new("Entities")
+		header.name = "PaneHeader"
+		add_child(header)
 	var split := HSplitContainer.new()
 	split.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	add_child(split)
@@ -129,6 +146,10 @@ func _build_ui() -> void:
 	status_label = Label.new()
 	status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	add_child(status_label)
+
+func _is_layout_pane() -> bool:
+	var parent := get_parent()
+	return parent != null and String(parent.name).begins_with("ViewSlot")
 
 func _refresh_properties(entities: Array) -> void:
 	property_tree.clear()

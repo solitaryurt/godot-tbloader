@@ -41,11 +41,13 @@ namespace {
 constexpr int FILTER_ENTITIES = 1;
 constexpr int FILTER_CAULK = 2;
 constexpr int FILTER_CLIPS = 4;
+constexpr int FILTER_HINT_SKIP = 8;
 
 enum RenderCategory {
 	RENDER_OPAQUE,
 	RENDER_CAULK,
 	RENDER_CLIP,
+	RENDER_HINT_SKIP,
 	RENDER_ENTITY,
 	RENDER_CATEGORY_COUNT,
 };
@@ -81,17 +83,20 @@ RenderCategory material_category(const char *texture) {
 	const std::string name = texture_basename(texture);
 	if (name == "caulk") return RENDER_CAULK;
 	if (name == "clip" || name.rfind("clip", 0) == 0 || (name.size() >= 4 && name.compare(name.size() - 4, 4, "clip") == 0)) return RENDER_CLIP;
+	if (name == "hint_skip") return RENDER_HINT_SKIP;
 	return RENDER_OPAQUE;
 }
 
 bool category_filtered(RenderCategory category, int mask) {
-	return (category == RENDER_CAULK && (mask & FILTER_CAULK)) || (category == RENDER_CLIP && (mask & FILTER_CLIPS));
+	return (category == RENDER_CAULK && (mask & FILTER_CAULK)) || (category == RENDER_CLIP && (mask & FILTER_CLIPS)) ||
+			(category == RENDER_HINT_SKIP && (mask & FILTER_HINT_SKIP));
 }
 
 const char *category_name(RenderCategory category) {
 	switch (category) {
 		case RENDER_CAULK: return "caulk";
 		case RENDER_CLIP: return "clip";
+		case RENDER_HINT_SKIP: return "hint_skip";
 		case RENDER_ENTITY: return "entity";
 		default: return "opaque";
 	}
@@ -140,7 +145,7 @@ String chunk_hash(const Chunk &chunk, const LMMapData &map, double scale) {
 
 Dictionary TBMapDocument::prepare_preview_chunks(double scale, const PackedInt64Array &hidden_ids, int filter_mask, int chunk_triangles, double chunk_size) {
 	preview_cache.reset();
-	if (!std::isfinite(scale) || scale <= 0 || !std::isfinite(chunk_size) || chunk_size <= 0 || chunk_triangles <= 0 || filter_mask < 0 || (filter_mask & ~(FILTER_ENTITIES | FILTER_CAULK | FILTER_CLIPS))) return Dictionary();
+	if (!std::isfinite(scale) || scale <= 0 || !std::isfinite(chunk_size) || chunk_size <= 0 || chunk_triangles <= 0 || filter_mask < 0 || (filter_mask & ~(FILTER_ENTITIES | FILTER_CAULK | FILTER_CLIPS | FILTER_HINT_SKIP))) return Dictionary();
 
 	auto prepared = std::make_shared<PreviewCache>();
 	prepared->source = map;

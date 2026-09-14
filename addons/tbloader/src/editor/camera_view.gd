@@ -11,12 +11,17 @@ var camera: Camera3D
 var geometry: Node3D
 var map_geometry: Node3D
 var overlays: Node3D
+var ground_grid: Node3D
 var grid_move_preview: Node3D
 var grid_move_preview_key = ""
 var candidate_offscreen := false
 var candidate_indicator: Label
 var preview_lights: Node3D
 var flying = false
+var rmb_down := false
+var rmb_was_flying := false
+var rmb_drag_distance := 0.0
+var rmb_dragging := false
 var selection_painting = false
 var ctrl_gesture := ""
 var ctrl_press_position := Vector2.ZERO
@@ -59,8 +64,13 @@ var camera_rotation_axis := 2
 var camera_rotation_pivot := Vector3.ZERO
 var camera_rotation_start := 0.0
 var camera_rotation_angle := 0.0
+var surface_grid_visible := false
+var surface_grid_key := ""
+var ground_grid_key := ""
 const CHUNK_TRIANGLES = 2048
 const CHUNK_SIZE = 64.0
+const GROUND_GRID_MIN_EXTENT = 2048.0
+const GROUND_GRID_MAJOR_INTERVAL = 8
 const DRAG_THRESHOLD = 4.0
 const MIN_FLY_SPEED = 1.0
 const MAX_FLY_SPEED = 64.0
@@ -87,12 +97,16 @@ func _ready() -> void:
 	viewport.msaa_3d = Viewport.MSAA_4X
 	viewport.render_target_update_mode = SubViewport.UPDATE_WHEN_VISIBLE
 	container.add_child(viewport)
+	_sync_suspension()
 	geometry = Node3D.new()
 	viewport.add_child(geometry)
 	map_geometry = Node3D.new()
 	geometry.add_child(map_geometry)
 	overlays = Node3D.new()
 	geometry.add_child(overlays)
+	ground_grid = Node3D.new()
+	ground_grid.name = "GroundGrid"
+	viewport.add_child(ground_grid)
 	grid_move_preview = Node3D.new()
 	grid_move_preview.name = "ExactCandidatePreview"
 	viewport.add_child(grid_move_preview)
@@ -124,7 +138,7 @@ func _ready() -> void:
 	orientation_gizmo.name = "CameraOrientation"
 	orientation_gizmo.allow_orbit = true
 	orientation_gizmo.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
-	orientation_gizmo.position = Vector2(-68, 4)
+	orientation_gizmo.position = Vector2(-68, 40)
 	orientation_gizmo.axis_selected.connect(snap_to_axis)
 	orientation_gizmo.orbit_dragged.connect(orbit_from_gizmo)
 	add_child(orientation_gizmo)
@@ -162,13 +176,18 @@ func _ready() -> void:
 	frame_button.icon = frame_icon
 	frame_button.text = ""
 	frame_button.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
-	frame_button.position = Vector2(-100, 4)
+	frame_button.position = Vector2(-32, 4)
 	frame_button.pressed.connect(frame_selection)
 	add_child(frame_button)
 	focus_exited.connect(cancel_interaction)
-	visibility_changed.connect(func():
-		if not is_visible_in_tree():
-			cancel_interaction())
+
+func _sync_suspension(force_suspended := false) -> void:
+	var active := not force_suspended and is_inside_tree() and is_visible_in_tree()
+	set_process(active)
+	if viewport != null:
+		viewport.render_target_update_mode = SubViewport.UPDATE_WHEN_VISIBLE if active else SubViewport.UPDATE_DISABLED
+	if not active:
+		cancel_interaction()
 
 func cancel_interaction() -> void:
 	cancel_gesture()
@@ -221,9 +240,9 @@ func update_hint() -> void:
 		return
 	var fps := Engine.get_frames_per_second()
 	if flying:
-		hint.text = "FLY • %.0f FPS • speed %.1f • FOV %.0f° • WASD / Q E • Esc / RMB release" % [float(fps), float(fly_speed), float(camera_fov)]
+		hint.text = "FLY • %.0f FPS • speed %.1f • FOV %.0f° • WASD / Q E • mouse look • RMB drag pan • RMB click / Esc exit" % [float(fps), float(fly_speed), float(camera_fov)]
 	else:
-		hint.text = "%.0f FPS • wheel dolly %.3f • Ctrl+wheel step • RMB fly" % [float(fps), float(dolly_step)]
+		hint.text = "%.0f FPS • wheel dolly %.3f • Ctrl+wheel step • RMB click fly • RMB drag pan" % [float(fps), float(dolly_step)]
 
 func handle_camera_wheel(event: InputEventMouseButton) -> bool:
 	if not event.pressed or event.button_index not in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]:
@@ -616,6 +635,24 @@ func add_selection_overlay(name_value: String, triangles: PackedVector3Array, co
 		instance.layers = loader.option_visual_layer_mask
 	overlays.add_child(instance)
 
+
+func add_selection_lines(name_value: String, lines: PackedVector3Array, color: Color, priority: int) -> void:
+	if lines.is_empty():
+		return
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = lines
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arrays)
+	var instance := MeshInstance3D.new()
+	instance.name = name_value
+	instance.mesh = mesh
+	instance.material_override = selection_overlay_material(color, priority)
+	var loader = host.session.loader.get_ref()
+	if is_instance_valid(loader):
+		instance.layers = loader.option_visual_layer_mask
+	overlays.add_child(instance)
+
 func append_face_triangles(target: PackedVector3Array, winding: PackedVector3Array, scale_value: float) -> void:
 	for index in range(1, winding.size() - 1):
 		target.append(transform_map_scaled(winding[0], scale_value))
@@ -623,6 +660,8 @@ func append_face_triangles(target: PackedVector3Array, winding: PackedVector3Arr
 		target.append(transform_map_scaled(winding[index + 1], scale_value))
 
 func build_overlays(scale_value: float) -> void:
+	if ground_grid_key != ground_grid_signature():
+		rebuild_ground_grid()
 	for marker in host.session.point_markers():
 		if not host.session.marker_visible():
 			continue
@@ -637,7 +676,7 @@ func build_overlays(scale_value: float) -> void:
 		instance.material_override = material
 		overlays.add_child(instance)
 	var brush_triangles := PackedVector3Array()
-	var face_triangles := PackedVector3Array()
+	var face_edges := PackedVector3Array()
 	for id in host.session.selected:
 		var brush: Dictionary = host.session.brush(id)
 		if not host.session.brush_visible(brush):
@@ -652,9 +691,12 @@ func build_overlays(scale_value: float) -> void:
 		if host.session.component_valid(component, brush) and host.session.brush_visible(brush):
 			var face: Dictionary = brush.faces[component.index]
 			if not host.session.material_filtered(face.texture):
-				append_face_triangles(face_triangles, face.winding, scale_value)
+				for index in face.winding.size():
+					face_edges.append(transform_map_scaled(face.winding[index], scale_value))
+					face_edges.append(transform_map_scaled(face.winding[(index + 1) % face.winding.size()], scale_value))
 	add_selection_overlay("SelectedBrushFill", brush_triangles, Color(1.0, 0.48, 0.14, 0.14), 1)
-	add_selection_overlay("SelectedFaceFill", face_triangles, Color(0.16, 0.5, 1.0, 0.38), 2)
+	add_selection_lines("SelectedFaceEdges", face_edges, Color(0.16, 0.5, 1.0, 1.0), 2)
+	build_surface_grid(scale_value)
 	if host.tool in ["Face", "Edge", "Vertex"]:
 		var handle_material = StandardMaterial3D.new()
 		handle_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -708,6 +750,184 @@ func build_overlays(scale_value: float) -> void:
 		instance.mesh = outline
 		overlays.add_child(instance)
 	rebuild_cut_overlay()
+
+func ground_grid_signature() -> String:
+	if not is_instance_valid(host) or host.session == null:
+		return ""
+	return "%d:%d:%d:%s:%s" % [host.session.document.get_instance_id(), host.session.preview_generation,
+		host.session.visibility_generation, host.session.grid, map_scale()]
+
+func ground_grid_extent(spacing: float) -> float:
+	var extent := maxf(GROUND_GRID_MIN_EXTENT, spacing * GROUND_GRID_MAJOR_INTERVAL * 8.0)
+	for brush in host.session.draw_data():
+		for value in [brush.aabb_min.x, brush.aabb_min.y, brush.aabb_max.x, brush.aabb_max.y]:
+			extent = maxf(extent, absf(value))
+	var major_spacing := spacing * GROUND_GRID_MAJOR_INTERVAL
+	return ceilf((extent + major_spacing * 2.0) / major_spacing) * major_spacing
+
+func add_ground_grid_lines(name_value: String, lines: PackedVector3Array, color: Color, priority: int) -> void:
+	if lines.is_empty():
+		return
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = lines
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arrays)
+	var instance := MeshInstance3D.new()
+	instance.name = name_value
+	instance.mesh = mesh
+	instance.material_override = selection_overlay_material(color, priority)
+	var loader = host.session.loader.get_ref()
+	if is_instance_valid(loader):
+		instance.layers = loader.option_visual_layer_mask
+	ground_grid.add_child(instance)
+
+func build_ground_grid(scale_value: float) -> void:
+	ground_grid_key = ground_grid_signature()
+	var spacing: float = host.session.grid
+	if spacing <= 0.0:
+		return
+	var extent := ground_grid_extent(spacing)
+	var steps := ceili(extent / spacing)
+	var minor := PackedVector3Array()
+	var major := PackedVector3Array()
+	var x_axis := PackedVector3Array([
+		transform_map_scaled(Vector3(-extent, 0, 0), scale_value),
+		transform_map_scaled(Vector3(extent, 0, 0), scale_value),
+	])
+	var y_axis := PackedVector3Array([
+		transform_map_scaled(Vector3(0, -extent, 0), scale_value),
+		transform_map_scaled(Vector3(0, extent, 0), scale_value),
+	])
+	for index in range(-steps, steps + 1):
+		if index == 0:
+			continue
+		var coordinate := index * spacing
+		var horizontal := [
+			transform_map_scaled(Vector3(-extent, coordinate, 0), scale_value),
+			transform_map_scaled(Vector3(extent, coordinate, 0), scale_value),
+			transform_map_scaled(Vector3(coordinate, -extent, 0), scale_value),
+			transform_map_scaled(Vector3(coordinate, extent, 0), scale_value),
+		]
+		if index % GROUND_GRID_MAJOR_INTERVAL == 0:
+			major.append_array(horizontal)
+		else:
+			minor.append_array(horizontal)
+	add_ground_grid_lines("MinorLines", minor, Color(0.68, 0.74, 0.8, 0.10), -3)
+	add_ground_grid_lines("MajorLines", major, Color(0.72, 0.79, 0.86, 0.22), -2)
+	add_ground_grid_lines("MapXAxis", x_axis, Color(0.88, 0.34, 0.3, 0.38), -1)
+	add_ground_grid_lines("MapYAxis", y_axis, Color(0.36, 0.76, 0.48, 0.38), -1)
+
+func rebuild_ground_grid() -> void:
+	if ground_grid == null:
+		return
+	for child in ground_grid.get_children():
+		ground_grid.remove_child(child)
+		child.queue_free()
+	build_ground_grid(map_scale())
+
+func surface_grid_signature() -> String:
+	if not is_instance_valid(host) or host.session == null:
+		return ""
+	return "%d:%d:%d:%s:%s" % [host.session.document.get_instance_id(), host.session.preview_generation,
+		host.session.visibility_generation, str(host.session.selected), host.session.grid]
+
+func toggle_surface_grid() -> void:
+	surface_grid_visible = not surface_grid_visible
+	rebuild_surface_grid_overlay()
+	if is_instance_valid(host) and host.has_method("set_status"):
+		host.set_status("Camera selected-surface grid: %s" % ("on" if surface_grid_visible else "off"))
+
+func rebuild_surface_grid_overlay() -> void:
+	if overlays == null:
+		return
+	var existing := overlays.get_node_or_null("SelectedSurfaceGrid")
+	if existing != null:
+		overlays.remove_child(existing)
+		existing.queue_free()
+	build_surface_grid(map_scale())
+
+func plane_polygon_segment(winding: PackedVector3Array, axis: int, coordinate: float) -> PackedVector3Array:
+	var intersections := PackedVector3Array()
+	var epsilon := maxf(host.session.grid * 0.00001, 0.00001)
+	for index in winding.size():
+		var a := winding[index]
+		var b := winding[(index + 1) % winding.size()]
+		var da := a[axis] - coordinate
+		var db := b[axis] - coordinate
+		if absf(da) <= epsilon:
+			intersections.append(a)
+		if (da < -epsilon and db > epsilon) or (da > epsilon and db < -epsilon):
+			intersections.append(a.lerp(b, da / (da - db)))
+	var unique := PackedVector3Array()
+	for point in intersections:
+		var duplicate := false
+		for candidate in unique:
+			if candidate.distance_squared_to(point) <= epsilon * epsilon:
+				duplicate = true
+				break
+		if not duplicate:
+			unique.append(point)
+	if unique.size() < 2:
+		return PackedVector3Array()
+	var result := PackedVector3Array([unique[0], unique[1]])
+	var longest := result[0].distance_squared_to(result[1])
+	for a in unique.size():
+		for b in range(a + 1, unique.size()):
+			var distance := unique[a].distance_squared_to(unique[b])
+			if distance > longest:
+				longest = distance
+				result[0] = unique[a]
+				result[1] = unique[b]
+	return result
+
+func build_surface_grid(scale_value: float) -> void:
+	surface_grid_key = surface_grid_signature()
+	if not surface_grid_visible or host.session.selected.is_empty():
+		return
+	var spacing: float = host.session.grid
+	if spacing <= 0.0:
+		return
+	var lines := PackedVector3Array()
+	for id in host.session.selected:
+		var brush: Dictionary = host.session.brush(id)
+		if not host.session.brush_visible(brush):
+			continue
+		for face in brush.faces:
+			var winding: PackedVector3Array = face.winding
+			if winding.size() < 3 or host.session.material_filtered(face.texture):
+				continue
+			var offset: Vector3 = face.normal.normalized() * maxf(spacing * 0.0001, 0.001)
+			for axis in 3:
+				var minimum := winding[0][axis]
+				var maximum := minimum
+				for point in winding:
+					minimum = minf(minimum, point[axis])
+					maximum = maxf(maximum, point[axis])
+				if maximum - minimum <= maxf(spacing * 0.00001, 0.00001):
+					continue
+				var first := ceili(minimum / spacing)
+				var last := floori(maximum / spacing)
+				for step in range(first, last + 1):
+					var segment := plane_polygon_segment(winding, axis, step * spacing)
+					if segment.size() == 2:
+						lines.append(transform_map_scaled(segment[0] + offset, scale_value))
+						lines.append(transform_map_scaled(segment[1] + offset, scale_value))
+	if lines.is_empty():
+		return
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = lines
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arrays)
+	var instance := MeshInstance3D.new()
+	instance.name = "SelectedSurfaceGrid"
+	instance.mesh = mesh
+	instance.material_override = selection_overlay_material(Color(0.86, 0.92, 1.0, 0.62), 3)
+	var loader = host.session.loader.get_ref()
+	if is_instance_valid(loader):
+		instance.layers = loader.option_visual_layer_mask
+	overlays.add_child(instance)
 
 func rebuild_cut_overlay() -> void:
 	if overlays == null or not is_instance_valid(host):
@@ -927,7 +1147,10 @@ func _gui_input(event: InputEvent) -> void:
 			accept_event()
 		elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
 			cancel_gesture()
-			start_fly()
+			begin_rmb()
+			accept_event()
+		elif event.button_index == MOUSE_BUTTON_RIGHT:
+			finish_rmb()
 			accept_event()
 		elif event.button_index == MOUSE_BUTTON_LEFT:
 			if event.pressed:
@@ -951,6 +1174,9 @@ func _gui_input(event: InputEvent) -> void:
 		if event.pressed and event.keycode == KEY_ESCAPE and (ctrl_gesture != "" or camera_gesture != ""):
 			cancel_gesture()
 			accept_event()
+		elif event.pressed and not event.echo and event.keycode == KEY_G:
+			toggle_surface_grid()
+			accept_event()
 		elif host.route_key(event, host.active_graph):
 			accept_event()
 
@@ -958,8 +1184,8 @@ func face_hit(position: Vector2) -> Dictionary:
 	var scale_value := map_scale()
 	var ray := camera.project_ray_origin(position)
 	var direction := camera.project_ray_normal(position)
-	var hits: Array = host.session.visible_ray_hits(preview_to_map(ray, scale_value), preview_direction_to_map(direction), 1e30)
-	return hits[0] if not hits.is_empty() else {}
+	return host.session.nearest_visible_ray_hit(preview_to_map(ray, scale_value),
+		preview_direction_to_map(direction), 1e30)
 
 func face_component(hit: Dictionary) -> Dictionary:
 	if hit.is_empty():
@@ -990,8 +1216,6 @@ func begin_ctrl_gesture(position: Vector2) -> void:
 	else:
 		ctrl_gesture = "paint_pending"
 		ctrl_paint_select = not host.session.components.has(component)
-		if host.session.selected.is_empty():
-			apply_pick(component.brush_id, 0, component.index, false, false, true)
 
 func prepare_ctrl_resize(source: Dictionary, hit_position: Vector3) -> void:
 	var source_brush: Dictionary = host.session.brush(source.brush_id)
@@ -1043,8 +1267,12 @@ func paint_face(hit: Dictionary) -> void:
 		components.remove_at(index)
 	else:
 		return
-	host.session.components = components.filter(func(item): return host.session.component_valid(item, host.session.brush(item.brush_id)))
-	host.session.changed.emit()
+	var selected: PackedInt64Array = host.session.selected.duplicate()
+	if not ctrl_paint_select and not components.any(func(item): return item.brush_id == component.brush_id):
+		var selected_index := selected.find(component.brush_id)
+		if selected_index >= 0:
+			selected.remove_at(selected_index)
+	set_face_selection(selected, components)
 
 func update_ctrl_resize(position: Vector2) -> void:
 	if ctrl_resize_normal.is_zero_approx() or ctrl_resize_components.is_empty():
@@ -1065,7 +1293,11 @@ func update_ctrl_resize(position: Vector2) -> void:
 func finish_ctrl_gesture() -> void:
 	if ctrl_gesture in ["paint_pending", "resize_pending", "click"]:
 		var component := face_component(ctrl_start_hit)
-		apply_pick(component.get("brush_id", 0), 0, component.get("index", -1), false, false, true)
+		if ctrl_gesture == "resize_pending":
+			# The pending resize face is only press feedback; quick release toggles
+			# against the selection that existed before that feedback.
+			host.session.components.clear()
+		apply_pick(component.get("brush_id", 0), 0, component.get("index", -1), true, false, true)
 	elif ctrl_gesture == "resize" and not ctrl_resize_delta.is_zero_approx():
 		var components := ctrl_resize_components.duplicate(true)
 		var movement := ctrl_resize_delta
@@ -1101,14 +1333,13 @@ func pick(position: Vector2, additive: bool, paint = false, face_pick = false) -
 	var id = 0
 	var face_index = -1
 	var max_distance: float = nearest if is_finite(nearest) else 1e30
-	for hit in host.session.visible_ray_hits(map_ray, preview_direction_to_map(direction), max_distance):
-		if hit.distance >= nearest:
-			continue
+	var hit: Dictionary = host.session.nearest_visible_ray_hit(map_ray,
+		preview_direction_to_map(direction), max_distance)
+	if not hit.is_empty() and hit.distance < nearest:
 		nearest = hit.distance
 		id = hit.brush_id
 		point_id = 0
 		face_index = hit.face_index
-		break
 	apply_pick(id, point_id, face_index, additive, paint, face_pick)
 
 func apply_pick(id: int, point_id: int, face_index: int, additive: bool, paint = false, face_pick = false) -> void:
@@ -1122,17 +1353,17 @@ func apply_pick(id: int, point_id: int, face_index: int, additive: bool, paint =
 			if not additive:
 				host.session.select(PackedInt64Array())
 			return
-		if not ids.has(id):
-			ids.append(id)
-		host.session.select(ids)
 		var component = {"brush_id": id, "kind": "face", "index": face_index, "topology_revision": host.session.brush(id).topology_revision}
 		var existing := components.find(component)
 		if additive and existing >= 0:
 			components.remove_at(existing)
+			if not components.any(func(item): return item.brush_id == id) and ids.has(id):
+				ids.remove_at(ids.find(id))
 		else:
+			if not ids.has(id):
+				ids.append(id)
 			components.append(component)
-		host.session.components = components.filter(func(item): return host.session.component_valid(item, host.session.brush(item.brush_id)))
-		host.session.changed.emit()
+		set_face_selection(ids, components)
 		return
 	var ids = host.session.selected.duplicate() if additive else PackedInt64Array()
 	if id:
@@ -1143,6 +1374,13 @@ func apply_pick(id: int, point_id: int, face_index: int, additive: bool, paint =
 			ids.append(id)
 	host.session.select(ids)
 
+func set_face_selection(ids: PackedInt64Array, components: Array) -> void:
+	host.session.selected = ids
+	host.session.points.clear()
+	host.session.components = components.filter(func(item): return host.session.component_valid(item, host.session.brush(item.brush_id)))
+	host.session.prune()
+	host.session.changed.emit()
+
 func start_fly() -> void:
 	cancel_gesture()
 	flying = true
@@ -1151,6 +1389,26 @@ func start_fly() -> void:
 	held.clear()
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 	update_hint()
+
+func begin_rmb() -> void:
+	if rmb_down:
+		return
+	rmb_down = true
+	rmb_was_flying = flying
+	rmb_drag_distance = 0.0
+	rmb_dragging = false
+	if not flying:
+		start_fly()
+
+func finish_rmb() -> void:
+	if not rmb_down:
+		return
+	var keep_flying := rmb_was_flying if rmb_dragging else not rmb_was_flying
+	rmb_down = false
+	rmb_drag_distance = 0.0
+	rmb_dragging = false
+	if not keep_flying:
+		stop_fly()
 
 func stop_fly() -> void:
 	cancel_gesture()
@@ -1161,6 +1419,10 @@ func stop_fly() -> void:
 		crosshair.hide()
 	selection_painting = false
 	held.clear()
+	rmb_down = false
+	rmb_was_flying = false
+	rmb_drag_distance = 0.0
+	rmb_dragging = false
 	update_hint()
 
 func _input(event: InputEvent) -> void:
@@ -1170,8 +1432,11 @@ func _input(event: InputEvent) -> void:
 		if handle_camera_wheel(event):
 			get_viewport().set_input_as_handled()
 			return
-		if event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
-			stop_fly()
+		if event.button_index == MOUSE_BUTTON_RIGHT:
+			if event.pressed:
+				begin_rmb()
+			else:
+				finish_rmb()
 		elif event.button_index == MOUSE_BUTTON_LEFT:
 			selection_painting = event.pressed and event.shift_pressed and not event.ctrl_pressed and host.session.components.is_empty()
 			if event.pressed:
@@ -1187,9 +1452,16 @@ func _input(event: InputEvent) -> void:
 			if not event.shift_pressed:
 				selection_painting = false
 	elif event is InputEventMouseMotion:
-		yaw -= event.relative.x * 0.003
-		pitch = clampf(pitch - event.relative.y * 0.003, -1.55, 1.55)
-		camera.rotation = Vector3(pitch, yaw, 0)
+		if rmb_down:
+			rmb_drag_distance += event.relative.length()
+			rmb_dragging = rmb_dragging or rmb_drag_distance >= DRAG_THRESHOLD
+			var pan_scale := fly_speed * 0.01
+			camera.position += camera.global_basis.x * event.relative.x * pan_scale
+			camera.position += (-camera.global_basis.z if event.shift_pressed else camera.global_basis.y) * -event.relative.y * pan_scale
+		else:
+			yaw -= event.relative.x * 0.003
+			pitch = clampf(pitch - event.relative.y * 0.003, -1.55, 1.55)
+			camera.rotation = Vector3(pitch, yaw, 0)
 		if selection_painting:
 			if event.shift_pressed:
 				pick_crosshair(true, true)
@@ -1210,9 +1482,23 @@ func _process(dt: float) -> void:
 			float(held.get(KEY_S, false)) - float(held.get(KEY_W, false)))
 		camera.position += camera.basis * direction.normalized() * dt * fly_speed * (FAST_FLY_FACTOR if held.get(KEY_SHIFT, false) else 1.0)
 		orbit_target = camera.position - camera.global_basis.z * orbit_distance
+	if surface_grid_visible and surface_grid_key != surface_grid_signature():
+		rebuild_surface_grid_overlay()
+	if ground_grid_key != ground_grid_signature():
+		rebuild_ground_grid()
 	sync_camera_marker()
 	update_orientation_gizmo()
 
 func _notification(what: int) -> void:
-	if what in [NOTIFICATION_APPLICATION_FOCUS_OUT, NOTIFICATION_WM_WINDOW_FOCUS_OUT, NOTIFICATION_EXIT_TREE]:
+	if what == NOTIFICATION_EXIT_TREE:
+		_sync_suspension(true)
+	elif what == NOTIFICATION_ENTER_TREE:
+		call_deferred("_sync_suspension")
+	elif what == NOTIFICATION_VISIBILITY_CHANGED:
+		if is_visible_in_tree():
+			set_process(true)
+			call_deferred("_sync_suspension")
+		else:
+			_sync_suspension()
+	if what in [NOTIFICATION_APPLICATION_FOCUS_OUT, NOTIFICATION_WM_WINDOW_FOCUS_OUT]:
 		cancel_interaction()

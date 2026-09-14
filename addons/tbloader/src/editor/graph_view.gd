@@ -11,6 +11,7 @@ var view_states: Dictionary = {}
 var gesture = ""
 var start = Vector2.ZERO
 var cursor = Vector2.ZERO
+var pan_origin = Vector3.ZERO
 var anchor = Vector3.ZERO
 var delta = Vector3.ZERO
 var resize_face: Dictionary = {}
@@ -35,12 +36,18 @@ var rotation_angle = 0.0
 var camera_position = Vector3.ZERO
 var camera_direction = Vector3.ZERO
 var camera_pose_valid = false
-var dense_edge_cache_key = ""
+var dense_edge_cache_key = "" # Compatibility/debug token; cache validity uses the fields below.
+var dense_cache_document_id = 0
+var dense_cache_revision = -1
+var dense_cache_visibility_generation = -1
+var dense_cache_selection_generation = -1
+var dense_cache_orientation = -1
 var dense_unselected_edges := PackedVector2Array()
 var dense_selected_edges := PackedVector2Array()
 var orientation_gizmo: Control
 var camera_views: Array[WeakRef] = []
 const DENSE_EDGE_THRESHOLD = 1024
+const CONTEXT_DRAG_THRESHOLD = 4.0
 
 func _ready() -> void:
 	focus_mode = Control.FOCUS_ALL
@@ -61,7 +68,7 @@ func _ready() -> void:
 	add_child(orientation_gizmo)
 	var frame_button := compact_frame_button()
 	frame_button.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
-	frame_button.position = Vector2(-72, 4)
+	frame_button.position = Vector2(-32, 4)
 	add_child(frame_button)
 	update_orientation_gizmo()
 	focus_exited.connect(cancel)
@@ -371,11 +378,24 @@ func map_edge_point(point: Vector3) -> Vector2:
 	return Vector2(point[a.x], point[a.y])
 
 func current_dense_edge_key() -> String:
-	var hidden_ids: Array = host.session.hidden.keys()
-	hidden_ids.sort()
-	return "%d:%d:%d:%d:%s:%s" % [host.session.document.get_instance_id(),
-		host.session.document.get_revision(), host.session.visibility_generation, orientation,
-		str(hidden_ids), str(host.session.selected)]
+	return "%d:%d:%d:%d:%d" % [host.session.document.get_instance_id(),
+		host.session.document.get_revision(), host.session.visibility_generation,
+		host.session.selection_generation, orientation]
+
+func dense_edge_cache_matches() -> bool:
+	return (dense_cache_document_id == host.session.document.get_instance_id()
+		and dense_cache_revision == host.session.document.get_revision()
+		and dense_cache_visibility_generation == host.session.visibility_generation
+		and dense_cache_selection_generation == host.session.selection_generation
+		and dense_cache_orientation == orientation)
+
+func capture_dense_edge_cache_state() -> void:
+	dense_cache_document_id = host.session.document.get_instance_id()
+	dense_cache_revision = host.session.document.get_revision()
+	dense_cache_visibility_generation = host.session.visibility_generation
+	dense_cache_selection_generation = host.session.selection_generation
+	dense_cache_orientation = orientation
+	dense_edge_cache_key = current_dense_edge_key()
 
 func rebuild_dense_edge_cache() -> void:
 	dense_unselected_edges.clear()
@@ -390,11 +410,10 @@ func rebuild_dense_edge_cache() -> void:
 			else:
 				dense_unselected_edges.append(map_edge_point(brush.edges[i]))
 				dense_unselected_edges.append(map_edge_point(brush.edges[i + 1]))
-	dense_edge_cache_key = current_dense_edge_key()
+	capture_dense_edge_cache_state()
 
 func draw_dense_edges(dynamic_selection: bool) -> void:
-	var key := current_dense_edge_key()
-	if dense_edge_cache_key != key:
+	if not dense_edge_cache_matches():
 		rebuild_dense_edge_cache()
 	var a := axes()
 	var canvas_origin: Vector2 = size * 0.5 + Vector2(-origin[a.x], origin[a.y]) * zoom
@@ -406,12 +425,12 @@ func draw_dense_edges(dynamic_selection: bool) -> void:
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 func apply_dense_translation(movement: Vector3) -> void:
-	if dense_edge_cache_key.is_empty():
+	if dense_cache_revision < 0:
 		return
 	var projected := map_edge_point(movement)
 	for i in dense_selected_edges.size():
 		dense_selected_edges[i] += projected
-	dense_edge_cache_key = current_dense_edge_key()
+	capture_dense_edge_cache_state()
 
 func _gui_input(event: InputEvent) -> void:
 	if event is InputEventKey:
@@ -437,11 +456,15 @@ func _gui_input(event: InputEvent) -> void:
 			return
 		if event.button_index == MOUSE_BUTTON_RIGHT:
 			if event.pressed:
-				gesture = "box" if event.shift_pressed else "pan"
+				gesture = "box" if event.shift_pressed else ("pan" if event.ctrl_pressed or event.alt_pressed or event.meta_pressed else "pan_candidate")
 				start = event.position
 				cursor = start
+				pan_origin = origin
 			elif gesture == "box":
 				box_select(event.position)
+				cancel()
+			elif gesture == "pan_candidate":
+				host.open_entity_menu(self, event.position)
 				cancel()
 			else:
 				cancel()
@@ -463,10 +486,13 @@ func _gui_input(event: InputEvent) -> void:
 				cancel()
 			accept_event()
 			return
+		if gesture == "pan_candidate" and cursor.distance_to(start) > CONTEXT_DRAG_THRESHOLD:
+			gesture = "pan"
 		if gesture == "pan":
 			var a = axes()
-			origin[a.x] -= event.relative.x / zoom
-			origin[a.y] += event.relative.y / zoom
+			origin = pan_origin
+			origin[a.x] -= (cursor.x - start.x) / zoom
+			origin[a.y] += (cursor.y - start.y) / zoom
 		elif gesture == "rotate":
 			var center = project(rotation_pivot)
 			if cursor.distance_to(center) > 0.001:

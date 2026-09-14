@@ -111,6 +111,7 @@ public:
 	Dictionary get_preview_chunk(const String &chunk_id) const;
 	PackedInt64Array query_brushes_2d(int hidden_axis, Vector3 mins, Vector3 maxs) const;
 	Array query_ray(Vector3 origin, Vector3 direction, double max_distance = 1e30) const;
+	Dictionary query_ray_nearest_visible(Vector3 origin, Vector3 direction, double max_distance, const PackedInt64Array &hidden_ids, int filter_mask) const;
 	Dictionary create_cuboid(Vector3 mins, Vector3 maxs, const String &texture);
 	Dictionary duplicate_brushes(const PackedInt64Array &ids);
 	Dictionary merge_brushes(const PackedInt64Array &ids);

@@ -194,6 +194,55 @@ func test_spatial_queries() -> void:
 	checks.check(ray_doc.query_ray(Vector3.ZERO, Vector3(NAN, 0, 0)).is_empty(), "ray rejects non-finite direction")
 	checks.check(ray_doc.query_ray(Vector3.ZERO, Vector3.RIGHT, -1).is_empty(), "ray rejects negative max distance")
 	checks.check(ray_doc.query_ray(Vector3.ZERO, Vector3.RIGHT, INF).is_empty(), "ray rejects non-finite max distance")
+	var nearest: Dictionary = ray_doc.query_ray_nearest_visible(Vector3(-10, 5, 5), Vector3.RIGHT,
+		1e30, PackedInt64Array(), 0)
+	checks.check(nearest.get("brush_id", 0) == ray_first and nearest.get("distance", -1.0) == 10.0,
+		"nearest ray returns only the closest visible face")
+	nearest = ray_doc.query_ray_nearest_visible(Vector3(-10, 5, 5), Vector3.RIGHT,
+		1e30, PackedInt64Array([ray_first]), 0)
+	checks.check(nearest.get("brush_id", 0) == ray_second and nearest.get("distance", -1.0) == 30.0,
+		"nearest ray skips hidden front brushes")
+	checks.check(ray_doc.query_ray_nearest_visible(Vector3(-10, 5, 5), Vector3.RIGHT,
+		9.999, PackedInt64Array(), 0).is_empty(), "nearest ray respects max distance")
+
+	var filtered_ray_doc = ClassDB.instantiate("TBMapDocument")
+	var caulk: int = filtered_ray_doc.create_cuboid(Vector3.ZERO, Vector3(10, 10, 10), "common/caulk").value
+	var clip: int = filtered_ray_doc.create_cuboid(Vector3(20, 0, 0), Vector3(30, 10, 10), "common/playerclip").value
+	var solid: int = filtered_ray_doc.create_cuboid(Vector3(40, 0, 0), Vector3(50, 10, 10), "stone").value
+	nearest = filtered_ray_doc.query_ray_nearest_visible(Vector3(-10, 5, 5), Vector3.RIGHT,
+		1e30, PackedInt64Array(), 2)
+	checks.check(nearest.get("brush_id", 0) == clip, "nearest ray passes through filtered caulk")
+	nearest = filtered_ray_doc.query_ray_nearest_visible(Vector3(-10, 5, 5), Vector3.RIGHT,
+		1e30, PackedInt64Array(), 6)
+	checks.check(nearest.get("brush_id", 0) == solid, "nearest ray passes through filtered caulk and clip")
+	checks.check(not filtered_ray_doc.query_ray_nearest_visible(Vector3(-10, 5, 5), Vector3.RIGHT,
+		1e30, PackedInt64Array([caulk, clip, solid]), 0).has("brush_id"), "nearest ray returns empty when all brushes are hidden")
+
+	nearest = ray_doc.query_ray_nearest_visible(Vector3(5, 5, 5), Vector3.RIGHT,
+		1e30, PackedInt64Array(), 0)
+	checks.check(nearest.get("brush_id", 0) == ray_first and nearest.get("distance", -1.0) == 5.0,
+		"nearest ray exits a brush containing its origin")
+	var tied_ray_doc = ClassDB.instantiate("TBMapDocument")
+	var tied_first: int = tied_ray_doc.create_cuboid(Vector3.ZERO, Vector3.ONE * 10, "first").value
+	tied_ray_doc.create_cuboid(Vector3.ZERO, Vector3.ONE * 10, "second")
+	nearest = tied_ray_doc.query_ray_nearest_visible(Vector3(-10, 5, 5), Vector3.RIGHT,
+		1e30, PackedInt64Array(), 0)
+	checks.check(nearest.get("brush_id", 0) == tied_first, "nearest ray resolves exact ties by source order")
+
+	var hint_ray_doc = ClassDB.instantiate("TBMapDocument")
+	hint_ray_doc.create_cuboid(Vector3.ZERO, Vector3.ONE * 10, "common/hint_skip")
+	var behind_hint: int = hint_ray_doc.create_cuboid(Vector3(20, 0, 0), Vector3(30, 10, 10), "stone").value
+	nearest = hint_ray_doc.query_ray_nearest_visible(Vector3(-10, 5, 5), Vector3.RIGHT,
+		1e30, PackedInt64Array(), 8)
+	checks.check(nearest.get("brush_id", 0) == behind_hint, "nearest ray passes through filtered hint/skip")
+
+	var entity_ray_doc = ClassDB.instantiate("TBMapDocument")
+	var entity_front: int = entity_ray_doc.create_cuboid(Vector3.ZERO, Vector3.ONE * 10, "entity").value
+	var world_behind: int = entity_ray_doc.create_cuboid(Vector3(20, 0, 0), Vector3(30, 10, 10), "world").value
+	expect_ok(entity_ray_doc.group_brushes(PackedInt64Array([entity_front]), "func_detail"), "group nearest-ray entity fixture")
+	nearest = entity_ray_doc.query_ray_nearest_visible(Vector3(-10, 5, 5), Vector3.RIGHT,
+		1e30, PackedInt64Array(), 1)
+	checks.check(nearest.get("brush_id", 0) == world_behind, "nearest ray passes through filtered entity brushes")
 
 	# Warm the lazy index, then exercise every geometry-cache replacement path.
 	var original = doc.capture_history_state()
@@ -248,16 +297,19 @@ func test_preview_chunks() -> void:
 	expect_ok(mixed.set_face_texture(mixed_id, 0, "TOOLS/CAULK.TGA", mixed_brush.topology_revision), "set mixed caulk face")
 	mixed_brush = brush_data(mixed, mixed_id)
 	expect_ok(mixed.set_face_texture(mixed_id, 1, "common/player_clip", mixed_brush.topology_revision), "set mixed clip face")
+	mixed_brush = brush_data(mixed, mixed_id)
+	expect_ok(mixed.set_face_texture(mixed_id, 2, "common/hint_skip", mixed_brush.topology_revision), "set mixed hint_skip face")
 	var mixed_source: String = mixed.export_text().value
 	var mixed_manifest: Dictionary = mixed.prepare_preview_chunks(1.0, PackedInt64Array(), 0)
 	var mixed_categories: Dictionary = {}
 	for mixed_chunk in mixed_manifest.chunks:
 		mixed_categories[mixed_chunk.render_category] = mixed_categories.get(mixed_chunk.render_category, 0) + mixed_chunk.triangle_count
-	checks.check(mixed_categories == {"opaque": 8, "caulk": 2, "clip": 2}, "mixed-material preview classifies only matching faces as translucent")
+	checks.check(mixed_categories == {"opaque": 6, "caulk": 2, "clip": 2, "hint_skip": 2}, "mixed-material preview classifies special faces")
 	checks.check(mixed.export_text().value == mixed_source, "preview transparency classification does not modify source map data")
 	checks.check(mixed.prepare_preview_chunks(1.0, PackedInt64Array(), 2).triangle_count == 10, "caulk basename filter removes only matching mixed-material face")
 	checks.check(mixed.prepare_preview_chunks(1.0, PackedInt64Array(), 4).triangle_count == 10, "clip suffix basename filter removes only matching mixed-material face")
 	checks.check(mixed.prepare_preview_chunks(1.0, PackedInt64Array(), 6).triangle_count == 8, "combined material filters retain visible mixed-material faces")
+	checks.check(mixed.prepare_preview_chunks(1.0, PackedInt64Array(), 8).triangle_count == 10, "hint_skip filter removes only matching faces")
 
 	var owned = ClassDB.instantiate("TBMapDocument")
 	var owned_id: int = owned.create_cuboid(Vector3.ZERO, Vector3.ONE * 16, "visible/stone").value
@@ -314,7 +366,7 @@ func test_preview_chunks() -> void:
 	checks.check(change.get_preview_chunk(current_id).is_empty(), "map replacement invalidates prepared chunk access")
 
 	checks.check(doc.get_preview_chunk("missing").is_empty(), "invalid preview chunk ID is safe")
-	for invalid in [doc.prepare_preview_chunks(0.0, PackedInt64Array(), 0), doc.prepare_preview_chunks(NAN, PackedInt64Array(), 0), doc.prepare_preview_chunks(INF, PackedInt64Array(), 0), doc.prepare_preview_chunks(1.0, PackedInt64Array(), 8), doc.prepare_preview_chunks(1.0, PackedInt64Array(), 0, 0), doc.prepare_preview_chunks(1.0, PackedInt64Array(), 0, 1, 0.0), doc.prepare_preview_chunks(1.0, PackedInt64Array(), 0, 1, INF)]:
+	for invalid in [doc.prepare_preview_chunks(0.0, PackedInt64Array(), 0), doc.prepare_preview_chunks(NAN, PackedInt64Array(), 0), doc.prepare_preview_chunks(INF, PackedInt64Array(), 0), doc.prepare_preview_chunks(1.0, PackedInt64Array(), 16), doc.prepare_preview_chunks(1.0, PackedInt64Array(), 0, 0), doc.prepare_preview_chunks(1.0, PackedInt64Array(), 0, 1, 0.0), doc.prepare_preview_chunks(1.0, PackedInt64Array(), 0, 1, INF)]:
 		checks.check(invalid.is_empty(), "invalid preview preparation option is rejected safely")
 	checks.check(doc.get_preview_chunk(entry.chunk_id).is_empty(), "invalid preparation clears the previous prepared cache")
 	var patches = ClassDB.instantiate("TBMapDocument")

@@ -15,8 +15,10 @@ var materials_button: Button = null
 var materials_count_label: Label = null
 var materials_context_label: Label = null
 var built_materials_page: Control = null
-var authoring_materials_page: Control = null
 var materials_preview_generation := 0
+var uv_panel: Control = null
+var entities_panel: Control = null
+var entities_pane: Control = null
 var map_editor: Control = null
 var map_screen_active = false
 var spatial_actions: Dictionary = {}
@@ -33,6 +35,10 @@ func _enter_tree():
 	add_inspector_plugin(inspector_plugin)
 	materials_panel = create_materials_panel()
 	add_control_to_bottom_panel(materials_panel, "Map Materials")
+	uv_panel = map_editor.create_material_workspace()
+	add_control_to_bottom_panel(uv_panel, "UV")
+	entities_panel = create_entities_panel()
+	add_control_to_bottom_panel(entities_panel, "Entities")
 	get_editor_interface().get_editor_main_screen().add_child(map_editor)
 	map_editor.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	map_editor.hide()
@@ -48,6 +54,8 @@ func _exit_tree():
 	if inspector_plugin != null:
 		remove_inspector_plugin(inspector_plugin)
 		inspector_plugin = null
+	if entities_pane != null:
+		entities_pane.clear()
 	map_editor.store_recovery()
 	map_editor.shutdown()
 	if scene_changed.is_connected(edited_scene_changed):
@@ -66,6 +74,13 @@ func _exit_tree():
 		wrapper.queue_free()
 	map_editor.queue_free()
 	map_editor = null
+	remove_control_from_bottom_panel(entities_panel)
+	entities_panel.queue_free()
+	entities_panel = null
+	entities_pane = null
+	remove_control_from_bottom_panel(uv_panel)
+	uv_panel.queue_free()
+	uv_panel = null
 	remove_control_from_bottom_panel(materials_panel)
 	materials_panel.queue_free()
 	materials_panel = null
@@ -219,8 +234,6 @@ func create_materials_panel() -> Control:
 	materials_context_label = Label.new()
 	materials_context_label.name = "MaterialContext"
 	panel.add_child(materials_context_label)
-	authoring_materials_page = map_editor.create_material_workspace()
-	panel.add_child(authoring_materials_page)
 	built_materials_page = VBoxContainer.new()
 	built_materials_page.name = "BuiltMaterials"
 	built_materials_page.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -230,10 +243,9 @@ func create_materials_panel() -> Control:
 	materials_count_label = Label.new()
 	materials_count_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	header.add_child(materials_count_label)
-
 	var refresh_button = Button.new()
 	refresh_button.text = "Refresh"
-	refresh_button.connect("pressed", Callable(self, "refresh_materials"))
+	refresh_button.pressed.connect(refresh_materials)
 	header.add_child(refresh_button)
 	var view = OptionButton.new()
 	view.add_item("Grid")
@@ -251,7 +263,7 @@ func create_materials_panel() -> Control:
 	materials_tree.set_column_titles_visible(true)
 	materials_tree.set_column_expand(0, true)
 	materials_tree.set_column_expand(1, true)
-	materials_tree.connect("item_selected", Callable(self, "material_selected"))
+	materials_tree.item_selected.connect(material_selected)
 	built_materials_page.add_child(materials_tree)
 	materials_grid = ItemList.new()
 	materials_grid.name = "MaterialGrid"
@@ -266,59 +278,79 @@ func create_materials_panel() -> Control:
 	built_materials_page.add_child(materials_grid)
 	set_materials_grid_view(true)
 	update_materials_context()
+	return panel
 
+func create_entities_panel() -> Control:
+	var panel := VBoxContainer.new()
+	panel.name = "MapEntitiesBottomPanel"
+	panel.custom_minimum_size.y = 220
+	entities_pane = preload("res://addons/tbloader/src/editor/entity_pane.gd").new()
+	entities_pane.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	panel.add_child(entities_pane)
 	return panel
 
 func update_materials_context() -> void:
-	if authoring_materials_page == null or built_materials_page == null:
+	if materials_context_label == null:
 		return
-	var editable_session := editable_material_session()
-	authoring_materials_page.visible = editable_session != null
-	built_materials_page.visible = editable_session == null
-	if editable_session != null:
-		var path: String = editable_session.document.get_path()
-		materials_context_label.text = "Editing map materials • " + (path.get_file() if not path.is_empty() else "Untitled")
-	else:
-		var loader = editing_loader.get_ref()
-		materials_context_label.text = "Built materials • " + (loader.name if is_instance_valid(loader) else "No TBLoader selected")
+	var loader = material_loader()
+	materials_context_label.text = "Map materials • " + (loader.name if is_instance_valid(loader) else "No bound or selected TBLoader")
 
-func editable_material_session() -> RefCounted:
-	if map_editor == null or map_editor.session == null:
-		return null
-	if map_screen_active or map_editor.is_visible_in_tree():
-		return map_editor.session
-	var bound_loader = map_editor.session.loader.get_ref()
-	if not is_instance_valid(bound_loader):
-		return null
-	var selected_loader = editing_loader.get_ref()
-	return map_editor.session if not is_instance_valid(selected_loader) or selected_loader == bound_loader else null
+func material_loader():
+	if map_screen_active and map_editor != null and map_editor.session != null:
+		var active_loader = map_editor.session.loader.get_ref()
+		if is_instance_valid(active_loader):
+			return active_loader
+	return editing_loader.get_ref()
 
 func set_materials_grid_view(enabled: bool) -> void:
-	if materials_grid != null:
-		materials_grid.visible = enabled
-	if materials_tree != null:
-		materials_tree.visible = not enabled
+	materials_grid.visible = enabled
+	materials_tree.visible = not enabled
 
 func show_materials():
 	update_materials_context()
-	if editable_material_session() == null:
-		refresh_materials()
+	refresh_materials()
 	make_bottom_panel_item_visible(materials_panel)
 
-func refresh_materials():
+func show_uv() -> void:
+	update_bottom_panel_sessions()
+	make_bottom_panel_item_visible(uv_panel)
+
+func toggle_uv() -> void:
+	if uv_panel.is_visible_in_tree():
+		hide_bottom_panel()
+	else:
+		show_uv()
+
+func show_entities_panel() -> void:
+	update_bottom_panel_sessions()
+	make_bottom_panel_item_visible(entities_panel)
+	entities_pane.entity_list.grab_focus()
+
+func toggle_entities_panel() -> bool:
+	if entities_panel.is_visible_in_tree():
+		hide_bottom_panel()
+		return false
+	show_entities_panel()
+	return true
+
+func update_bottom_panel_sessions() -> void:
+	if entities_pane != null and map_editor != null:
+		entities_pane.set_session(map_editor.session)
+	update_materials_context()
+	refresh_materials()
+
+func refresh_materials() -> void:
 	if materials_tree == null or materials_grid == null:
 		return
-
 	materials_preview_generation += 1
 	materials_tree.clear()
 	materials_grid.clear()
 	var root = materials_tree.create_item()
-	var loader = editing_loader.get_ref()
-	if loader == null:
-		materials_count_label.text = "Select a TBLoader node to view its materials."
+	var loader = material_loader()
+	if not is_instance_valid(loader):
+		materials_count_label.text = "Bind a Radiant session or select a TBLoader to view its materials."
 		materials_button.text = "Map Materials"
 		return
-
 	var materials = {}
 	for mesh_instance in loader.find_children("*", "MeshInstance3D", true, false):
 		add_material(materials, mesh_instance.material_override, loader)
@@ -329,7 +361,6 @@ func refresh_materials():
 			if material == null:
 				material = mesh_instance.mesh.surface_get_material(surface_index)
 			add_material(materials, material, loader)
-
 	var entries = materials.values()
 	entries.sort_custom(func(a, b): return a.name.naturalnocasecmp_to(b.name) < 0)
 	for entry in entries:
@@ -345,21 +376,18 @@ func refresh_materials():
 			entry.material, self, "material_preview_ready",
 			{"generation": materials_preview_generation, "index": index,
 				"instance_id": entry.material.get_instance_id()})
-
 	var count = entries.size()
 	materials_count_label.text = "%d unique material%s" % [count, "" if count == 1 else "s"]
 	materials_button.text = "Map Materials (%d)" % count
 
-func add_material(materials: Dictionary, material: Material, loader: TBLoader):
+func add_material(materials: Dictionary, material: Material, loader: TBLoader) -> void:
 	if material == null:
 		return
-
 	var path = material.resource_path
 	var texture_path = ""
 	var texture = material.get(loader.texture_material_texture_path)
 	if texture is Texture2D:
 		texture_path = texture.resource_path
-
 	var key = path
 	if key.is_empty():
 		key = texture_path
@@ -369,7 +397,6 @@ func add_material(materials: Dictionary, material: Material, loader: TBLoader):
 		key = "instance:%d" % material.get_instance_id()
 	if materials.has(key):
 		return
-
 	var name = material.resource_name
 	if name.is_empty() and not path.is_empty():
 		name = path.trim_prefix(loader.texture_path + "/").get_basename()
@@ -377,20 +404,13 @@ func add_material(materials: Dictionary, material: Material, loader: TBLoader):
 		name = texture_path.trim_prefix(loader.texture_path + "/").get_basename()
 	if name.is_empty():
 		name = material.get_class()
+	materials[key] = {"material": material, "name": name,
+		"path": path if not path.is_empty() else texture_path}
 
-	materials[key] = {
-		"material": material,
-		"name": name,
-		"path": path if not path.is_empty() else texture_path,
-	}
-
-func material_selected():
+func material_selected() -> void:
 	var item = materials_tree.get_selected()
-	if item == null:
-		return
-	var material = item.get_metadata(0)
-	if material is Material:
-		get_editor_interface().edit_resource(material)
+	if item != null and item.get_metadata(0) is Material:
+		get_editor_interface().edit_resource(item.get_metadata(0))
 
 func grid_material_selected(index: int) -> void:
 	var material = materials_grid.get_item_metadata(index)
