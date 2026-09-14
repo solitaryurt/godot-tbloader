@@ -13,6 +13,8 @@
 #include <iterator>
 #include <string>
 #include <set>
+#include <map>
+#include <algorithm>
 
 static std::string fixture(const std::string &name) {
 	std::ifstream file("tests/map_editor/fixtures/" + name + ".map");
@@ -20,6 +22,24 @@ static std::string fixture(const std::string &name) {
 	return { std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>() };
 }
 static void equal_vector(vec3 a, vec3 b) { assert(a.x == b.x && a.y == b.y && a.z == b.z); }
+static LMEditPrimitive pyramid(int sides, double apex_z, const std::string &texture) {
+	LMEditPrimitive brush;
+	std::vector<vec3> ring;
+	for (int i = 0; i < sides; ++i) {
+		const double angle = 6.28318530717958647692 * i / sides;
+		ring.push_back({128 * std::cos(angle), 128 * std::sin(angle), 0});
+	}
+	LMEditFace base; base.texture = texture; base.plane.uv_extra = {0, 1, 1};
+	base.plane.plane_points = {ring[0], ring[1], ring[2]};
+	if (apex_z < 0) std::swap(base.plane.plane_points.v1, base.plane.plane_points.v2);
+	brush.faces.push_back(base);
+	for (int i = 0; i < sides; ++i) {
+		LMEditFace side = base; const vec3 apex = {0, 0, apex_z};
+		side.plane.plane_points = apex_z > 0 ? LMFacePoints{ring[i], apex, ring[(i + 1) % sides]} : LMFacePoints{ring[i], ring[(i + 1) % sides], apex};
+		brush.faces.push_back(side);
+	}
+	return brush;
+}
 static void equal_maps(const LMMapData &a, const LMMapData &b) {
 	assert(a.entity_count == b.entity_count);
 	for (int i = 0; i < a.entity_count; ++i) {
@@ -90,6 +110,40 @@ static void check_topology_order(const LMBrush &brush, const LMBrushGeometry &ge
 }
 
 int main() {
+	// A real bevel with a 1e-6 angle still has a crease. The old intersection
+	// cutoff discarded that crease and generated an open top region.
+	for (bool reverse : {false, true}) {
+		auto cube = lm_edit_cuboid({4096, -2048, 1024}, {5120, -1024, 1088}, "bevel");
+		auto bevel = cube.faces.back();
+		bevel.plane.plane_points = {{4096, -2048, 1087.999488}, {4096, -1024, 1087.999488}, {5120, -2048, 1088.000512}};
+		cube.faces.push_back(bevel);
+		if (reverse) std::reverse(cube.faces.begin(), cube.faces.end());
+		LMMapEdit edit(*std::make_shared<LMMapData>());
+		edit.world().primitives.push_back(cube);
+		auto data = std::make_shared<LMMapData>();
+		assert(LMMapParser(data).load_from_text(edit.text()));
+		LMGeoGenerator(data).run();
+		const auto &brush = data->entities[0].brushes[0];
+		const auto &geo = data->entity_geo[0].brushes[0];
+		const auto topology = lm_extract_brush_topology(brush, geo);
+		assert(topology.vertices.size() == 10 && topology.edges.size() == 15 && topology.faces.size() == 7);
+		std::map<std::pair<int, int>, int> uses;
+		for (const auto &face : topology.faces) {
+			assert(face.vertex_indices.size() >= 3);
+			for (size_t i = 0; i < face.vertex_indices.size(); ++i) {
+				int a = face.vertex_indices[i], b = face.vertex_indices[(i + 1) % face.vertex_indices.size()];
+				assert(a != b);
+				if (a > b) std::swap(a, b);
+				++uses[{a, b}];
+			}
+		}
+		for (const auto &edge : uses) assert(edge.second == 2);
+		for (double y : {-2048., -1024.}) {
+			assert(std::any_of(topology.vertices.begin(), topology.vertices.end(), [y](vec3 p) {
+				return vec3_length(vec3_sub(p, {4608, y, 1088})) < 1e-7;
+			}));
+		}
+	}
 	for (const auto *name : { "empty", "classic_cube", "valve_cube", "patches", "ownership" }) {
 		const std::string source = fixture(name);
 		auto map = std::make_shared<LMMapData>();
@@ -238,6 +292,58 @@ int main() {
 		LMGeoGenerator(rotated).run();
 		assert(rotated->entities[0].brush_count == 1 && rotated->entities[0].brushes[0].face_count == 6);
 		for (int face = 0; face < 6; ++face) assert(rotated->entity_geo[0].brushes[0].faces[face].vertex_count == 4);
+	}
+	{
+		LMMapEdit source(*std::make_shared<LMMapData>());
+		auto first = lm_edit_cuboid({0, 0, 0}, {16, 16, 16}, "first/material");
+		first.faces[2].texture = "first/metadata";
+		first.faces[2].plane.is_valve_uv = true;
+		first.faces[2].plane.uv_valve = {{{1, 2, 3}, 4}, {{5, 6, 7}, 8}};
+		first.faces[2].plane.uv_extra = {17, .5, -2};
+		first.faces[2].plane.surface_flags = {true, 11, 22, -33};
+		source.world().primitives.push_back(first);
+		source.world().primitives.push_back(lm_edit_cuboid({16, 0, 0}, {32, 16, 16}, "second/material"));
+		source.world().primitives.push_back(lm_edit_cuboid({32, 0, 0}, {48, 16, 16}, "third/material"));
+		auto data = std::make_shared<LMMapData>();
+		assert(LMMapParser(data).load_from_text(source.text())); LMGeoGenerator(data).run();
+		LMMapEdit staged(*data);
+		std::vector<const LMEditPrimitive *> inputs = {&staged.entities[0].primitives[0], &staged.entities[0].primitives[1], &staged.entities[0].primitives[2]};
+		std::vector<LMBrushTopology> topology;
+		for (int i = 0; i < 3; ++i) topology.push_back(lm_extract_brush_topology(data->entities[0].brushes[i], data->entity_geo[0].brushes[i]));
+		LMEditPrimitive merged;
+		assert(lm_edit_merge_brushes(inputs, topology, merged) == LMMergeBrushResult::OK && merged.faces.size() == 6);
+		const auto metadata = std::find_if(merged.faces.begin(), merged.faces.end(), [](const LMEditFace &face) { return face.texture == "first/metadata"; });
+		assert(metadata != merged.faces.end() && metadata->plane.is_valve_uv && metadata->plane.surface_flags.specified);
+		assert(metadata->plane.uv_valve.u.offset == 4 && metadata->plane.uv_extra.rot == 17);
+		assert(metadata->plane.surface_flags.contents == 11 && metadata->plane.surface_flags.surface == 22 && metadata->plane.surface_flags.value == -33);
+
+		inputs = {&staged.entities[0].primitives[0], &staged.entities[0].primitives[2]};
+		topology.erase(topology.begin() + 1);
+		assert(lm_edit_merge_brushes(inputs, topology, merged) == LMMergeBrushResult::INVALID_GEOMETRY);
+
+		LMMapEdit invalid(*std::make_shared<LMMapData>());
+		invalid.world().primitives.push_back(lm_edit_cuboid({0, 0, 0}, {16, 16, 16}, "a"));
+		invalid.world().primitives.push_back(lm_edit_cuboid({16, 0, 0}, {32, 8, 16}, "partial"));
+		invalid.world().primitives.push_back(lm_edit_cuboid({0, 16, 0}, {16, 32, 16}, "l"));
+		auto invalid_data = std::make_shared<LMMapData>();
+		assert(LMMapParser(invalid_data).load_from_text(invalid.text())); LMGeoGenerator(invalid_data).run();
+		LMMapEdit invalid_staged(*invalid_data); inputs.clear(); topology.clear();
+		for (int i = 0; i < 3; ++i) {
+			inputs.push_back(&invalid_staged.entities[0].primitives[i]);
+			topology.push_back(lm_extract_brush_topology(invalid_data->entities[0].brushes[i], invalid_data->entity_geo[0].brushes[i]));
+		}
+		assert(lm_edit_merge_brushes({inputs[0], inputs[1]}, {topology[0], topology[1]}, merged) == LMMergeBrushResult::INVALID_GEOMETRY);
+		assert(lm_edit_merge_brushes({inputs[0], inputs[2], &staged.entities[0].primitives[1]}, {topology[0], topology[2], lm_extract_brush_topology(data->entities[0].brushes[1], data->entity_geo[0].brushes[1])}, merged) == LMMergeBrushResult::INVALID_GEOMETRY);
+
+		LMMapEdit many(*std::make_shared<LMMapData>());
+		many.world().primitives.push_back(pyramid(63, 64, "upper"));
+		many.world().primitives.push_back(pyramid(63, -64, "lower"));
+		auto many_data = std::make_shared<LMMapData>();
+		assert(LMMapParser(many_data).load_from_text(many.text())); LMGeoGenerator(many_data).run();
+		LMMapEdit many_staged(*many_data);
+		std::vector<LMBrushTopology> many_topology;
+		for (int i = 0; i < 2; ++i) many_topology.push_back(lm_extract_brush_topology(many_data->entities[0].brushes[i], many_data->entity_geo[0].brushes[i]));
+		assert(lm_edit_merge_brushes({&many_staged.entities[0].primitives[0], &many_staged.entities[0].primitives[1]}, many_topology, merged) == LMMergeBrushResult::LIMIT_EXCEEDED);
 	}
 	{
 		const std::string source = fixture("tohunga");

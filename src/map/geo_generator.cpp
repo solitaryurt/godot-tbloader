@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits>
 
 #include "brush.h"
 #include "entity.h"
@@ -488,31 +489,48 @@ void LMGeoGenerator::generate_patch_geometry(int entity_idx, int patch_idx) {
 	}
 }
 
+namespace {
+// Intersections can be ill-conditioned even for ordinary grid edits. Derive
+// planes from their defining points at extended precision: promoting already
+// rounded unit normals cannot recover their lost incidence information.
+struct IntersectionVector {
+	long double x, y, z;
+	IntersectionVector operator-(IntersectionVector b) const { return {x - b.x, y - b.y, z - b.z}; }
+	IntersectionVector operator+(IntersectionVector b) const { return {x + b.x, y + b.y, z + b.z}; }
+	IntersectionVector operator*(long double s) const { return {x * s, y * s, z * s}; }
+	IntersectionVector cross(IntersectionVector b) const { return {y * b.z - z * b.y, z * b.x - x * b.z, x * b.y - y * b.x}; }
+	long double dot(IntersectionVector b) const { return x * b.x + y * b.y + z * b.z; }
+};
+IntersectionVector precise(vec3 p) { return {p.x, p.y, p.z}; }
+IntersectionVector intersection_normal(const face &f) {
+	return (precise(f.plane_points.v2) - precise(f.plane_points.v0)).cross(precise(f.plane_points.v1) - precise(f.plane_points.v0));
+}
+}
+
 bool LMGeoGenerator::intersect_faces(face f0, face f1, face f2, vec3 *o_vertex) {
-	vec3 normal0 = f0.plane_normal;
-	vec3 normal1 = f1.plane_normal;
-	vec3 normal2 = f2.plane_normal;
+	const auto normal0 = intersection_normal(f0);
+	const auto normal1 = intersection_normal(f1);
+	const auto normal2 = intersection_normal(f2);
+	const auto cross01 = normal0.cross(normal1);
+	const long double denom = cross01.dot(normal2);
+	const long double scale = std::sqrt(normal0.dot(normal0) * normal1.dot(normal1) * normal2.dot(normal2));
 
-	double denom = vec3_dot(vec3_cross(normal0, normal1), normal2);
-
-	if (denom < CMP_EPSILON) {
+	// The relative determinant is dimensionless, not a distance. Using the vertex weld
+	// tolerance here drops real corners between shallow supporting planes (e.g.
+	// a prism corner dragged along the default grid diagonal). Both orientations
+	// of a nonsingular triple have the same intersection.
+	if (std::abs(denom) <= 64 * std::numeric_limits<long double>::epsilon() * scale) {
 		return false;
 	}
 
 	if (o_vertex) {
-		*o_vertex = vec3_div_double(
-				vec3_add(
-						vec3_add(
-								vec3_mul_double(
-										vec3_cross(normal1, normal2),
-										f0.plane_dist),
-								vec3_mul_double(
-										vec3_cross(normal2, normal0),
-										f1.plane_dist)),
-						vec3_mul_double(
-								vec3_cross(normal0, normal1),
-								f2.plane_dist)),
-				denom);
+		// Solve around a defining point rather than subtracting large world-space
+		// plane distances. The latter amplifies cancellation at shallow angles.
+		const auto origin = precise(f0.plane_points.v0);
+		const auto d1 = normal1.dot(precise(f1.plane_points.v0) - origin);
+		const auto d2 = normal2.dot(precise(f2.plane_points.v0) - origin);
+		const auto point = origin + (normal2.cross(normal0) * d1 + cross01 * d2) * (1 / denom);
+		*o_vertex = {double(point.x), double(point.y), double(point.z)};
 	}
 
 	return true;

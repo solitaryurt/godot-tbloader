@@ -3,6 +3,7 @@
 
 #include "map_data.h"
 #include "face.h"
+#include "brush_topology.h"
 #include <string>
 #include <vector>
 
@@ -39,4 +40,12 @@ void lm_edit_rotate_brush(LMEditPrimitive &brush, vec3 pivot, int axis, double r
 // Remove redundant/empty supporting planes after a cut. Uses disposable geometry;
 // callers still validate the complete document before committing.
 bool lm_edit_prune_faces(LMEditPrimitive &brush);
+enum class LMMergeBrushResult {
+	OK,
+	INVALID_GEOMETRY,
+	LIMIT_EXCEEDED,
+};
+// Merge only a connected convex union whose interior boundaries are complete,
+// opposing face polygons. Retained faces keep the first source metadata.
+LMMergeBrushResult lm_edit_merge_brushes(const std::vector<const LMEditPrimitive *> &brushes, const std::vector<LMBrushTopology> &topologies, LMEditPrimitive &merged);
 #endif

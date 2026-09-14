@@ -86,26 +86,94 @@ func run() -> void:
 		await reopen_journey(plugin)
 		checks.finish(get_tree(), suite)
 		return
-	EditorInterface.set_main_screen_editor("Map")
+	EditorInterface.set_main_screen_editor("Radiant")
 	await get_tree().process_frame
 	checks.check(Engine.is_editor_hint() and ClassDB.class_exists("TBMapDocument"), "actual editor and native document")
-	checks.check(plugin._has_main_screen() and ui.is_visible_in_tree(), "Map main screen attached and visible")
-	checks.check(plugin.materials_panel.is_inside_tree(), "legacy materials panel retained")
-	checks.check(plugin.materials_grid is ItemList and plugin.materials_grid.icon_mode == ItemList.ICON_MODE_TOP and plugin.materials_grid.visible, "materials panel defaults to rendered grid")
-	checks.check(plugin.map_control.get_child(0).text == "Build Meshes", "legacy build toolbar retained")
+	checks.check(plugin._get_plugin_name() == "Radiant", "main screen is named Radiant")
+	checks.check(plugin._has_main_screen() and ui.is_visible_in_tree(), "Radiant main screen attached and visible")
+	checks.check(plugin.materials_panel.is_inside_tree(), "shared materials panel retained")
+	checks.check(plugin.authoring_materials_page == ui.material_workspace and plugin.materials_panel.is_ancestor_of(ui.material_workspace), "Map authoring controls live in the shared bottom panel")
+	checks.check(plugin.authoring_materials_page.visible and not plugin.built_materials_page.visible, "Map screen selects authoring material context")
+	checks.check(plugin.materials_grid.max_columns == 0 and ui.browser._list.max_columns == 0, "material grids use responsive multi-column layout")
+	checks.check(ui.slot_types == ["Camera", "Side Grid", "Top Grid", "Front Grid"] and ui.camera_view.get_parent() == ui.view_slots[0] and ui.graph_a.get_parent() == ui.view_slots[2] and not ui.is_ancestor_of(ui.material_workspace), "three-view workspace starts with per-slot camera and grid types")
+	checks.check(plugin.map_control.visible and plugin.map_control.get_child(0).text == "Build Meshes" and plugin.map_control.get_child(2).text == "Open Radiant Editor", "spatial toolbar uses Build Meshes and Open Radiant Editor terminology")
+	checks.check(plugin.map_control.get_child(0).disabled and plugin.map_control.get_child(2).disabled, "spatial loader actions are disabled without a selected TBLoader")
 	var map_toolbar: Control
 	for child in ui.get_children():
 		if child is HFlowContainer:
 			map_toolbar = child
 			break
 	var toolbar_labels: Array[String] = []
-	for child in map_toolbar.get_children():
-		if child is Button:
-			toolbar_labels.append(child.text)
-	checks.check(["Select", "Brush", "Cut", "Rotate", "Face", "Edge", "Vertex", "Texture"].all(func(mode): return toolbar_labels.count(mode) == 1 and ui.tool_buttons[mode].get_parent() == map_toolbar), "map toolbar exposes each established editing mode once")
+	for child in map_toolbar.find_children("*", "Button", true, false):
+		toolbar_labels.append(child.text)
+	var tool_group: ButtonGroup = ui.tool_buttons.Select.button_group
+	checks.check(["Select", "Brush", "Cut", "Rotate", "Face", "Edge", "Vertex", "Texture"].all(func(mode): return ui.tool_buttons[mode].icon != null and ui.tool_buttons[mode].text.is_empty() and ui.tool_buttons[mode].button_group == tool_group), "map toolbar exposes icon-only editing modes in one exclusive button group")
+	checks.check(ui.tool_buttons.Vertex.tooltip_text == "Vertex Tool (V)" and ui.tool_buttons.Edge.tooltip_text == "Edge Tool (E)" and ui.tool_buttons.Texture.tooltip_text == "Texture Tool", "tooltips show existing shortcuts without inventing missing bindings")
 	checks.check(["New", "Open…", "Save", "Save As…"].all(func(command): return not toolbar_labels.has(command)), "map toolbar omits redundant document controls")
-	checks.check(not ui.rebuild_on_save.button_pressed, "Bake on save defaults off")
-	checks.check((ui.status.text.begins_with("UNSAVED •") or ui.status.text.begins_with("saved •")) and ui.status.text.contains("baked") and ui.status.text.contains("grid") and ui.status.text.contains("selected") and ui.status.text.contains("hidden"), "bottom status omits map title and retains editing state")
+	checks.check(map_toolbar.get_child(0).is_ancestor_of(ui.file_menu) and ui.file_menu.text.is_empty() and ui.file_menu.icon != null, "icon file command menu starts the grouped map toolbar")
+	checks.check(ui.file_menu.get_popup().item_count == 3 and ui.file_menu.get_popup().get_item_text(0) == "Open…" and ui.file_menu.get_popup().get_item_text(1) == "Save" and ui.file_menu.get_popup().get_item_text(2) == "Save As…", "file menu contains only Open, Save, and Save As")
+	checks.check(ui.document_tabs.get_index() == ui.scene_tabs.get_index() + 1 and ui.document_tabs.get_tab_title(ui.document_tabs.tab_count - 1) == "+", "document tabs sit below scene tabs with a trailing new tab")
+	checks.check(not ui.rebuild_on_save.button_pressed, "Build meshes on save defaults off")
+	checks.check(ui.rebuild_on_save is Button and ui.rebuild_on_save.toggle_mode and ui.rebuild_on_save.icon != null and ui.rebuild_on_save.tooltip_text == "Build meshes on save", "Build meshes on save is a compact independent icon toggle")
+	checks.check(ui.loader_actions.BindLoader.disabled and ui.loader_actions.DetachLoader.disabled and ui.loader_actions.UpdateLoaderPath.disabled and ui.loader_actions.BuildMeshes.disabled and ui.rebuild_on_save.disabled, "unselected and unbound loader actions start disabled")
+	checks.check(ui.loader_actions.BuildMeshes.tooltip_text == "Build Meshes from saved map" and ui.loader_actions.BuildMeshes.accessibility_name == "Build Meshes from saved map", "map toolbar exposes Build Meshes terminology to tooltip and accessibility APIs")
+	checks.check(ui.view_layout == 3 and ui.visible_graphs().size() == 2 and not ui.view_slots[1].visible, "three-view layout changes visibility without changing pane types")
+	ui.apply_layout(2)
+	ui.set_slot_type(2, "Camera")
+	checks.check(ui.cameras.size() == 2 and ui.slot_views[0] != ui.slot_views[2] and ui.slot_types[0] == "Camera" and ui.slot_types[2] == "Camera", "two-view layout supports duplicate independent cameras")
+	checks.check(ui.graphs.all(func(item): return item.current_camera_views().size() == 2), "every grid routes previews to the camera collection")
+	ui.set_slot_type(0, "Top Grid")
+	ui.set_slot_type(2, "Top Grid")
+	checks.check(ui.visible_graphs().size() == 2 and ui.graph_a != ui.graph_b and ui.visible_graphs().all(func(item): return item.orientation == 2), "two-view layout supports duplicate independent same-orientation grids")
+	ui.slot_menus[0].get_popup().id_pressed.emit(0)
+	checks.check(ui.slot_types[0] == "Camera" and ui.slot_menus[0].get_popup().is_item_checked(0), "slot three-dot menu switches pane type")
+	checks.check(ui.view_slots[0].get_class() == "Control" and ui.slot_menus[0].anchor_left == 0.0
+		and ui.slot_menus[0].offset_left == 2.0 and ui.slot_menus[0].offset_right == 30.0,
+		"slot pane menu keeps a compact hitbox instead of covering viewport input")
+	var all_pane_icons := true
+	for pane_index in ui.slot_menus[0].get_popup().item_count:
+		all_pane_icons = all_pane_icons and ui.slot_menus[0].get_popup().get_item_icon(pane_index) != null
+	checks.check(all_pane_icons,
+		"slot pane menu displays pane-type icons")
+	ui.set_slot_type(1, "Side Grid")
+	ui.set_slot_type(2, "Top Grid")
+	ui.set_slot_type(3, "Front Grid")
+	ui.apply_layout(4)
+	checks.check(ui.visible_graphs().size() == 3 and ui.graphs.map(func(item): return item.orientation) == [2, 1, 0], "four-view layout displays each configured slot")
+	ui.workspace.split_offset = 17
+	ui.left_views.split_offset = 11
+	ui.graph_a.origin = Vector3(3, 4, 0)
+	ui.camera_view.orbit_target = Vector3(1, 2, 3)
+	var saved_workspace: Dictionary = ui.workspace_state()
+	ui.graph_a.origin = Vector3.ZERO
+	ui.camera_view.orbit_target = Vector3.ZERO
+	ui.apply_layout(2)
+	ui.restore_workspace_state(saved_workspace)
+	checks.check(ui.view_layout == 4 and ui.slot_types == ["Camera", "Side Grid", "Top Grid", "Front Grid"] and ui.workspace.split_offset == 17 and ui.left_views.split_offset == 11, "workspace state restores per-slot types and splitter positions")
+	checks.check(ui.graph_a.origin == Vector3(3, 4, 0) and ui.camera_view.orbit_target == Vector3(1, 2, 3), "workspace state restores independent camera and grid state")
+	ui.apply_layout(3)
+	checks.check(ui.camera_view.get_parent() == ui.view_slots[0] and ui.visible_graphs().size() == 2, "layout changes restore camera-left three-view arrangement")
+	checks.check(ui.camera_view.find_children("FrameSelection", "Button", true, false).size() == 1 and ui.graph_a.find_children("FrameSelection", "Button", true, false).size() == 1, "camera and grid panes expose compact frame buttons")
+	checks.check(ui.camera_view.find_child("FrameSelection", true, false).icon != null and ui.graph_a.find_child("FrameSelection", true, false).icon != null,
+		"camera and grid frame-selection buttons use the custom frame icon")
+	ui.graph_a.orientation_gizmo.axis_selected.emit(0, true)
+	checks.check(ui.graph_a.orientation == 0, "grid orientation gizmo selects the YZ side plane")
+	ui.graph_a.set_orientation(2)
+	var saved_camera_transform: Transform3D = ui.camera_view.camera.transform
+	var saved_camera_target: Vector3 = ui.camera_view.orbit_target
+	var saved_camera_distance: float = ui.camera_view.orbit_distance
+	ui.camera_view.orbit_target = Vector3.ZERO
+	ui.camera_view.orbit_distance = 5.0
+	ui.camera_view.snap_to_axis(0, true)
+	checks.check(ui.camera_view.camera.position.is_equal_approx(Vector3.BACK * 5.0) and ui.camera_view.camera_map_direction().is_equal_approx(Vector3.LEFT), "camera compass snaps to map-space cardinal axes around its target")
+	var snapped_position: Vector3 = ui.camera_view.camera.position
+	ui.camera_view.orbit_from_gizmo(Vector2(8, 0))
+	checks.check(not ui.camera_view.camera.position.is_equal_approx(snapped_position) and is_equal_approx(ui.camera_view.camera.position.distance_to(ui.camera_view.orbit_target), 5.0), "camera compass drag orbits while preserving target distance")
+	ui.camera_view.camera.transform = saved_camera_transform
+	ui.camera_view.orbit_target = saved_camera_target
+	ui.camera_view.orbit_distance = saved_camera_distance
+	ui.camera_view.sync_camera_marker(true)
+	checks.check((ui.status.text.begins_with("UNSAVED •") or ui.status.text.begins_with("saved •")) and ui.status.text.contains("meshes") and ui.status.text.contains("grid") and ui.status.text.contains("selected") and ui.status.text.contains("hidden"), "bottom status omits map title and retains editing state")
 	var active_session = ui.session
 	var background = load("res://addons/tbloader/src/editor/map_session.gd").new()
 	checks.check(background.document.save_map("user://background-refresh.map").ok, "background refresh fixture starts clean")
@@ -115,16 +183,29 @@ func run() -> void:
 	background.document.create_cuboid(Vector3.ZERO, Vector3.ONE * 8, "background/material")
 	background.changed.emit()
 	var background_label_found := false
-	for index in ui.session_picker.item_count:
-		background_label_found = background_label_found or ui.session_picker.get_item_text(index) == "background-refresh.map *"
+	for index in ui.document_tabs.tab_count - 1:
+		background_label_found = background_label_found or ui.document_tabs.get_tab_title(index) == "background-refresh.map *"
 	checks.check(ui.camera_view.rendered_key == "background-refresh-sentinel", "background session change skips active graphs and camera refresh")
-	checks.check(background_label_found, "background session change still refreshes picker dirty status")
+	checks.check(background_label_found, "background session change still refreshes tab dirty status")
 	background.save_enabled = false
+	var before_plus = ui.session
+	var before_plus_count = ui.sessions.size()
+	ui.document_tab_changed(ui.document_tabs.tab_count - 1)
+	checks.check(ui.session != before_plus and ui.session.document.get_path().is_empty() and ui.sessions.size() == before_plus_count + 1, "trailing plus creates and activates an untitled document tab")
+	ui.session.save_enabled = false
+	ui.set_session(before_plus)
 	ui.camera_view.rendered_key = ""
 	ui.refresh()
 	camera_marker_regression()
 	if suite == "toolbar":
 		var graph = ui.graph_a
+		ui.set_tool("Cut")
+		for cut_graph in ui.graphs:
+			cut_graph.clip_points.assign([Vector3.ZERO, Vector3.ONE])
+			cut_graph.clip_flip = true
+			cut_graph.gesture = "move"
+		ui.set_tool("Select")
+		checks.check(ui.graphs.all(func(cut_graph): return cut_graph.clip_points.is_empty() and not cut_graph.clip_flip and cut_graph.gesture.is_empty()), "leaving Cut clears markers and stale previews from every grid")
 		graph.grab_focus()
 		graph.origin = Vector3.ZERO
 		graph.zoom = 1
@@ -158,7 +239,7 @@ func run() -> void:
 	ui.session.scene = weakref(null)
 	scene_root.free()
 	ui.camera_view.sync_scene_lighting(true)
-	checks.check(ui.graph_a.orientation == 2 and ui.graph_b.orientation == 1, "quad starts camera/top/materials/front")
+	checks.check(ui.graph_a.orientation == 2 and ui.graph_b.orientation == 1 and ui.graph_c.orientation == 0, "persistent grids start Top, Front, and Side")
 	var graph = ui.graph_a
 	graph.grab_focus()
 	var point = Vector3(-23.5, 17.25, 0)
@@ -277,6 +358,23 @@ func run() -> void:
 	key(KEY_Z, true)
 	key(KEY_Z, true)
 	checks.check(text() == resized, "global action ordering")
+	var merge_origin = ui.session
+	var merge_session = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	ui.set_session(merge_session)
+	var merge_a: Dictionary = ui.session.document.create_cuboid(Vector3(256, 0, 0), Vector3(288, 32, 32), "common/caulk")
+	var merge_b: Dictionary = ui.session.document.create_cuboid(Vector3(288, 0, 0), Vector3(320, 32, 32), "common/caulk")
+	ui.session.select(PackedInt64Array([merge_a.value, merge_b.value]))
+	var pre_merge := text()
+	ui.merge_selection()
+	var merged_id: int = ui.session.selected[0] if ui.session.selected.size() == 1 else -1
+	checks.check(merged_id > 0 and merged_id != merge_a.value and merged_id != merge_b.value and ui.session.brush(merge_a.value).is_empty(), "Merge UI selects the fresh merged brush ID")
+	checks.check(history.undo() and text() == pre_merge and ui.session.selected == PackedInt64Array([merge_a.value, merge_b.value]), "Merge uses one undoable session transaction")
+	var merge_token_count: int = ui.tokens.size()
+	ui.session.select(PackedInt64Array([merge_a.value]))
+	ui.merge_selection()
+	checks.check(ui.tokens.size() == merge_token_count and ui.notice.text.contains("INVALID_ARGUMENT"), "invalid Merge reports without creating history")
+	merge_session.save_enabled = false
+	ui.set_session(merge_origin)
 	ui.session.select(PackedInt64Array([id]))
 	var hidden_text = text()
 	var was_dirty: bool = ui.session.document.is_dirty()
@@ -337,10 +435,20 @@ func run() -> void:
 	checks.check(ui.browser.set_folder("res://textures/baseline"), "browser folder navigation")
 	checks.check(ui.browser.select_path("res://textures/baseline/checker.png"), "real browser resource selection")
 	checks.check(ui.texture_field.text == "baseline/checker", "browser exact map token handoff")
-	ui.assign_texture()
 	brush = ui.session.brush(id)
-	checks.check(brush.faces.all(func(face): return face.texture == "baseline/checker"), "UI assigns every brush face")
+	checks.check(brush.faces.all(func(face): return face.texture == "baseline/checker"), "material click assigns every selected brush face")
 	checks.check(ui.texture_sizes.get("baseline/checker") == Vector2i(64, 32), "production preview resolver uses actual asymmetric texture dimensions")
+	ui.set_slot_type(1, "UV")
+	var uv_pane = ui.slot_views[1]
+	checks.check(ui.uv_panes.size() == 1 and uv_pane.texture_field.text == "baseline/checker" and uv_pane.canvas.preview_texture != null, "UV pane receives selected face material and preview ownership")
+	uv_pane.uv_transform_requested.emit(Vector2(5, -2), 15.0, Vector2(0.75, 1.5))
+	var pane_uv: Dictionary = ui.session.document.get_face_uv(id, 0, ui.session.brush(id).topology_revision).value
+	checks.check(pane_uv.shift == Vector2(5, -2) and pane_uv.rotation == 15.0 and pane_uv.scale == Vector2(0.75, 1.5), "UV pane uses the authoritative UV transaction path")
+	uv_pane.match_grid_requested.emit()
+	checks.check(ui.session.document.get_face_uv(id, 0, ui.session.brush(id).topology_revision).value.shift == Vector2.ZERO, "UV pane Match Grid snaps texture shifts to the map grid")
+	uv_pane.reset_requested.emit()
+	checks.check(ui.session.document.get_face_uv(id, 0, ui.session.brush(id).topology_revision).value.scale == Vector2.ONE, "UV pane Reset is wired")
+	ui.set_slot_type(1, "Side Grid")
 	ui.uv_fields[0].value = 7
 	ui.uv_fields[1].value = -3
 	ui.uv_fields[2].value = 30
@@ -381,6 +489,14 @@ func run() -> void:
 	# Entity inspector worldspawn, point marker/movement, owning brush properties.
 	print("TB_UI_STAGE: material/UV/clip/prism complete")
 	select_none()
+	ui.set_slot_type(1, "Entities")
+	ui.apply_layout(4)
+	var entity_pane = ui.slot_views[1]
+	checks.check(entity_pane.entity_list.item_count == ui.session.entity_data().size() and entity_pane.property_tree.get_root().get_child_count() > 0, "Entity pane shows the all-entity list and one detail editor")
+	ui.show_entities()
+	checks.check(not ui.inspector.visible and entity_pane.entity_list.has_focus(), "N reuses and focuses a visible Entity pane")
+	ui.set_slot_type(1, "Side Grid")
+	ui.apply_layout(3)
 	key(KEY_N)
 	checks.check(ui.inspector.visible and ui.session.entity_targets().size() == 1, "N targets worldspawn with no selection")
 	ui.entity_key.text = "message"
@@ -418,17 +534,22 @@ func run() -> void:
 	var original_session = ui.session
 	var token: RefCounted = ui.tokens.back()
 	checks.check(not ui.open_path("res://missing.map") and ui.session == original_session, "failed open keeps active session")
-	checks.check(ui.open_path("res://journey.map") and text() == journey, "real reopen preserves entity ownership and UVs")
-	var new_session = ui.session
+	var open_count = ui.sessions.size()
+	checks.check(ui.open_path("res://journey.map") and ui.session == original_session and ui.sessions.size() == open_count, "opening an existing path activates its tab without duplicating the document")
+	var new_session = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	checks.check(new_session.document.import_text(journey).ok, "foreground history fixture imports canonical content")
+	ui.set_session(new_session)
+	new_session.save_enabled = false
 	key(KEY_Z, true)
 	checks.check(ui.session == new_session and text() == journey and original_session.document.export_text().value != journey, "background undo targets originating session only")
 	checks.check(original_session.document.is_dirty() and not ui.unsaved_status().is_empty(), "background undo participates in editor unsaved reporting")
-	checks.check(ui.session_picker.item_count >= 2, "retained sessions accessible through picker")
+	checks.check(ui.document_tabs.tab_count >= 3, "retained sessions are accessible through document tabs")
 	key(KEY_Y, true)
 	checks.check(original_session.document.export_text().value == journey, "background redo returns originating session to saved baseline")
 	token.retire()
 	token.restore(false)
 	checks.check(ui.notice.text.contains("expired") and text() == journey, "retired history explicit status and no redirection")
+	ui.set_session(original_session)
 	# Failed save and external conflict must never launch a destructive bake.
 	checks.check(not ui.save_path("res://no_such_directory/map.map"), "Save As failure surfaced")
 	checks.check(ui.session.document.get_path() == "res://journey.map", "failed Save As preserves path")
@@ -441,17 +562,18 @@ func run() -> void:
 	ui.session.select(PackedInt64Array([ui.session.document.get_draw_data()[0].id]))
 	key(KEY_SPACE)
 	var dirty = text()
+	var dirty_session = ui.session
 	ui.file_command("new")
-	checks.check(ui.dirty_dialog.visible, "dirty New asks Save Discard Cancel")
-	ui.dirty_dialog.canceled.emit()
-	ui.dirty_dialog.hide()
-	checks.check(text() == dirty, "dirty replacement cancel preserves edits")
+	checks.check(ui.session != dirty_session and ui.session.document.get_path().is_empty() and dirty_session.document.export_text().value == dirty, "New opens an untitled tab without replacing the dirty document")
+	ui.session.save_enabled = false
+	ui.set_session(dirty_session)
 	plugin._save_external_data()
 	checks.check(not ui.session.document.is_dirty(), "actual Save All lifecycle hook saves known path")
 	# Fly state and capture exit paths, with native display capture in UI suite.
 	print("TB_UI_STAGE: entities/persistence complete")
 	var camera = ui.camera_view
-	checks.check(camera.crosshair != null and camera.crosshair.get_child_count() == 4 and camera.crosshair.is_visible_in_tree(), "active map camera displays a centered crosshair")
+	checks.check(camera.crosshair != null and camera.crosshair.get_child_count() == 4 and not camera.crosshair.is_visible_in_tree(), "inactive map camera hides its centered crosshair")
+	checks.check(camera.viewport.msaa_3d == Viewport.MSAA_4X, "camera preview enables multisample antialiasing")
 	var target_brush: Dictionary = ui.session.draw_data()[0]
 	var target_center: Vector3 = camera.transform_map(target_brush.aabb_min + (target_brush.aabb_max - target_brush.aabb_min) * 0.5)
 	camera.camera.position = target_center + Vector3(0, 0, 5)
@@ -464,15 +586,38 @@ func run() -> void:
 	ui.session.select(PackedInt64Array())
 	camera._gui_input(left)
 	checks.check(not expected_hits.is_empty() and ui.session.selected == PackedInt64Array([expected_hits[0].brush_id]), "camera LMB selects the brush under the crosshair instead of the mouse position")
+	ui.set_tool("Select")
+	var face_click = InputEventMouseButton.new()
+	face_click.pressed = true
+	face_click.button_index = MOUSE_BUTTON_LEFT
+	face_click.position = camera.size * 0.5
+	face_click.ctrl_pressed = true
+	camera._gui_input(face_click)
+	checks.check(ui.session.components.size() == 1 and ui.session.components[0].kind == "face" and ui.session.components[0].index == expected_hits[0].face_index, "camera Ctrl+LMB quick-selects the pointed face")
 	camera.grab_focus()
 	var right = InputEventMouseButton.new()
 	right.pressed = true
 	right.button_index = MOUSE_BUTTON_RIGHT
 	camera._gui_input(right)
-	checks.check(camera.flying, "RMB camera capture toggles on")
+	checks.check(camera.flying and camera.crosshair.is_visible_in_tree(), "RMB camera capture toggles on with crosshair")
 	ui.session.select(PackedInt64Array())
 	camera._input(left)
 	checks.check(ui.session.selected == PackedInt64Array([expected_hits[0].brush_id]), "captured camera LMB selects the brush under the crosshair")
+	var brush_ids := PackedInt64Array(ui.session.draw_data().map(func(brush): return brush.id))
+	if brush_ids.size() >= 2:
+		ui.session.select(PackedInt64Array())
+		camera.apply_pick(brush_ids[0], 0, -1, true, true)
+		camera.apply_pick(brush_ids[1], 0, -1, true, true)
+		camera.apply_pick(brush_ids[0], 0, -1, true, true)
+		checks.check(ui.session.selected == PackedInt64Array([brush_ids[0], brush_ids[1]]), "trace selection adds crossed brushes without toggling revisited brushes")
+	var trace_press = left.duplicate()
+	trace_press.shift_pressed = true
+	camera._input(trace_press)
+	checks.check(camera.selection_painting, "Shift+LMB starts crosshair trace selection in fly mode")
+	var trace_release = trace_press.duplicate()
+	trace_release.pressed = false
+	camera._input(trace_release)
+	checks.check(not camera.selection_painting, "releasing LMB stops crosshair trace selection")
 	var movement_key = InputEventKey.new()
 	movement_key.keycode = KEY_W
 	movement_key.pressed = true
@@ -481,7 +626,22 @@ func run() -> void:
 	camera._process(0.25)
 	checks.check(camera.camera.position.distance_to(camera_position) > 1, "fly movement frame delta")
 	camera._input(right)
-	checks.check(not camera.flying and camera.held.is_empty(), "second RMB releases capture and keys")
+	checks.check(not camera.flying and camera.held.is_empty() and not camera.crosshair.is_visible_in_tree(), "second RMB releases capture, keys, and crosshair")
+	if brush_ids.size() >= 2:
+		ui.session.select(PackedInt64Array())
+		var brush_trace = left.duplicate()
+		brush_trace.position = camera.size * 0.5
+		brush_trace.shift_pressed = true
+		camera._gui_input(brush_trace)
+		var first_brush := int(expected_hits[0].brush_id)
+		var second_brush := int(brush_ids[0] if brush_ids[0] != first_brush else brush_ids[1])
+		camera.paint_brush({"brush_id": second_brush})
+		camera.paint_brush({"brush_id": first_brush})
+		checks.check(camera.camera_gesture == "brush_paint" and ui.session.selected.has(first_brush)
+			and ui.session.selected.has(second_brush) and ui.session.selected.size() == 2,
+			"camera Shift+LMB drag paints crossed brushes without toggling revisits")
+		brush_trace.pressed = false
+		camera._gui_input(brush_trace)
 	camera.start_fly()
 	var escape = InputEventKey.new()
 	escape.keycode = KEY_ESCAPE
@@ -494,12 +654,18 @@ func run() -> void:
 	camera.start_fly()
 	plugin._make_visible(false)
 	checks.check(not camera.flying, "Map tab hide releases camera")
-	plugin._make_visible(true)
-	checks.check(not plugin.map_control.visible, "main screen visibility does not show spatial toolbar")
-	# Explicit selection is separate from session binding.
+	checks.check(plugin.built_materials_page.visible and not plugin.authoring_materials_page.visible, "leaving Map restores rendered built-material context")
 	var loader = ClassDB.instantiate("TBLoader")
+	loader.name = "SpatialMaterialContext"
 	plugin._edit(loader)
-	checks.check(ui.session == new_session and ui.session.loader.get_ref() == null, "spatial selection never changes document/binding")
+	checks.check(plugin.built_materials_page.visible and plugin.materials_context_label.text.contains("SpatialMaterialContext"), "3D material context follows the selected loader")
+	plugin._make_visible(true)
+	checks.check(plugin.map_control.visible and plugin.map_control.get_child(0).disabled and plugin.map_control.get_child(2).disabled, "spatial toolbar remains visible but disabled without a loader selection")
+	# Explicit selection is separate from session binding.
+	var selection_session = ui.session
+	plugin._edit(loader)
+	checks.check(ui.session == selection_session and ui.session.loader.get_ref() == null, "spatial selection never changes document/binding")
+	checks.check(plugin.authoring_materials_page.visible and not plugin.built_materials_page.visible, "spatial selection cannot replace active Map material context")
 	plugin._edit(null)
 	loader.free()
 	await binding_journey(plugin)
@@ -509,6 +675,8 @@ func run() -> void:
 	await grid_draw_batch_regression()
 	step5_native_editor_journey()
 	await phase5_journey()
+	vertex_hull_drag_journey()
+	shallow_prism_drag_journey()
 	await review_regressions(plugin)
 	await tohunga_editor_journey()
 	ui.set_scene_active(true)
@@ -616,13 +784,24 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	selection.clear()
 	selection.add_node(loader)
 	plugin.spatial_selection_changed()
-	checks.check(plugin.map_control.visible and plugin.editing_loader.get_ref() == loader, "spatial toolbar follows selected loader")
+	checks.check(plugin.map_control.visible and plugin.editing_loader.get_ref() == loader and not plugin.map_control.get_child(0).disabled and not plugin.map_control.get_child(2).disabled, "spatial toolbar enables selected-loader actions promptly")
+	checks.check(not ui.loader_actions.BindLoader.disabled, "Map Bind enables promptly for the selected TBLoader")
 	ui.bind_selected()
-	checks.check(ui.session.loader.get_ref() == loader and ui.valid_binding(), "explicit Bind loads selected loader document")
+	checks.check(ui.session.loader.get_ref() == loader and ui.valid_binding() and not ui.loader_actions.DetachLoader.disabled and not ui.loader_actions.UpdateLoaderPath.disabled and not ui.loader_actions.BuildMeshes.disabled and not ui.rebuild_on_save.disabled, "explicit Bind loads the document and enables bound actions")
+	var bound_session = ui.session
+	var bound_session_count = ui.sessions.size()
+	plugin.map_control.get_child(2).pressed.emit()
+	checks.check(ui.session == bound_session and ui.sessions.size() == bound_session_count, "repeated Open in Map Editor activates the bound document without duplicating it")
 	selection.clear()
+	plugin.spatial_selection_changed()
+	checks.check(plugin.map_control.visible and plugin.map_control.get_child(0).disabled and plugin.map_control.get_child(2).disabled and ui.loader_actions.BindLoader.disabled, "clearing spatial selection disables selected-loader actions promptly")
 	selection.add_node(other)
 	plugin.spatial_selection_changed()
 	checks.check(ui.session.loader.get_ref() == loader and plugin.editing_loader.get_ref() == other, "second loader selection preserves explicit binding")
+	ui.bind_loader(other)
+	checks.check(ui.session.loader.get_ref() == other, "bind_loader opens the exact requested TBLoader independent of prior binding")
+	ui.bind_loader(loader)
+	checks.check(ui.session.loader.get_ref() == loader, "bind_loader can return to the exact Inspector loader")
 	var scene_history = manager.get_history_undo_redo(manager.get_object_history_id(root))
 	checks.check(loader.has_method("build_meshes_checked"), "native checked bake available")
 	var hidden_ids = PackedInt64Array()
@@ -633,7 +812,7 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	var baked: bool = ui.bake()
 	checks.check(baked, "bound saved source checked bake succeeds: " + ui.notice.text)
 	checks.check(not loader.has_node("PreviousOutput") and other.has_node("PreviousOutput"), "bake touches only bound loader")
-	checks.check(ui.session.baked_text == text() and ui.status.text.contains("baked current"), "saved/baked state independently reported")
+	checks.check(ui.session.baked_text == text() and ui.status.text.contains("meshes current"), "saved/build state independently reported")
 	checks.check(not loader.find_children("*", "MeshInstance3D", true, false).is_empty(), "real baked mesh output")
 	checks.check(not loader.find_children("*", "CollisionShape3D", true, false).is_empty(), "real baked collision output")
 	checks.check(ui.camera_view.triangle_count == 0 and not hidden_ids.is_empty(), "bake retains brushes hidden from editor preview")
@@ -649,9 +828,9 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	ui.graph_a.grab_focus()
 	ui.session.select(PackedInt64Array([ui.session.document.get_draw_data()[0].id]))
 	key(KEY_SPACE)
-	checks.check(ui.status.text.contains("bake stale") and not ui.bake(), "unsaved edits invalidate bake and prevent rebuild")
+	checks.check(ui.status.text.contains("meshes stale") and not ui.bake(), "unsaved edits invalidate mesh build and prevent rebuild")
 	key(KEY_Z, true)
-	checks.check(ui.status.text.contains("baked current"), "map undo to baked content restores bake status")
+	checks.check(ui.status.text.contains("meshes current"), "map undo to built content restores mesh status")
 	checks.check(ui.save_path("res://journey-bound.map"), "bound Save As saves separately")
 	checks.check(loader.map_resource == "res://journey-copy.map" and not ui.bake(), "Save As cannot silently retarget bound loader")
 	ui.update_loader_path()
@@ -701,6 +880,7 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	checks.check(scene_history.undo(), "legacy Build Meshes also uses scene undo history")
 	checks.check(ui.open_path("res://journey-bound.map"), "standalone scene-switch fixture opens")
 	ui.detach()
+	checks.check(ui.loader_actions.DetachLoader.disabled and ui.loader_actions.UpdateLoaderPath.disabled and ui.loader_actions.BuildMeshes.disabled and ui.rebuild_on_save.disabled, "Detach disables all bound-session actions promptly")
 	var retained_standalone = ui.session
 	var second = Node3D.new()
 	second.name = "OtherScene"
@@ -712,7 +892,7 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	for frame in 5:
 		await get_tree().process_frame
 	checks.check(ui.scene_tabs.tab_count == 0 and not ui.scene_tabs.visible and ui.session == retained_standalone, "scene switch removes stale loader tabs and preserves the intentional standalone session")
-	EditorInterface.set_main_screen_editor("Map")
+	EditorInterface.set_main_screen_editor("Radiant")
 	ui.graph_a.grab_focus()
 
 func automatic_scene_journey(plugin: EditorPlugin) -> void:
@@ -859,8 +1039,7 @@ func review_regressions(plugin: EditorPlugin) -> void:
 		review_edit("before " + outcome)
 		var current = ui.session
 		ui.file_command("open")
-		ui.dirty_dialog.custom_action.emit("discard")
-		checks.check(ui.file_dialog.visible and current.save_enabled, "Discard waits for successful Open replacement " + outcome)
+		checks.check(ui.file_dialog.visible and not ui.dirty_dialog.visible and current.save_enabled, "Open keeps the dirty document in its tab " + outcome)
 		if outcome == "cancel":
 			ui.file_dialog.canceled.emit()
 		else:
@@ -870,18 +1049,16 @@ func review_regressions(plugin: EditorPlugin) -> void:
 		checks.check(ui.session == current and current.save_enabled and ui.unsaved_status().contains("discard-regression.map"), "cancelled/invalid replacement keeps subsequent edits in unsaved reporting " + outcome)
 		ui.save_all()
 		checks.check(not current.document.is_dirty() and FileAccess.get_file_as_string("res://discard-regression.map") == text(), "Save All saves resumed edits " + outcome)
-	review_edit("successful discard")
-	var retired = ui.session
+	review_edit("existing path reopen")
+	var retained = ui.session
+	var retained_count = ui.sessions.size()
 	ui.file_command("open")
-	ui.dirty_dialog.custom_action.emit("discard")
 	ui.file_selected("res://discard-regression.map")
 	ui.file_dialog.hide()
-	checks.check(not retired.save_enabled and ui.session != retired, "successful replacement alone retires discarded session")
-	ui.set_session(retired)
-	checks.check(retired.save_enabled and not ui.unsaved_status().is_empty(), "session picker resume reactivates discarded document")
-	retired.save_enabled = false
+	checks.check(ui.session == retained and retained.save_enabled and ui.sessions.size() == retained_count and retained.document.is_dirty(), "opening a retained path preserves its unsaved document without duplication")
+	retained.save_enabled = false
 	review_edit("edit reactivates")
-	checks.check(retired.save_enabled, "successful transaction reactivates discarded session")
+	checks.check(retained.save_enabled, "successful transaction reactivates retained session")
 	ui.save_all()
 	# No incidental strong reference remains to the background document/token.
 	var background = make_budget_background()
@@ -1075,9 +1252,11 @@ func verify_recovery_regression(expected: Dictionary) -> void:
 	checks.check(ui.session.document.is_dirty() and history.undo() and not ui.session.document.is_dirty(), "recovered Save As undo returns to actual clean baseline")
 	checks.check(history.redo() and ui.save_path("res://recovered-copy.map") and history.undo(), "recovered session supports save at a new history baseline then undo")
 	checks.check(ui.session.document.is_dirty() and text() == expected.untitled, "background recovery checkpoint retains original untitled content after undo past new saved baseline")
+	var recovered = ui.session
+	var recovered_count = ui.sessions.size()
 	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
 	checks.check(ui.session.document.is_dirty(), "New has no saved baseline")
-	checks.check(ui.open_path("res://recovered-copy.map") and not ui.session.document.is_dirty(), "load establishes native saved baseline after recovery")
+	checks.check(ui.open_path("res://recovered-copy.map") and ui.session == recovered and ui.session.document.is_dirty() and ui.sessions.size() == recovered_count + 1, "Open restores the retained dirty recovery tab instead of reloading its saved file")
 
 func precision_journey() -> void:
 	print("TB_UI_STAGE: focused-pane, rigid/off-grid and hidden-target regressions")
@@ -1246,6 +1425,12 @@ func step5_native_editor_journey() -> void:
 	checks.check(graph.hit_brush(overlap_position) == first, "entity-filtered broad-phase hit passes through to the next visible brush")
 	scratch.set_visibility_filter("entities", false)
 	scratch.select(PackedInt64Array())
+	mouse(graph, overlap_position, true, MOUSE_BUTTON_LEFT, true)
+	motion(graph, graph.project(Vector3(220, 20, 0)), Vector2.ZERO, true)
+	motion(graph, overlap_position, Vector2.ZERO, true)
+	mouse(graph, overlap_position, false, MOUSE_BUTTON_LEFT, true)
+	checks.check(scratch.selected == PackedInt64Array([second, contained]), "grid Shift+LMB trace-select adds crossed brushes without toggling revisited brushes")
+	scratch.select(PackedInt64Array())
 	graph.start = graph.project(Vector3(190, -10, 0))
 	graph.box_select(graph.project(Vector3(270, 70, 0)))
 	checks.check(scratch.selected == PackedInt64Array([contained]), "native box broad phase retains exact all-vertices containment")
@@ -1333,10 +1518,33 @@ func grid_draw_batch_regression() -> void:
 	graph.gesture = "move"
 	graph.delta = Vector3(16, 0, 0)
 	ui.camera_view.preview_grid_move(graph.delta)
-	checks.check(ui.camera_view.grid_move_preview.visible and ui.camera_view.grid_move_preview.get_child_count() == 1,
-		"grid move immediately builds a visible camera preview")
-	checks.check(ui.camera_view.grid_move_preview.position.is_equal_approx(ui.camera_view.transform_map_scaled(graph.delta, ui.camera_view.map_scale())),
-		"camera move preview follows the snapped grid delta")
+	checks.check(ui.camera_view.grid_move_preview.visible and ui.camera_view.grid_move_preview.get_child_count() == 4,
+		"grid move immediately consumes the exact candidate into two hull/edge passes")
+	var hidden_candidate: BaseMaterial3D = ui.camera_view.grid_move_preview.get_node("HiddenEdges").material_override
+	var visible_candidate: BaseMaterial3D = ui.camera_view.grid_move_preview.get_node("VisibleEdges").material_override
+	checks.check(hidden_candidate.no_depth_test and not visible_candidate.no_depth_test and
+		hidden_candidate.depth_draw_mode == BaseMaterial3D.DEPTH_DRAW_DISABLED and visible_candidate.depth_draw_mode == BaseMaterial3D.DEPTH_DRAW_DISABLED and
+		hidden_candidate.albedo_color.a < visible_candidate.albedo_color.a,
+		"candidate hidden pass ignores depth while both orange passes disable depth writes")
+	var exact_candidate: Dictionary = scratch.document.preview_translate_brushes(scratch.selected, graph.delta)
+	var expected_first: Vector3 = ui.camera_view.transform_map(exact_candidate.value[0].vertices[0])
+	var candidate_vertices: PackedVector3Array = ui.camera_view.grid_move_preview.get_node("VisibleHulls").mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+	checks.check(candidate_vertices.has(expected_first) and ui.camera_view.grid_move_preview.position == Vector3.ZERO,
+		"camera preview renders native candidate coordinates rather than offsetting source geometry")
+	var duplicate_camera = ui.create_pane("Camera")
+	ui.view_parking.add_child(duplicate_camera)
+	await get_tree().process_frame
+	ui.cameras.append(duplicate_camera)
+	ui.broadcast_mutation_preview(exact_candidate, graph)
+	checks.check(ui.camera_view.grid_move_preview.get_child_count() == 4 and duplicate_camera.grid_move_preview.get_child_count() == 4,
+		"one exact graph candidate broadcasts to duplicate camera panes")
+	graph.cancel()
+	checks.check(not ui.camera_view.grid_move_preview.visible and not duplicate_camera.grid_move_preview.visible,
+		"initiating graph cancellation clears exact previews in every camera")
+	ui.cameras.erase(duplicate_camera)
+	duplicate_camera.queue_free()
+	graph.gesture = "move"
+	graph.delta = Vector3(16, 0, 0)
 	graph.queue_redraw()
 	await get_tree().process_frame
 	RenderingServer.force_draw()
@@ -1362,9 +1570,172 @@ func grid_draw_batch_regression() -> void:
 		"incremental brush translation matches fully regenerated preview vertices and UVs")
 	graph.cancel()
 	checks.check(not ui.camera_view.grid_move_preview.visible, "ending a grid gesture clears the camera move preview")
+	var moved_brush: Dictionary = scratch.brush(selected)
+	var moved_center: Vector3 = ui.camera_view.transform_map((moved_brush.aabb_min + moved_brush.aabb_max) * 0.5)
+	ui.camera_view.camera.position = moved_center + Vector3(0, 0, 8)
+	ui.camera_view.camera.look_at(moved_center)
+	ui.set_tool("Vertex")
+	var vertex_screen: Vector2 = ui.camera_view.camera.unproject_position(ui.camera_view.transform_map(moved_brush.vertices[0]))
+	var camera_component: Dictionary = ui.camera_view.camera_handle_hit(vertex_screen, "Vertex")
+	checks.check(camera_component.get("brush_id", 0) == selected and camera_component.get("kind", "") == "vertex",
+		"camera handle hit-testing returns a topology-guarded selected-brush vertex")
+	scratch.select_component(camera_component, false)
+	var component_movement: Vector3 = (moved_brush.vertices[camera_component.index] - (moved_brush.aabb_min + moved_brush.aabb_max) * 0.5).sign() * 16.0
+	var component_candidate: Dictionary = scratch.document.preview_translate_components(scratch.components, component_movement)
+	var before_component_preview: String = scratch.document.export_text().value
+	ui.broadcast_mutation_preview(component_candidate, ui.camera_view)
+	checks.check(component_candidate.ok and ui.camera_view.grid_move_preview.get_child_count() == 4 and scratch.document.export_text().value == before_component_preview,
+		"camera component preview consumes exact rebuilt hulls without mutating the document")
+	ui.camera_view.camera_gesture = "component"
+	ui.camera_view.cancel_gesture()
+	checks.check(not ui.camera_view.grid_move_preview.visible and scratch.document.export_text().value == before_component_preview,
+		"camera component cancellation clears preview without a transaction")
+	var component_history_version: int = history.get_version()
+	ui.camera_view.camera_component = camera_component
+	ui.camera_view.camera_delta = component_movement
+	ui.camera_view.camera_gesture = "component"
+	ui.camera_view.finish_camera_left()
+	checks.check(scratch.document.export_text().value != before_component_preview and history.get_version() > component_history_version,
+		"camera component release commits exactly one editor transaction")
+	checks.check(history.undo() and scratch.document.export_text().value == before_component_preview,
+		"camera component transaction has exact undo")
+	var offscreen_candidate: Dictionary = scratch.document.preview_translate_brushes(scratch.selected, Vector3(0, 32000, 0))
+	if offscreen_candidate.ok:
+		ui.camera_view.set_candidate_preview(offscreen_candidate.value)
+	checks.check(offscreen_candidate.ok and ui.camera_view.candidate_offscreen and ui.camera_view.candidate_indicator.visible,
+		"camera exposes deterministic offscreen candidate state and edge direction indicator")
+	ui.camera_view.clear_candidate_preview()
+	ui.set_tool("Cut")
+	ui.set_cut_points([Vector3.ZERO, Vector3(0, 32, 0)])
+	graph.clip_flip = true
+	checks.check(ui.graphs.all(func(item): return item.clip_points == ui.cut_points and item.clip_flip) and ui.camera_view.overlays.has_node("CutOverlay"),
+		"grid and camera panes share one cut point/flip state")
+	ui.active_graph = null
+	ui.flip_clip()
+	ui.set_tool("Brush")
+	checks.check(ui.cut_points.is_empty() and not ui.cut_flip and not ui.camera_view.overlays.has_node("CutOverlay"),
+		"no-grid clip routing is safe and leaving Cut clears shared camera state")
 	scratch.save_enabled = false
 	ui.set_session(original)
 	ui.graph_a.grab_focus()
+
+func vertex_hull_drag_journey() -> void:
+	var original = ui.session
+	var scratch = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	ui.set_session(scratch)
+	var graph = ui.graph_a
+	var origin := Vector3(4096, -2048, 1024)
+	graph.orientation = 2
+	graph.origin = origin + Vector3.ONE * 32
+	graph.zoom = 2
+	graph.grab_focus()
+	scratch.grid = 8
+	var id: int = scratch.document.create_cuboid(origin, origin + Vector3.ONE * 64, "baseline/checker").value
+	scratch.select(PackedInt64Array([id]))
+	ui.set_tool("Vertex")
+	click_component(graph, origin + Vector3.ONE * 64)
+	if checks.check(scratch.components.size() == 1, "sequential drag selects a projected corner"):
+		# Use the actual picked depth; overlapping front/back vertices are valid
+		# picks, but every subsequent native position must match in all 3 axes.
+		var position: Vector3 = scratch.brush(id).vertices[scratch.components[0].index]
+		for movement in [Vector3(16, 8, 0), Vector3(0, 8, 0), Vector3(-8, -16, 0), Vector3(-8, 0, 0), Vector3(-8, -8, 0), Vector3(8, 8, 0)]:
+			var before := text()
+			var count: int = ui.tokens.size()
+			drag(graph, position, position + movement)
+			position += movement
+			checks.check(text() != before and ui.tokens.size() == count + 1, "sequential vertex drag commits one undo action")
+			var b: Dictionary = scratch.brush(id)
+			if not checks.check(scratch.components.size() == 1 and scratch.component_valid(scratch.components[0], b), "sequential drag rebinds selected vertex to fresh topology"):
+				break
+			checks.check(b.vertices[scratch.components[0].index].distance_to(position) < 0.001, "sequential graph drag reaches exact requested 3D corner")
+			solid_volume(b)
+			var after := text()
+			key(KEY_Z, true)
+			checks.check(text() == before and scratch.components.size() == 1, "sequential hull undo restores exact source and selection")
+			key(KEY_Z, true, true)
+			checks.check(text() == after and scratch.component_valid(scratch.components[0], scratch.brush(id)), "sequential hull redo restores exact result and live selection")
+		checks.check(scratch.brush(id).faces.size() == 6 and scratch.brush(id).vertices.size() == 8, "graph corner return merges coplanar faces")
+	scratch.save_enabled = false
+	ui.set_session(original)
+	graph.orientation = 1
+	graph.origin = Vector3.ZERO
+	graph.zoom = 1
+	ui.set_tool("Brush")
+	graph.grab_focus()
+	var close_session = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	checks.check(close_session.document.import_text(original.document.export_text().value).ok, "close-tab fixture imports canonical content")
+	ui.set_session(close_session)
+	var close_tab = ui.document_tabs.current_tab
+	checks.check(ui.document_tabs.get_tab_button_icon(close_tab) != null, "document tabs expose close buttons")
+	ui.close_document_tab(close_tab)
+	checks.check(ui.dirty_dialog.visible and ui.sessions.has(close_session), "closing a dirty document requests confirmation")
+	ui.dirty_dialog.custom_action.emit("discard")
+	checks.check(not ui.sessions.has(close_session) and ui.session != close_session, "discard closes the document and activates a neighbor")
+	ui.set_session(original)
+
+func shallow_prism_drag_journey() -> void:
+	var original = ui.session
+	var scratch = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	ui.set_session(scratch)
+	var graph = ui.graph_a
+	graph.orientation = 2
+	graph.origin = Vector3(4128, -2016, 1056)
+	graph.zoom = 4
+	graph.grab_focus()
+	checks.check(scratch.grid == 16, "prism regression uses the editor default grid")
+	var loaded: Dictionary = scratch.document.load_map("res://fixtures/vertex_prism.map")
+	if checks.check(loaded.ok, "load imported shallow-plane prism in editor"):
+		var b: Dictionary = scratch.document.get_draw_data()[0]
+		var id: int = b.id
+		scratch.select(PackedInt64Array([id]))
+		ui.set_tool("Edge")
+		var p := Vector3(4144, -2043.7127685546875, 1024)
+		var q := Vector3(4155.712890625, -2032, 1024)
+		var reference := (p + q) * 0.5
+		var destination := reference + Vector3(16, 16, 0)
+		var movement := destination.snapped(Vector3.ONE * scratch.grid) - reference
+		var before := text()
+		var count: int = ui.tokens.size()
+		mouse(graph, graph.project(reference), true)
+		checks.check(graph.gesture == "component" and graph.drag_component.kind == "edge" and scratch.components.size() == 1, "prism drag enters edge deformation, not brush translation")
+		checks.check(graph.component_position(graph.drag_component, b).distance_to(reference) < 0.001, "prism regression picks the intended depth and edge")
+		var expected: PackedVector3Array = b.vertices.duplicate()
+		expected[expected.find(p)] += movement
+		expected[expected.find(q)] += movement
+		motion(graph, graph.project(destination), graph.project(destination) - graph.project(reference))
+		checks.check(text() == before and graph.delta == movement, "default-grid edge preview snaps its midpoint without committing")
+		mouse(graph, graph.project(destination), false)
+		checks.check(text() != before and ui.tokens.size() == count + 1, "shallow-plane edge release commits exactly one action")
+		b = scratch.brush(id)
+		# The first moved endpoint is now inside the hull. Its edge genuinely
+		# disappears, so the editor must discard that handle rather than retarget it.
+		checks.check(not b.vertices.has(p + movement) and b.vertices.has(q + movement) and scratch.components.is_empty(), "edge disappearance clears selection and retains its extreme endpoint")
+		for vertex in b.vertices:
+			checks.check(Array(expected).any(func(v): return v.distance_to(vertex) < 0.001), "edge deformation retains only requested extreme points")
+		for point in expected:
+			for face in b.faces:
+				checks.check(face.normal.dot(point - face.center) <= 0.001, "edited prism contains every requested point")
+		solid_volume(b)
+		var after := text()
+		key(KEY_Z, true)
+		checks.check(text() == before and scratch.components.size() == 1, "shallow-plane drag undo restores exact source and selection")
+		key(KEY_Z, true, true)
+		checks.check(text() == after and scratch.components.is_empty(), "shallow-plane drag redo restores exact solid and discarded edge selection")
+		key(KEY_Z, true)
+		ui.set_tool("Vertex")
+		click_component(graph, q)
+		# Explicitly cycle to the coincident far-side corner, then grab it normally.
+		mouse(graph, graph.project(q), true, MOUSE_BUTTON_LEFT, false, false, true)
+		mouse(graph, graph.project(q), false)
+		var selected: Dictionary = scratch.components[0].duplicate()
+		checks.check(graph.pick_component(graph.project(q), "Vertex") == selected, "ordinary grab preserves selected coincident vertex; only Alt cycles depth")
+	scratch.save_enabled = false
+	ui.set_session(original)
+	graph.orientation = 1
+	graph.origin = Vector3.ZERO
+	graph.zoom = 1
+	ui.set_tool("Brush")
+	graph.grab_focus()
 
 func click_component(graph: Control, position: Vector3, toggle = false) -> void:
 	mouse(graph, graph.project(position), true, MOUSE_BUTTON_LEFT, toggle)
@@ -1455,6 +1826,19 @@ func phase5_journey() -> void:
 	scratch.select(PackedInt64Array([id]))
 	ui.set_tool("Face")
 	checks.check(camera_handle_count() == 6, "camera shows face grab handles for selected brush")
+	ui.set_tool("Brush")
+	ui.camera_view.apply_pick(id, 0, 0, false, false, true)
+	checks.check(scratch.components.size() == 1 and scratch.components[0].kind == "face", "camera Ctrl-click quick-selects one face outside Face mode")
+	checks.check(ui.camera_view.overlays.has_node("SelectedBrushFill") and ui.camera_view.overlays.has_node("SelectedFaceFill")
+		and ui.camera_view.overlays.get_node("SelectedFaceFill").material_override.albedo_color.b > 0.9
+		and ui.camera_view.overlays.get_node("SelectedFaceFill").material_override.albedo_color.a < 0.5,
+		"camera renders translucent orange brush and blue selected-face fills")
+	ui.texture_field.text = "common/caulk"
+	ui.assign_texture()
+	checks.check(scratch.brush(id).faces[0].texture == "common/caulk", "camera quick-face selection scopes material assignment")
+	checks.check(ui.browser.select_path("res://textures/baseline/checker.png"), "material browser click applies to camera-selected face")
+	checks.check(scratch.brush(id).faces.all(func(face): return face.texture == "baseline/checker") and scratch.components.size() == 1, "material browser click changes only the camera-selected face")
+	ui.set_tool("Face")
 	ui.camera_view.apply_pick(id, 0, 0, false)
 	ui.camera_view.apply_pick(id, 0, 1, true)
 	checks.check(scratch.selected == PackedInt64Array([id]) and scratch.components.size() == 2, "camera Shift-click adds a face without deselecting its brush")

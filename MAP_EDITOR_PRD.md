@@ -37,7 +37,7 @@ Success looks like: a mapper can block out, clip, texture, and UV a map without 
 - Clip/split convex brushes.
 - Select, move, copy/paste, clone, delete brushes; create cuboids and N-sided prisms.
 - Leave the existing bake path (`TBLoader::build_meshes`) intact.
-- Quad workspace: camera, project material browser, and two independently orientable grid views. Ctrl+Tab cycles the focused grid through Top/Front/Side.
+- Three-pane workspace: camera beside two independently orientable grid views, with materials in the shared editor bottom panel. Ctrl+Tab cycles the focused grid through Top/Front/Side.
 - Right-click enters camera fly mode; project-wide material search and folder navigation; an N-key Radiant-style entity inspector supporting point and brush entities.
 - Be extensible later (phong/smoothing, entity tools, q3map2, patches as first-class edits).
 
@@ -272,9 +272,10 @@ TBLoader (existing Node3D)
 
 EditorPlugin (GDScript)
   main screen tab "Map"
-  2×2: Camera (SubViewport, Godot space), material browser, two graph Controls (map space)
+  Camera (SubViewport, Godot space) beside two graph Controls (map space)
   each graph independently cycles Top/Front/Side with Ctrl+Tab
-  texture/UV controls and N entity inspector
+  contextual bottom panel owns the material browser and texture/UV controls
+  N entity inspector
   toolbar: Select, Brush, Cut, Face, Vertex, Texture
 ```
 
@@ -396,14 +397,13 @@ Status bar: map filename/dirty state, grid size, tool, focused grid orientation,
 
 ### 8.2 Layout
 
-Resizable 2×2:
+Resizable three-pane workspace:
 
-| Camera | Grid A (initially Top/XY) |
-| Materials | Grid B (initially Front/XZ) |
+| Camera | Grid A (initially Top/XY), above Grid B (initially Front/XZ) |
 
 The two grid panes independently cycle all three map-space orientations via Ctrl+Tab when focused. Label the active orientation and preserve each orientation's pan/zoom state. Switching orientation changes projection only, never geometry; snap/grid size remains shared. References elsewhere to Top/Front/Side mean the three supported orientations, not three simultaneously visible grids.
 
-Material pane: project-wide indexed browser, search field, folder tree/breadcrumbs, thumbnails, and texture/UV controls. Index standalone Godot Material resources and supported texture assets throughout `res://`, not just the bound loader's texture folder. Refresh on EditorFileSystem changes; coalesce scans and load thumbnails lazily. Search by resource name/path and navigate/filter by project folder. Preserve selection during refresh where possible. Clearly distinguish the Godot resource path from the shader token saved in `.map`; use loader texture-root-relative names when resolvable, preserve native material extensions as required by loader lookup, and report unresolved mappings rather than silently assigning a wrong shader. Material assignment is undoable; index/search/folder navigation are not document edits.
+Shared Map Materials bottom panel: when Map is active it hosts the indexed browser, search, folder navigation, thumbnails, and texture/UV controls for the active document. In 3D mode it shows the rendered materials used by the selected `TBLoader`. Map selection highlights the resolved browser resource without assigning it; explicit Assign remains undoable. Refresh on EditorFileSystem changes, coalesce scans, load thumbnails lazily, and report unresolved mappings rather than silently assigning a wrong shader.
 
 Top toolbar toggle buttons: Select, Brush, Cut, Face, Vertex, Texture. These switch mode; they do not replace the NetRadiant keybindings.
 
@@ -457,8 +457,8 @@ exit-failure gates.
 
 - [x] `TBMapDocument` load/save/new, writer round-trip of parsed maps (classic + Valve + flags + patches + epair order; tested POSIX save)
 - [x] Geo rebuild after edit
-- [x] Map main-screen tab, 2×2 layout, grid, pan, zoom-to-cursor
-- [x] Camera + material browser + two grid panes; Ctrl+Tab orientation cycling on the focused grid
+- [x] Map main-screen tab, camera + two-grid layout, grid, pan, zoom-to-cursor
+- [x] Shared contextual material bottom panel; Ctrl+Tab orientation cycling on the focused grid
 - [x] Right-click camera fly mode with reliable input capture/release
 - [x] Project material/texture index, search, folder navigation and lazy thumbnails
 - [x] Draw all brush outlines

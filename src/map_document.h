@@ -60,10 +60,15 @@ class TBMapDocument : public RefCounted {
 	const LiveLocation *live_location(int64_t id, char kind) const;
 	LMEditEntity *edit_entity(LMMapEdit &edit, int64_t id) const;
 	LMEditPrimitive *edit_brush(LMMapEdit &edit, int64_t id) const;
+	Dictionary prepare_edit_candidate(const LMMapEdit &edit, const StringName &operation, std::shared_ptr<LMMapData> &candidate, std::string &normalized, int64_t &high) const;
 	Dictionary finish_edit(const LMMapEdit &edit, const StringName &operation, const Variant &value = Variant());
+	Dictionary preview_edit(const LMMapEdit &edit, const StringName &operation, const Dictionary &sources) const;
 	Dictionary check_brushes(const PackedInt64Array &ids, const StringName &operation) const;
 	Dictionary check_face(int64_t id, int face, int64_t token, const StringName &operation) const;
 	Dictionary move_components(const Array &components, Vector3 delta, const StringName &operation);
+	Dictionary stage_components(const Array &components, Vector3 delta, const StringName &operation, LMMapEdit &edit, Dictionary &sources) const;
+	Dictionary stage_clip(const PackedInt64Array &ids, Vector3 p0, Vector3 p1, Vector3 p2, bool split, const StringName &operation, LMMapEdit &edit, PackedInt64Array &out, Dictionary &sources) const;
+	Dictionary build_translation_candidate(const PackedInt64Array &ids, Vector3 delta, const StringName &operation, std::shared_ptr<LMMapData> &candidate, std::string &normalized) const;
 	void resolve_texture_sizes(LMMapData &data, const Dictionary &sizes) const;
 
 	Dictionary replace_text(const std::string &text, const StringName &operation, const String &new_path, bool saved);
@@ -108,9 +113,12 @@ public:
 	Array query_ray(Vector3 origin, Vector3 direction, double max_distance = 1e30) const;
 	Dictionary create_cuboid(Vector3 mins, Vector3 maxs, const String &texture);
 	Dictionary duplicate_brushes(const PackedInt64Array &ids);
+	Dictionary merge_brushes(const PackedInt64Array &ids);
 	Dictionary delete_brushes(const PackedInt64Array &ids);
 	Dictionary translate_brushes(const PackedInt64Array &ids, Vector3 delta);
 	Dictionary rotate_brushes(const PackedInt64Array &ids, Vector3 pivot, int axis, double radians);
+	Dictionary preview_translate_brushes(const PackedInt64Array &ids, Vector3 delta) const;
+	Dictionary preview_rotate_brushes(const PackedInt64Array &ids, Vector3 pivot, int axis, double radians) const;
 	Dictionary translate_face(int64_t id, int face, Vector3 delta, int64_t topology_revision);
 	Dictionary set_brush_texture(const PackedInt64Array &ids, const String &name);
 	Dictionary set_face_texture(int64_t id, int face, const String &name, int64_t topology_revision);
@@ -130,6 +138,8 @@ public:
 	Dictionary translate_vertices(int64_t id, const PackedInt32Array &vertex_indices, Vector3 delta, int64_t topology_revision);
 	Dictionary translate_components(const Array &components, Vector3 delta);
 	Dictionary clip_brushes(const PackedInt64Array &ids, Vector3 p0, Vector3 p1, Vector3 p2, bool split);
+	Dictionary preview_translate_components(const Array &components, Vector3 delta) const;
+	Dictionary preview_clip_brushes(const PackedInt64Array &ids, Vector3 p0, Vector3 p1, Vector3 p2, bool split, bool flip = false) const;
 };
 }
 #endif

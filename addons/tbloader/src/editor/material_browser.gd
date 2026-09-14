@@ -170,6 +170,17 @@ func get_selected_path() -> String:
 	return _selected_path
 
 
+## Updates the visual selection without loading or emitting resource_selected.
+func highlight_path(path: String) -> void:
+	_selected_path = path if _entries.has(path) else ""
+	if _list != null:
+		_list.deselect_all()
+		var index := _visible_paths.find(_selected_path)
+		if index >= 0:
+			_list.select(index)
+	_update_status()
+
+
 ## Mapping never guesses an absolute/project-wide shader for an unbound loader.
 ## An unresolved result may still carry a candidate token for display, NOT assignment.
 func get_mapping(path: String) -> Dictionary:
@@ -354,8 +365,12 @@ func _build_ui() -> void:
 	_list = ItemList.new()
 	_list.name = "MaterialList"
 	_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_list.fixed_icon_size = Vector2i(48, 48)
-	_list.max_columns = 1
+	_list.icon_mode = ItemList.ICON_MODE_TOP
+	_list.fixed_icon_size = Vector2i(96, 96)
+	_list.fixed_column_width = 132
+	_list.same_column_width = true
+	_list.max_columns = 0
+	_list.max_text_lines = 2
 	_list.item_selected.connect(func(index: int): select_path(_visible_paths[index]))
 	split.add_child(_list)
 	_status = Label.new()
@@ -432,7 +447,7 @@ func _rebuild_list() -> void:
 	if _list != null:
 		_list.clear()
 		for path in _visible_paths:
-			var index := _list.add_item("%s  [%s]\n%s" % [path.get_file(), _entries[path].kind, path])
+			var index := _list.add_item("%s\n[%s]" % [path.get_file(), _entries[path].kind])
 			_list.set_item_tooltip(index, path)
 			if path == _selected_path:
 				_list.select(index)

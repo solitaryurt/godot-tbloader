@@ -1,6 +1,6 @@
 @tool
 extends EditorPlugin
-## Current Map editor baseline. frame_post_draw is used only as a completion
+## Current Radiant editor baseline. frame_post_draw is used only as a completion
 ## boundary; none of these measurements are input-to-photon latency.
 
 const MARKER = "TB_CURRENT_EDITOR_PERF_COMPLETE:PASS"
@@ -134,11 +134,11 @@ func run() -> void:
 	while EditorInterface.get_resource_filesystem().is_scanning() or EditorInterface.get_resource_filesystem().is_importing():
 		await get_tree().process_frame
 	var plugin := find_tb_plugin(get_tree().root)
-	if not require(plugin != null and plugin.map_editor != null, "current production Map editor is active"):
+	if not require(plugin != null and plugin.map_editor != null, "current production Radiant editor is active"):
 		finish(1)
 		return
 	var ui: Control = plugin.map_editor
-	EditorInterface.set_main_screen_editor("Map")
+	EditorInterface.set_main_screen_editor("Radiant")
 	plugin._make_visible(true)
 	await get_tree().process_frame
 	# No redraw is explicitly requested for this baseline boundary.

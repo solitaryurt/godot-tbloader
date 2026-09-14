@@ -2,26 +2,37 @@
 extends EditorPlugin
 class_name TBPlugin
 
+const MAIN_SCREEN_NAME := "Radiant"
+const TBLoaderInspector = preload("res://addons/tbloader/src/editor/tbloader_inspector.gd")
+
 var map_control: Control = null
 var editing_loader: WeakRef = weakref(null)
+var inspector_plugin: EditorInspectorPlugin = null
 var materials_panel: Control = null
 var materials_tree: Tree = null
 var materials_grid: ItemList = null
 var materials_button: Button = null
 var materials_count_label: Label = null
+var materials_context_label: Label = null
+var built_materials_page: Control = null
+var authoring_materials_page: Control = null
 var materials_preview_generation := 0
 var map_editor: Control = null
 var map_screen_active = false
+var spatial_actions: Dictionary = {}
 
 func _enter_tree():
 	map_control = create_map_control()
 	map_control.set_visible(false)
 	add_control_to_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, map_control)
 
-	materials_panel = create_materials_panel()
-	add_control_to_bottom_panel(materials_panel, "Map Materials")
 	map_editor = preload("res://addons/tbloader/src/editor/map_editor.gd").new()
 	map_editor.plugin = self
+	map_editor.visibility_changed.connect(update_materials_context)
+	inspector_plugin = TBLoaderInspector.new(self)
+	add_inspector_plugin(inspector_plugin)
+	materials_panel = create_materials_panel()
+	add_control_to_bottom_panel(materials_panel, "Map Materials")
 	get_editor_interface().get_editor_main_screen().add_child(map_editor)
 	map_editor.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	map_editor.hide()
@@ -34,6 +45,9 @@ func _enter_tree():
 
 func _exit_tree():
 	materials_preview_generation += 1
+	if inspector_plugin != null:
+		remove_inspector_plugin(inspector_plugin)
+		inspector_plugin = null
 	map_editor.store_recovery()
 	map_editor.shutdown()
 	if scene_changed.is_connected(edited_scene_changed):
@@ -70,6 +84,17 @@ func _make_visible(visible: bool):
 	if map_editor != null:
 		map_editor.set_visible(visible)
 		map_editor.set_scene_active(visible)
+	update_materials_context()
+	if not visible:
+		refresh_materials()
+
+func _get_window_layout(configuration: ConfigFile) -> void:
+	if map_editor != null and map_editor.is_node_ready():
+		configuration.set_value("TBLoader", "map_workspace", map_editor.workspace_state())
+
+func _set_window_layout(configuration: ConfigFile) -> void:
+	if map_editor != null and map_editor.is_node_ready() and configuration.has_section_key("TBLoader", "map_workspace"):
+		map_editor.restore_workspace_state(configuration.get_value("TBLoader", "map_workspace", {}))
 
 func edited_scene_changed(_root: Node) -> void:
 	if map_screen_active and map_editor != null:
@@ -93,7 +118,7 @@ func _has_main_screen() -> bool:
 	return true
 
 func _get_plugin_name() -> String:
-	return "Map"
+	return MAIN_SCREEN_NAME
 
 func _get_plugin_icon() -> Texture2D:
 	return get_editor_interface().get_base_control().get_theme_icon("GridMap", "EditorIcons")
@@ -109,17 +134,25 @@ func spatial_selection_changed() -> void:
 	var nodes = get_editor_interface().get_selection().get_selected_nodes()
 	var loader = nodes[0] if nodes.size() == 1 and nodes[0] is TBLoader else null
 	_edit(loader)
-	map_control.visible = loader != null
+	update_spatial_toolbar()
 
 func _edit(object):
 	editing_loader = weakref(object)
-	refresh_materials()
+	update_spatial_toolbar()
+	if map_editor != null and map_editor.has_method("update_loader_action_state"):
+		map_editor.update_loader_action_state()
+	update_materials_context()
+	if not map_screen_active:
+		refresh_materials()
 
 func create_map_control() -> Control:
 	var button_build_meshes = Button.new()
 	button_build_meshes.flat = true
 	button_build_meshes.text = "Build Meshes"
+	button_build_meshes.tooltip_text = "Build Meshes for the selected TBLoader"
+	button_build_meshes.accessibility_name = "Build Meshes"
 	button_build_meshes.connect("pressed", Callable(self, "build_meshes"))
+	spatial_actions.BuildMeshes = button_build_meshes
 
 	materials_button = Button.new()
 	materials_button.flat = true
@@ -130,12 +163,39 @@ func create_map_control() -> Control:
 	ret.add_child(button_build_meshes)
 	ret.add_child(materials_button)
 	var open_button = Button.new()
-	open_button.text = "Open in Map Editor"
-	open_button.pressed.connect(func():
-		get_editor_interface().set_main_screen_editor("Map")
-		map_editor.bind_selected())
+	open_button.text = "Open Radiant Editor"
+	open_button.tooltip_text = "Open the selected TBLoader in the Radiant Editor"
+	open_button.accessibility_name = "Open Radiant Editor"
+	open_button.pressed.connect(open_in_map_editor)
+	spatial_actions.OpenRadiantEditor = open_button
 	ret.add_child(open_button)
 	return ret
+
+func update_spatial_toolbar() -> void:
+	if map_control == null:
+		return
+	map_control.visible = true
+	var loader = editing_loader.get_ref()
+	var root = get_editor_interface().get_edited_scene_root()
+	var has_loader: bool = is_instance_valid(loader) and loader is TBLoader and root != null and (root == loader or root.is_ancestor_of(loader))
+	spatial_actions.BuildMeshes.disabled = not has_loader
+	spatial_actions.OpenRadiantEditor.disabled = not has_loader
+	materials_button.disabled = not has_loader
+
+func open_in_map_editor(loader = null) -> void:
+	var target = loader if loader != null else editing_loader.get_ref()
+	get_editor_interface().set_main_screen_editor(MAIN_SCREEN_NAME)
+	if not is_instance_valid(target) or not target is TBLoader or map_editor == null:
+		return
+	if map_editor.has_method("bind_loader"):
+		map_editor.call("bind_loader", target)
+	else:
+		# Compatibility until map_editor exposes bind_loader(loader).
+		var selected_loader := editing_loader
+		editing_loader = weakref(target)
+		map_editor.bind_selected()
+		editing_loader = selected_loader
+	update_materials_context()
 
 func build_meshes():
 	var loader = editing_loader.get_ref()
@@ -145,7 +205,7 @@ func build_meshes():
 	if root == null or (loader != root and not root.is_ancestor_of(loader)):
 		return
 	if not loader.has_method("build_meshes_checked"):
-		map_editor.set_status("Checked bake API unavailable; build deferred.")
+		map_editor.set_status("Checked Build Meshes API unavailable; mesh build deferred.")
 		return
 	if loader == map_editor.session.loader.get_ref():
 		map_editor.bake()
@@ -156,6 +216,15 @@ func build_meshes():
 func create_materials_panel() -> Control:
 	var panel = VBoxContainer.new()
 	panel.custom_minimum_size.y = 220
+	materials_context_label = Label.new()
+	materials_context_label.name = "MaterialContext"
+	panel.add_child(materials_context_label)
+	authoring_materials_page = map_editor.create_material_workspace()
+	panel.add_child(authoring_materials_page)
+	built_materials_page = VBoxContainer.new()
+	built_materials_page.name = "BuiltMaterials"
+	built_materials_page.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	panel.add_child(built_materials_page)
 
 	var header = HBoxContainer.new()
 	materials_count_label = Label.new()
@@ -171,7 +240,7 @@ func create_materials_panel() -> Control:
 	view.add_item("List")
 	view.item_selected.connect(func(index: int): set_materials_grid_view(index == 0))
 	header.add_child(view)
-	panel.add_child(header)
+	built_materials_page.add_child(header)
 
 	materials_tree = Tree.new()
 	materials_tree.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -183,7 +252,7 @@ func create_materials_panel() -> Control:
 	materials_tree.set_column_expand(0, true)
 	materials_tree.set_column_expand(1, true)
 	materials_tree.connect("item_selected", Callable(self, "material_selected"))
-	panel.add_child(materials_tree)
+	built_materials_page.add_child(materials_tree)
 	materials_grid = ItemList.new()
 	materials_grid.name = "MaterialGrid"
 	materials_grid.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -191,12 +260,38 @@ func create_materials_panel() -> Control:
 	materials_grid.fixed_icon_size = Vector2i(112, 112)
 	materials_grid.fixed_column_width = 144
 	materials_grid.same_column_width = true
+	materials_grid.max_columns = 0
 	materials_grid.max_text_lines = 2
 	materials_grid.item_selected.connect(grid_material_selected)
-	panel.add_child(materials_grid)
+	built_materials_page.add_child(materials_grid)
 	set_materials_grid_view(true)
+	update_materials_context()
 
 	return panel
+
+func update_materials_context() -> void:
+	if authoring_materials_page == null or built_materials_page == null:
+		return
+	var editable_session := editable_material_session()
+	authoring_materials_page.visible = editable_session != null
+	built_materials_page.visible = editable_session == null
+	if editable_session != null:
+		var path: String = editable_session.document.get_path()
+		materials_context_label.text = "Editing map materials • " + (path.get_file() if not path.is_empty() else "Untitled")
+	else:
+		var loader = editing_loader.get_ref()
+		materials_context_label.text = "Built materials • " + (loader.name if is_instance_valid(loader) else "No TBLoader selected")
+
+func editable_material_session() -> RefCounted:
+	if map_editor == null or map_editor.session == null:
+		return null
+	if map_screen_active or map_editor.is_visible_in_tree():
+		return map_editor.session
+	var bound_loader = map_editor.session.loader.get_ref()
+	if not is_instance_valid(bound_loader):
+		return null
+	var selected_loader = editing_loader.get_ref()
+	return map_editor.session if not is_instance_valid(selected_loader) or selected_loader == bound_loader else null
 
 func set_materials_grid_view(enabled: bool) -> void:
 	if materials_grid != null:
@@ -205,7 +300,9 @@ func set_materials_grid_view(enabled: bool) -> void:
 		materials_tree.visible = not enabled
 
 func show_materials():
-	refresh_materials()
+	update_materials_context()
+	if editable_material_session() == null:
+		refresh_materials()
 	make_bottom_panel_item_visible(materials_panel)
 
 func refresh_materials():

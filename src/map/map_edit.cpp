@@ -4,7 +4,9 @@
 #include "patch.h"
 #include "map_parser.h"
 #include "geo_generator.h"
+#include <algorithm>
 #include <cmath>
+#include <queue>
 
 std::string LMEditEntity::property(const std::string &key) const {
 	for (const auto &p : epairs) if (p.first == key) return p.second;
@@ -115,4 +117,81 @@ bool lm_edit_prune_faces(LMEditPrimitive &brush) {
 	if (kept.size() < 4) return false;
 	brush.faces = std::move(kept);
 	return true;
+}
+
+namespace {
+constexpr double MERGE_POINT_EPSILON = 1e-5;
+constexpr double MERGE_NORMAL_EPSILON = 1e-8;
+
+bool merge_same_point(vec3 a, vec3 b) {
+	const vec3 delta = vec3_sub(a, b);
+	return vec3_dot(delta, delta) <= MERGE_POINT_EPSILON * MERGE_POINT_EPSILON;
+}
+bool merge_same_plane(const LMFace &a, const LMFace &b, bool opposing) {
+	const double direction = opposing ? -1.0 : 1.0;
+	return vec3_dot(a.plane_normal, b.plane_normal) * direction > 1.0 - MERGE_NORMAL_EPSILON &&
+		std::abs(a.plane_dist - b.plane_dist * direction) <= MERGE_POINT_EPSILON;
+}
+bool merge_same_polygon(const LMBrushTopologyFace &a, const LMBrushTopologyFace &b) {
+	if (a.winding.size() < 3 || a.winding.size() != b.winding.size()) return false;
+	std::vector<bool> used(b.winding.size());
+	for (const vec3 point : a.winding) {
+		size_t match = 0;
+		for (; match < b.winding.size(); ++match) if (!used[match] && merge_same_point(point, b.winding[match])) break;
+		if (match == b.winding.size()) return false;
+		used[match] = true;
+	}
+	return true;
+}
+}
+
+LMMergeBrushResult lm_edit_merge_brushes(const std::vector<const LMEditPrimitive *> &brushes, const std::vector<LMBrushTopology> &topologies, LMEditPrimitive &merged) {
+	if (brushes.size() < 2 || brushes.size() != topologies.size()) return LMMergeBrushResult::INVALID_GEOMETRY;
+	std::vector<std::vector<bool>> interior(brushes.size());
+	std::vector<std::vector<int>> links(brushes.size());
+	for (size_t i = 0; i < brushes.size(); ++i) {
+		if (!brushes[i] || brushes[i]->patch || brushes[i]->faces.size() != topologies[i].faces.size()) return LMMergeBrushResult::INVALID_GEOMETRY;
+		interior[i].resize(brushes[i]->faces.size());
+	}
+	for (size_t i = 0; i < brushes.size(); ++i) for (size_t j = i + 1; j < brushes.size(); ++j) {
+		bool linked = false;
+		for (size_t a = 0; a < brushes[i]->faces.size(); ++a) {
+			if (topologies[i].faces[a].winding.size() < 3) continue;
+			for (size_t b = 0; b < brushes[j]->faces.size(); ++b) {
+				if (!merge_same_plane(brushes[i]->faces[a].plane, brushes[j]->faces[b].plane, true) ||
+						!merge_same_polygon(topologies[i].faces[a], topologies[j].faces[b])) continue;
+				// A contributing face cannot be the complete boundary of two different solids.
+				if (interior[i][a] || interior[j][b]) return LMMergeBrushResult::INVALID_GEOMETRY;
+				interior[i][a] = interior[j][b] = true;
+				linked = true;
+			}
+		}
+		if (linked) { links[i].push_back(j); links[j].push_back(i); }
+	}
+	std::vector<bool> reached(brushes.size());
+	std::queue<size_t> pending; pending.push(0); reached[0] = true;
+	while (!pending.empty()) {
+		const size_t i = pending.front(); pending.pop();
+		for (int next : links[i]) if (!reached[next]) { reached[next] = true; pending.push(next); }
+	}
+	if (std::find(reached.begin(), reached.end(), false) != reached.end()) return LMMergeBrushResult::INVALID_GEOMETRY;
+
+	merged = {};
+	for (size_t i = 0; i < brushes.size(); ++i) for (size_t f = 0; f < brushes[i]->faces.size(); ++f) {
+		if (topologies[i].faces[f].winding.size() < 3 || interior[i][f]) continue;
+		const auto &source = brushes[i]->faces[f];
+		for (const auto &topology : topologies) for (const vec3 point : topology.vertices) {
+			// This is NetRadiant's winding concavity test extended to all source vertices.
+			if (vec3_dot(source.plane.plane_normal, vec3_sub(point, source.plane.plane_points.v0)) > MERGE_POINT_EPSILON)
+				return LMMergeBrushResult::INVALID_GEOMETRY;
+		}
+		const bool duplicate = std::any_of(merged.faces.begin(), merged.faces.end(), [&](const LMEditFace &face) {
+			return merge_same_plane(source.plane, face.plane, false);
+		});
+		if (!duplicate) {
+			if (merged.faces.size() == 64) return LMMergeBrushResult::LIMIT_EXCEEDED;
+			merged.faces.push_back(source);
+		}
+	}
+	return merged.faces.size() >= 4 ? LMMergeBrushResult::OK : LMMergeBrushResult::INVALID_GEOMETRY;
 }

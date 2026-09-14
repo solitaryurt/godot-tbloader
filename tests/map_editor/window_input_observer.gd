@@ -95,8 +95,9 @@ func state() -> Dictionary:
 	var focus = get_tree().root.gui_get_focus_owner()
 	return {"pid": OS.get_process_id(), "usec": Time.get_ticks_usec(), "visible": ui.is_visible_in_tree(), "window_position": [get_tree().root.position.x, get_tree().root.position.y],
 		"window_focus": get_tree().root.has_focus(), "last_frame_usec": last_frame, "controls": buttons, "a": graph_state(ui.graph_a), "b": graph_state(ui.graph_b),
-		"quad_split": rect(ui.graph_a.get_parent().get_parent().get_drag_area_controls()[0]),
-		"grid_split": rect(ui.graph_a.get_parent().get_drag_area_controls()[0]),
+		"graphs": ui.graphs.map(graph_state), "layout": ui.view_layout, "camera_slot": ui.camera_slot,
+		"quad_split": rect(ui.workspace.get_drag_area_controls()[0]),
+		"grid_split": rect(ui.right_views.get_drag_area_controls()[0]),
 		"camera": rect(ui.camera_view), "camera_position": vector(ui.camera_view.camera.position), "flying": ui.camera_view.flying,
 		"held": ui.camera_view.held, "mouse_mode": Input.mouse_mode, "triangles": ui.camera_view.triangle_count,
 		"brushes": brushes, "text": ui.session.document.export_text().value, "revision": ui.session.document.get_revision(),

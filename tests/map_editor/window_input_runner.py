@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Isolated real X11/XTest Map journey; observer is read-only, all edits use XTest."""
+"""Isolated real X11/XTest Radiant journey; observer is read-only, all edits use XTest."""
 import argparse
 import fcntl
 import json
@@ -144,8 +144,8 @@ class Journey:
     def run(self, reopen=False):
         state = self.request()
         self.x.log("coordinate_preflight", x11_origin=self.x.origin(), godot_origin=state["window_position"], pointer=self.x.pointer(self.x.root))
-        self.click(self.control("Map"))
-        state = self.wait("real Map main-screen button", lambda s: s["visible"])
+        self.click(self.control("Radiant"))
+        state = self.wait("real Radiant main-screen button", lambda s: s["visible"])
         if reopen:
             state = self.open_map(self.project / "window-authored.map")
             expected = json.loads((self.logs / "expected.json").read_text())
@@ -268,9 +268,9 @@ class Journey:
         self.x.chord("y", "Control_L")
         state = self.wait("entity property real redo", lambda s: s["text"] == canonical)
         self.click(self.control("3D"))
-        self.wait("real 3D tab hides Map and preserves document", lambda s: not s["visible"] and s["text"] == canonical)
-        self.click(self.control("Map"))
-        state = self.wait("real Map tab restores authoring document", lambda s: s["visible"] and s["text"] == canonical)
+        self.wait("real 3D tab hides Radiant and preserves document", lambda s: not s["visible"] and s["text"] == canonical)
+        self.click(self.control("Radiant"))
+        state = self.wait("real Radiant tab restores authoring document", lambda s: s["visible"] and s["text"] == canonical)
 
         for exit_mode in ("Escape", "RMB", "focus"):
             self.click(center(state["camera"]), 3)

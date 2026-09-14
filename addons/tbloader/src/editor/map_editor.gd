@@ -6,13 +6,23 @@ const Graph = preload("res://addons/tbloader/src/editor/graph_view.gd")
 const Camera = preload("res://addons/tbloader/src/editor/camera_view.gd")
 const Browser = preload("res://addons/tbloader/src/editor/material_browser.gd")
 const BakeAction = preload("res://addons/tbloader/src/editor/bake_action.gd")
+const UVPane = preload("res://addons/tbloader/src/editor/uv_pane.gd")
+const EntityPane = preload("res://addons/tbloader/src/editor/entity_pane.gd")
+
+const PANE_TYPES := ["Camera", "Top Grid", "Front Grid", "Side Grid", "UV", "Entities"]
 
 var plugin: EditorPlugin
 var session: RefCounted
 var graph_a: Control
 var graph_b: Control
+var graph_c: Control
+var graphs: Array[Control] = []
+var cameras: Array[Control] = []
+var uv_panes: Array[Control] = []
+var entity_panes: Array[Control] = []
 var active_graph: Control
 var camera_view: Control
+var material_workspace: Control
 var browser: Control
 var status: Label
 var notice: Label
@@ -34,14 +44,28 @@ var dialog_operation = ""
 var tool = "Brush"
 var tool_buttons: Dictionary = {}
 var visibility_buttons: Dictionary = {}
+var loader_actions: Dictionary = {}
 var tokens: Array = []
 var material_cache: Dictionary = {}
 var texture_sizes: Dictionary = {}
 var material_generation = 0
-var rebuild_on_save: CheckBox
+var rebuild_on_save: BaseButton
 var texture_root: LineEdit
-var session_picker: OptionButton
 var scene_tabs: TabBar
+var document_tabs: TabBar
+var file_menu: MenuButton
+var layout_menu: MenuButton
+var workspace: HSplitContainer
+var left_views: VSplitContainer
+var right_views: VSplitContainer
+var view_slots: Array[Control] = []
+var slot_menus: Array[MenuButton] = []
+var slot_views: Array = [null, null, null, null]
+var slot_types: Array[String] = ["Camera", "Side Grid", "Top Grid", "Front Grid"]
+var view_parking: Control
+var view_layout = 3
+var camera_slot = 0 # Compatibility alias; pane placement is now slot-owned.
+var syncing_view_splits = false
 var sessions: Array[RefCounted] = [] # Documents outlive expirable history payloads.
 var scene_sessions: Dictionary = {}
 var watched_loaders: Dictionary = {}
@@ -49,6 +73,7 @@ var scene_active = false
 var discovery_queued = false
 var discovered_scene_id = 0
 var changing_scene_tabs = false
+var changing_document_tabs = false
 var last_standalone: WeakRef = weakref(null)
 var discard_on_replace: RefCounted
 var history_total_budget = 128 * 1024 * 1024
@@ -59,6 +84,10 @@ var shutting_down = false
 const RECOVERY_PATH = "user://tbloader-map-recovery.json"
 const RECOVERY_META = "tbloader_map_recovery"
 var scan_delay = -1.0
+var fallback_entity_pane: Control
+var cut_points: Array[Vector3] = []
+var cut_flip := false
+var mutation_preview_owner: WeakRef = weakref(null)
 
 func _ready() -> void:
 	size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -68,127 +97,132 @@ func _ready() -> void:
 	scene_tabs.tab_changed.connect(scene_tab_changed)
 	scene_tabs.hide()
 	add_child(scene_tabs)
+	document_tabs = TabBar.new()
+	document_tabs.name = "MapDocumentTabs"
+	document_tabs.tooltip_text = "Open Map documents"
+	document_tabs.tab_changed.connect(document_tab_changed)
+	document_tabs.tab_button_pressed.connect(close_document_tab)
+	add_child(document_tabs)
 	var toolbar = HFlowContainer.new()
+	toolbar.name = "MapToolbar"
 	add_child(toolbar)
+	var file_group := toolbar_group(toolbar)
+	file_menu = MenuButton.new()
+	file_menu.icon = editor_icon("GuiTabMenu")
+	file_menu.tooltip_text = "Map file commands (Ctrl+O / Ctrl+S / Ctrl+Shift+S)"
+	file_menu.accessibility_name = "Map file commands"
+	file_menu.theme_type_variation = "FlatMenuButton"
+	file_menu.get_popup().add_item("Open…", 0)
+	file_menu.get_popup().add_item("Save", 1)
+	file_menu.get_popup().add_item("Save As…", 2)
+	file_menu.get_popup().id_pressed.connect(file_menu_command)
+	file_group.add_child(file_menu)
+	var mode_group := toolbar_group(toolbar)
+	var exclusive_tools := ButtonGroup.new()
+	var tool_shortcuts := {"Brush": "Q", "Cut": "X", "Rotate": "R", "Face": "F", "Edge": "E", "Vertex": "V"}
+	var tool_icons := {
+		"Select": editor_icon("ToolSelect"), "Brush": custom_icon("brush"), "Cut": custom_icon("cut"),
+		"Rotate": editor_icon("ToolRotate"), "Face": custom_icon("face"), "Edge": custom_icon("edge"),
+		"Vertex": custom_icon("vertex"), "Texture": custom_icon("texture"),
+	}
 	for mode in ["Select", "Brush", "Cut", "Rotate", "Face", "Edge", "Vertex", "Texture"]:
 		var value: String = mode
-		var control = button(toolbar, mode, func(): set_tool(value))
-		control.toggle_mode = true
+		var hint: String = "%s Tool" % mode
+		if tool_shortcuts.has(mode):
+			hint += " (%s)" % tool_shortcuts[mode]
+		var control := icon_button(mode_group, mode, hint, tool_icons[mode], func(): set_tool(value), true)
+		control.button_group = exclusive_tools
 		tool_buttons[mode] = control
-	button(toolbar, "Bind selected loader", bind_selected)
-	button(toolbar, "Detach", detach)
-	button(toolbar, "Update loader path", update_loader_path)
-	button(toolbar, "Bake saved map", bake)
-	rebuild_on_save = CheckBox.new()
-	rebuild_on_save.text = "Bake on save"
+	var loader_group := toolbar_group(toolbar)
+	loader_actions.BindLoader = icon_button(loader_group, "BindLoader", "Bind selected TBLoader", custom_icon("bind_loader"), bind_selected)
+	loader_actions.DetachLoader = icon_button(loader_group, "DetachLoader", "Detach from TBLoader", custom_icon("detach_loader"), detach)
+	loader_actions.UpdateLoaderPath = icon_button(loader_group, "UpdateLoaderPath", "Update loader map path", custom_icon("update_loader_path"), update_loader_path)
+	loader_actions.BuildMeshes = icon_button(loader_group, "BuildMeshes", "Build Meshes from saved map", editor_icon("Bake"), bake)
+	icon_button(loader_group, "Materials", "Open Map Materials", editor_icon("StandardMaterial3D"), func(): plugin.show_materials())
+	rebuild_on_save = icon_button(loader_group, "BuildMeshesOnSave", "Build meshes on save", custom_icon("bake_on_save"), func(): pass, true)
 	rebuild_on_save.button_pressed = false
-	toolbar.add_child(rebuild_on_save)
-	session_picker = OptionButton.new()
-	session_picker.tooltip_text = "Open and unresolved Map documents"
-	session_picker.item_selected.connect(func(index):
-		var origin = session_picker.get_item_metadata(index).get_ref()
-		if origin != null:
-			set_session(origin))
-	toolbar.add_child(session_picker)
+	var layout_group := toolbar_group(toolbar)
+	layout_menu = MenuButton.new()
+	layout_menu.theme_type_variation = "FlatMenuButton"
+	layout_menu.tooltip_text = "Viewport layout"
+	layout_menu.accessibility_name = "Viewport layout"
+	for count in [2, 3, 4]:
+		layout_menu.get_popup().add_radio_check_item("%d Views" % count, count)
+	layout_menu.get_popup().id_pressed.connect(layout_menu_command)
+	layout_group.add_child(layout_menu)
 	binding_label = Label.new()
 	add_child(binding_label)
-	button(toolbar, "Clip", func(): active_graph.apply_clip(false))
-	button(toolbar, "Split", func(): active_graph.apply_clip(true))
-	button(toolbar, "Flip", func(): active_graph.clip_flip = not active_graph.clip_flip; set_status("Clip side flipped"))
+	var geometry_group := toolbar_group(toolbar)
+	icon_button(geometry_group, "Clip", "Apply clip (Enter)", custom_icon("clip"), func(): apply_clip(false))
+	icon_button(geometry_group, "Split", "Split brushes (Shift+Enter)", custom_icon("split"), func(): apply_clip(true))
+	icon_button(geometry_group, "Flip", "Flip clipping side (Ctrl+Enter)", editor_icon("FlipWinding"), flip_clip)
 	var sides = SpinBox.new()
 	sides.min_value = 3
 	sides.max_value = 62
 	sides.value = 5
 	sides.prefix = "Sides "
-	toolbar.add_child(sides)
-	button(toolbar, "Prism", func(): make_prism(int(sides.value)))
-	button(toolbar, "Entity (N)", show_entities)
-	var filters = HFlowContainer.new()
-	add_child(filters)
-	var filter_label = Label.new()
-	filter_label.text = "Hide:"
-	filters.add_child(filter_label)
-	for entry in [["Entities", "entities"], ["Caulk", "caulk"], ["Clips", "clips"]]:
+	sides.tooltip_text = "Prism sides (Ctrl+3 through Ctrl+9 creates directly)"
+	geometry_group.add_child(sides)
+	icon_button(geometry_group, "Prism", "Create prism", editor_icon("PrismMesh"), func(): make_prism(int(sides.value)))
+	icon_button(geometry_group, "Merge", "Merge selected convex brushes", editor_icon("Merge"), merge_selection)
+	icon_button(geometry_group, "Entity", "Entity Inspector (N)", editor_icon("Object"), show_entities)
+	var filter_group := toolbar_group(toolbar)
+	for entry in [["Entities", "entities", "hide_entities"], ["Caulk", "caulk", "hide_caulk"], ["Clips", "clips", "hide_clips"]]:
 		var category: String = entry[1]
-		var control = button(filters, entry[0], func(): session.set_visibility_filter(category, not session.visibility_filters[category]))
-		control.toggle_mode = true
-		control.tooltip_text = "Hide %s in all map views; this does not edit the map" % entry[0].to_lower()
+		var control := icon_button(filter_group, "Hide%s" % entry[0], "Hide %s in all map views; this does not edit the map" % entry[0].to_lower(),
+			custom_icon(entry[2]), func(): session.set_visibility_filter(category, not session.visibility_filters[category]), true)
 		visibility_buttons[category] = control
-	var quad = HSplitContainer.new()
-	quad.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	quad.split_offset = 0
-	add_child(quad)
-	var left = VSplitContainer.new()
-	left.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	left.split_offset = 0
-	quad.add_child(left)
-	var right = VSplitContainer.new()
-	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	right.split_offset = 0
-	quad.add_child(right)
-	camera_view = Camera.new()
-	camera_view.host = self
-	camera_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	left.add_child(camera_view)
-	var materials = VBoxContainer.new()
-	materials.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	materials.custom_minimum_size = Vector2(300, 200)
-	left.add_child(materials)
-	var root_row = HBoxContainer.new()
-	materials.add_child(root_row)
-	var label = Label.new()
-	label.text = "Texture root"
-	root_row.add_child(label)
-	texture_root = LineEdit.new()
-	texture_root.text = "res://textures"
-	texture_root.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	root_row.add_child(texture_root)
-	texture_root.text_submitted.connect(func(path): configure_browser(path))
-	button(root_row, "Set", func(): configure_browser(texture_root.text))
-	browser = Browser.new()
-	browser.custom_minimum_size.y = 300
-	browser.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	materials.add_child(browser)
-	browser.resource_selected.connect(material_selected)
-	browser.mapping_changed.connect(refresh_materials)
-	browser.index_changed.connect(func(_count): refresh_materials())
-	var surface = HBoxContainer.new()
-	materials.add_child(surface)
-	texture_field = LineEdit.new()
-	texture_field.placeholder_text = "Map shader token"
-	texture_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	surface.add_child(texture_field)
-	button(surface, "Assign", assign_texture)
-	var uv_row = GridContainer.new()
-	uv_row.columns = 3
-	materials.add_child(uv_row)
-	for name_value in ["U ", "V ", "R ", "SU ", "SV "]:
-		var spin = SpinBox.new()
-		spin.min_value = -65536
-		spin.max_value = 65536
-		spin.step = 0.125
-		spin.prefix = name_value
-		spin.custom_minimum_size.x = 68
-		spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		uv_row.add_child(spin)
-		uv_fields.append(spin)
-	uv_fields[3].value = 1
-	uv_fields[4].value = 1
-	uv_apply = button(uv_row, "UV Apply", apply_uv)
-	uv_label = Label.new()
-	materials.add_child(uv_label)
-	graph_a = Graph.new()
-	graph_a.host = self
-	graph_a.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	right.add_child(graph_a)
-	graph_b = Graph.new()
-	graph_b.host = self
-	graph_b.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	graph_b.orientation = 1
-	right.add_child(graph_b)
-	camera_view.camera_moved.connect(graph_a.set_camera_pose)
-	camera_view.camera_moved.connect(graph_b.set_camera_pose)
+	workspace = HSplitContainer.new()
+	workspace.name = "MapViewWorkspace"
+	workspace.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	workspace.drag_area_highlight_in_editor = true
+	workspace.drag_nested_intersections = true
+	add_child(workspace)
+	left_views = VSplitContainer.new()
+	left_views.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	left_views.drag_nested_intersections = true
+	left_views.dragged.connect(func(offset: int): sync_view_splits(left_views, offset))
+	workspace.add_child(left_views)
+	right_views = VSplitContainer.new()
+	right_views.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	right_views.drag_nested_intersections = true
+	right_views.dragged.connect(func(offset: int): sync_view_splits(right_views, offset))
+	workspace.add_child(right_views)
+	for index in 4:
+		var slot := Control.new()
+		slot.name = "ViewSlot%d" % index
+		slot.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		slot.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		(left_views if index < 2 else right_views).add_child(slot)
+		view_slots.append(slot)
+		var pane_menu := MenuButton.new()
+		pane_menu.name = "PaneMenu%d" % index
+		pane_menu.icon = editor_icon("GuiTabMenu")
+		pane_menu.tooltip_text = "Choose pane type"
+		pane_menu.accessibility_name = "Pane type for slot %d" % (index + 1)
+		pane_menu.theme_type_variation = "FlatMenuButton"
+		pane_menu.set_anchors_preset(Control.PRESET_TOP_LEFT)
+		pane_menu.offset_left = 2
+		pane_menu.offset_top = 2
+		pane_menu.offset_right = 30
+		pane_menu.offset_bottom = 26
+		for pane_index in PANE_TYPES.size():
+			pane_menu.get_popup().add_radio_check_item(PANE_TYPES[pane_index], pane_index)
+		var pane_icons := [editor_icon("Camera3D"), custom_icon("grid_xy"), custom_icon("grid_xz"),
+			custom_icon("grid_yz"), editor_icon("Texture2D"), editor_icon("Object")]
+		for pane_index in PANE_TYPES.size():
+			pane_menu.get_popup().set_item_icon(pane_index, pane_icons[pane_index])
+		pane_menu.get_popup().id_pressed.connect(slot_menu_command.bind(index))
+		slot.add_child(pane_menu)
+		slot_menus.append(pane_menu)
+	view_parking = Control.new()
+	view_parking.name = "UnusedViews"
+	view_parking.hide()
+	add_child(view_parking)
+	for index in 4:
+		set_slot_type(index, slot_types[index])
 	active_graph = graph_a
+	apply_layout(3)
 	status = Label.new()
 	add_child(status)
 	notice = Label.new()
@@ -204,12 +238,430 @@ func _ready() -> void:
 		if not is_visible_in_tree():
 			cancel_interaction())
 
+func create_material_workspace() -> Control:
+	if material_workspace != null:
+		return material_workspace
+	material_workspace = VBoxContainer.new()
+	material_workspace.name = "MapMaterialAuthoring"
+	material_workspace.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	material_workspace.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	var root_row = HBoxContainer.new()
+	material_workspace.add_child(root_row)
+	var label = Label.new()
+	label.text = "Texture root"
+	root_row.add_child(label)
+	texture_root = LineEdit.new()
+	texture_root.text = "res://textures"
+	texture_root.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	root_row.add_child(texture_root)
+	texture_root.text_submitted.connect(func(path): configure_browser(path))
+	button(root_row, "Set", func(): configure_browser(texture_root.text))
+	browser = Browser.new()
+	browser.custom_minimum_size.y = 180
+	browser.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	material_workspace.add_child(browser)
+	browser.resource_selected.connect(material_selected)
+	browser.mapping_changed.connect(queue_material_refresh)
+	browser.index_changed.connect(func(_count): queue_material_refresh())
+	var surface = HBoxContainer.new()
+	material_workspace.add_child(surface)
+	texture_field = LineEdit.new()
+	texture_field.placeholder_text = "Map shader token"
+	texture_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	surface.add_child(texture_field)
+	button(surface, "Assign", assign_texture)
+	var uv_row = GridContainer.new()
+	uv_row.columns = 3
+	material_workspace.add_child(uv_row)
+	for name_value in ["U ", "V ", "R ", "SU ", "SV "]:
+		var spin = SpinBox.new()
+		spin.min_value = -65536
+		spin.max_value = 65536
+		spin.step = 0.125
+		spin.prefix = name_value
+		spin.custom_minimum_size.x = 68
+		spin.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		uv_row.add_child(spin)
+		uv_fields.append(spin)
+	uv_fields[3].value = 1
+	uv_fields[4].value = 1
+	uv_apply = button(uv_row, "UV Apply", apply_uv)
+	uv_label = Label.new()
+	material_workspace.add_child(uv_label)
+	return material_workspace
+
 func button(parent: Node, text: String, callback: Callable) -> Button:
 	var control = Button.new()
 	control.text = text
 	control.pressed.connect(callback)
 	parent.add_child(control)
 	return control
+
+func editor_icon(name: String) -> Texture2D:
+	return plugin.get_editor_interface().get_base_control().get_theme_icon(name, "EditorIcons")
+
+func custom_icon(name: String) -> Texture2D:
+	var path := "res://addons/tbloader/icons/map_toolbar/%s.svg" % name
+	var svg := FileAccess.get_file_as_string(path)
+	if svg.is_empty():
+		return editor_icon("Node3D")
+	var neutral := plugin.get_editor_interface().get_base_control().get_theme_color("font_color", "Button").to_html(false)
+	var image := Image.new()
+	if image.load_svg_from_string(svg.replace("#e0e0e0", "#%s" % neutral), plugin.get_editor_interface().get_editor_scale()) != OK:
+		return editor_icon("Node3D")
+	return ImageTexture.create_from_image(image)
+
+func toolbar_group(parent: Control) -> HBoxContainer:
+	var panel := PanelContainer.new()
+	panel.theme_type_variation = "PanelContainerButtonGroup"
+	parent.add_child(panel)
+	var row := HBoxContainer.new()
+	panel.add_child(row)
+	return row
+
+func icon_button(parent: Control, name_value: String, hint: String, icon: Texture2D, callback: Callable, toggle := false) -> Button:
+	var control := Button.new()
+	control.name = name_value
+	control.icon = icon
+	control.tooltip_text = hint
+	control.accessibility_name = hint.get_slice(" (", 0)
+	control.theme_type_variation = "FlatButton"
+	control.toggle_mode = toggle
+	control.pressed.connect(callback)
+	parent.add_child(control)
+	return control
+
+func visible_graphs() -> Array[Control]:
+	return graphs.filter(func(graph): return graph.is_inside_tree() and graph.is_visible_in_tree())
+
+func camera_moved(position: Vector3, direction: Vector3) -> void:
+	for graph in graphs:
+		graph.set_camera_pose(position, direction)
+
+func apply_dense_translation(movement: Vector3) -> void:
+	for graph in graphs:
+		graph.apply_dense_translation(movement)
+
+func broadcast_mutation_preview(result: Dictionary, owner: Object) -> bool:
+	if not result.get("ok", false):
+		clear_mutation_preview(owner)
+		session.report(result)
+		return false
+	mutation_preview_owner = weakref(owner)
+	for camera in cameras:
+		camera.set_candidate_preview(result.get("value", []))
+	return true
+
+func clear_mutation_preview(owner: Object = null) -> void:
+	var current = mutation_preview_owner.get_ref()
+	if owner != null and current != null and current != owner:
+		return
+	mutation_preview_owner = weakref(null)
+	for camera in cameras:
+		camera.clear_candidate_preview()
+
+func set_cut_points(value: Array) -> void:
+	cut_points.assign(value)
+	refresh_cut_views()
+
+func add_cut_point(point: Vector3) -> void:
+	if cut_points.size() >= 3:
+		cut_points.clear()
+	cut_points.append(point)
+	refresh_cut_views()
+
+func clear_cut_state() -> void:
+	cut_points.clear()
+	cut_flip = false
+	clear_mutation_preview()
+	refresh_cut_views()
+
+func flip_clip() -> void:
+	cut_flip = not cut_flip
+	var focus = get_viewport().gui_get_focus_owner()
+	if graphs.has(focus):
+		preview_clip(false, focus.orientation)
+	else:
+		preview_clip(false, -1, active_camera_direction())
+	refresh_cut_views()
+	set_status("Clip side flipped")
+
+func cut_plane(hidden_axis := -1, camera_direction := Vector3.ZERO) -> Array[Vector3]:
+	if cut_points.size() < 2:
+		return []
+	var p := cut_points[0]
+	var q := cut_points[1]
+	var r := cut_points[2] if cut_points.size() > 2 else p
+	if cut_points.size() == 2:
+		var extent := maxf(p.distance_to(q), session.grid)
+		if hidden_axis >= 0:
+			r[hidden_axis] -= extent
+		else:
+			var direction := camera_direction.normalized()
+			if direction.is_zero_approx() or (q - p).normalized().cross(direction).length_squared() < 0.0001:
+				var axis := 0
+				for candidate in [1, 2]:
+					if absf((q - p).normalized()[candidate]) < absf((q - p).normalized()[axis]):
+						axis = candidate
+				direction = Vector3.ZERO
+				direction[axis] = 1.0
+			r = p + direction * extent
+	return [p, q, r]
+
+func preview_clip(split: bool, hidden_axis := -1, camera_direction := Vector3.ZERO, owner: Object = null) -> bool:
+	var plane := cut_plane(hidden_axis, camera_direction)
+	if plane.is_empty() or session.selected.is_empty():
+		clear_mutation_preview(owner)
+		return false
+	return broadcast_mutation_preview(session.document.preview_clip_brushes(session.selected,
+		plane[0], plane[1], plane[2], split, cut_flip), owner if owner != null else self)
+
+func apply_clip(split: bool, hidden_axis := -1, camera_direction := Vector3.ZERO) -> void:
+	var plane := cut_plane(hidden_axis, camera_direction)
+	if plane.is_empty():
+		set_status("Place two or three clip points first.")
+		return
+	var p := plane[0]
+	var q := plane[1]
+	var r := plane[2]
+	if cut_flip:
+		var swap := q
+		q = r
+		r = swap
+	if session.transact("Split map brushes" if split else "Clip map brushes", func():
+		var result: Dictionary = session.document.clip_brushes(session.selected, p, q, r, split)
+		if result.ok:
+			session.select(result.value)
+		return result):
+		clear_cut_state()
+
+func refresh_cut_views() -> void:
+	for graph in graphs:
+		graph.queue_redraw()
+	for camera in cameras:
+		camera.rebuild_cut_overlay()
+
+func layout_menu_command(id: int) -> void:
+	apply_layout(id)
+
+func slot_menu_command(pane_id: int, slot: int) -> void:
+	if pane_id >= 0 and pane_id < PANE_TYPES.size():
+		set_slot_type(slot, PANE_TYPES[pane_id])
+
+func pane_orientation(type: String) -> int:
+	return {"Top Grid": 2, "Front Grid": 1, "Side Grid": 0}.get(type, -1)
+
+func create_pane(type: String) -> Control:
+	var pane: Control
+	if type == "Camera":
+		pane = Camera.new()
+		pane.host = self
+		pane.camera_moved.connect(camera_moved)
+	elif type.ends_with(" Grid"):
+		pane = Graph.new()
+		pane.host = self
+		pane.orientation = pane_orientation(type)
+	elif type == "UV":
+		pane = UVPane.new()
+		pane.texture_token_requested.connect(uv_texture_requested)
+		pane.uv_transform_requested.connect(apply_uv_transform)
+		pane.match_grid_requested.connect(match_uv_grid)
+		pane.texture_axis_requested.connect(unsupported_uv_axis)
+		pane.reset_requested.connect(reset_uv)
+		pane.fit_requested.connect(unsupported_uv_fit)
+	elif type == "Entities":
+		pane = EntityPane.new()
+		pane.set_session(session)
+	else:
+		return null
+	pane.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	pane.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	return pane
+
+func set_slot_type(slot: int, type: String) -> void:
+	if slot < 0 or slot >= view_slots.size() or not PANE_TYPES.has(type):
+		return
+	if slot_views[slot] != null and slot_types[slot] == type:
+		update_slot_menu(slot)
+		return
+	cancel_interaction()
+	var old: Control = slot_views[slot]
+	if is_instance_valid(old):
+		view_slots[slot].remove_child(old)
+		old.queue_free()
+	var pane := create_pane(type)
+	slot_types[slot] = type
+	slot_views[slot] = pane
+	view_slots[slot].add_child(pane)
+	pane.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	view_slots[slot].move_child(slot_menus[slot], -1)
+	if pane.get_script() == UVPane:
+		for control in pane.find_children("*", "Button", true, false):
+			if control.text in ["Width", "Height", "Fit"]:
+				control.disabled = true
+				control.tooltip_text = "Requires a native face-fit projection operation"
+	rebuild_pane_collections()
+	update_slot_menu(slot)
+	if session != null:
+		refresh()
+
+func update_slot_menu(slot: int) -> void:
+	if slot < 0 or slot >= slot_menus.size():
+		return
+	var popup := slot_menus[slot].get_popup()
+	for index in popup.item_count:
+		popup.set_item_checked(index, popup.get_item_text(index) == slot_types[slot])
+	var pane_icons := {
+		"Camera": editor_icon("Camera3D"),
+		"Top Grid": custom_icon("grid_xy"),
+		"Front Grid": custom_icon("grid_xz"),
+		"Side Grid": custom_icon("grid_yz"),
+		"UV": editor_icon("Texture2D"),
+		"Entities": editor_icon("Object"),
+	}
+	slot_menus[slot].icon = pane_icons[slot_types[slot]]
+	slot_menus[slot].tooltip_text = "%s; choose pane type" % slot_types[slot]
+
+func rebuild_pane_collections() -> void:
+	cameras.clear()
+	graphs.clear()
+	uv_panes.clear()
+	entity_panes.clear()
+	for pane in slot_views:
+		if not is_instance_valid(pane):
+			continue
+		if pane.get_script() == Camera:
+			cameras.append(pane)
+		elif pane.get_script() == Graph:
+			graphs.append(pane)
+		elif pane.get_script() == UVPane:
+			uv_panes.append(pane)
+		elif pane.get_script() == EntityPane:
+			entity_panes.append(pane)
+	graphs.sort_custom(func(a, b): return a.orientation > b.orientation)
+	camera_view = cameras[0] if not cameras.is_empty() else null
+	graph_a = graphs[0] if graphs.size() > 0 else null
+	graph_b = graphs[1] if graphs.size() > 1 else null
+	graph_c = graphs[2] if graphs.size() > 2 else null
+	if not is_instance_valid(active_graph) or not graphs.has(active_graph):
+		active_graph = graph_a
+	for graph in graphs:
+		graph.set_camera_views(cameras)
+	camera_slot = slot_types.find("Camera")
+
+func sync_view_splits(source: SplitContainer, offset: int) -> void:
+	if syncing_view_splits or view_layout != 4:
+		return
+	syncing_view_splits = true
+	(left_views if source == right_views else right_views).split_offset = offset
+	syncing_view_splits = false
+
+func apply_layout(mode: int, _legacy_camera_slot := -1) -> void:
+	if not mode in [2, 3, 4]:
+		return
+	if workspace.is_inside_tree():
+		cancel_interaction()
+	view_layout = mode
+	var visible_slots := [0, 2] if mode == 2 else ([0, 2, 3] if mode == 3 else [0, 1, 2, 3])
+	for index in view_slots.size():
+		view_slots[index].visible = visible_slots.has(index)
+	if mode == 4:
+		right_views.split_offset = left_views.split_offset
+	var shown_graphs := visible_graphs()
+	if not shown_graphs.is_empty() and not shown_graphs.has(active_graph):
+		active_graph = shown_graphs[0]
+	update_layout_menus()
+	refresh_status()
+
+func update_layout_menus() -> void:
+	if layout_menu == null:
+		return
+	layout_menu.icon = editor_icon({2: "Panels2Alt", 3: "Panels3Alt", 4: "Panels4"}[view_layout])
+	for index in layout_menu.get_popup().item_count:
+		layout_menu.get_popup().set_item_checked(index, layout_menu.get_popup().get_item_id(index) == view_layout)
+	for slot in slot_menus.size():
+		update_slot_menu(slot)
+
+func workspace_state() -> Dictionary:
+	var slots: Array = []
+	for index in slot_views.size():
+		var pane: Control = slot_views[index]
+		var pane_state := {"type": slot_types[index]}
+		if pane.get_script() == Graph:
+			pane_state.merge({"orientation": pane.orientation, "origin": pane.origin, "zoom": pane.zoom, "view_states": pane.view_states})
+		elif pane.get_script() == Camera and pane.camera != null:
+			pane_state.merge({"camera_transform": pane.camera.transform, "camera_target": pane.orbit_target, "camera_distance": pane.orbit_distance})
+		slots.append(pane_state)
+	return {
+		"layout": view_layout,
+		"workspace_split": workspace.split_offset,
+		"left_split": left_views.split_offset,
+		"right_split": right_views.split_offset,
+		"slots": slots,
+	}
+
+func restore_workspace_state(state: Dictionary) -> void:
+	if state.is_empty():
+		return
+	var mode := int(state.get("layout", 3))
+	var slots: Array = state.get("slots", [])
+	if slots.is_empty():
+		# Migrate the one-camera workspace saved by the immediately preceding editor.
+		var legacy_slot := int(state.get("camera_slot", 0))
+		if mode != 4:
+			legacy_slot = 0 if legacy_slot == 0 else 2
+		var legacy_types: Array[String] = ["Top Grid", "Side Grid", "Front Grid", "Side Grid"]
+		legacy_types[clampi(legacy_slot, 0, 3)] = "Camera"
+		for index in 4:
+			set_slot_type(index, legacy_types[index])
+	else:
+		for index in mini(4, slots.size()):
+			set_slot_type(index, str(slots[index].get("type", slot_types[index])))
+	apply_layout(mode)
+	workspace.split_offset = int(state.get("workspace_split", 0))
+	left_views.split_offset = int(state.get("left_split", 0))
+	right_views.split_offset = int(state.get("right_split", 0))
+	if slots.is_empty():
+		var legacy_graphs: Array = state.get("graphs", [])
+		for index in mini(graphs.size(), legacy_graphs.size()):
+			var graph_state: Dictionary = legacy_graphs[index]
+			graphs[index].orientation = int(graph_state.get("orientation", graphs[index].orientation))
+			graphs[index].origin = graph_state.get("origin", Vector3.ZERO)
+			graphs[index].zoom = float(graph_state.get("zoom", 1.0))
+			graphs[index].view_states = graph_state.get("view_states", {})
+			graphs[index].update_orientation_gizmo()
+		if camera_view != null and state.has("camera_transform"):
+			camera_view.camera.transform = state.camera_transform
+			camera_view.orbit_target = state.get("camera_target", camera_view.orbit_target)
+			camera_view.orbit_distance = float(state.get("camera_distance", camera_view.orbit_distance))
+			camera_view.sync_camera_marker(true)
+			camera_view.update_orientation_gizmo()
+	else:
+		for index in mini(slot_views.size(), slots.size()):
+			var pane: Control = slot_views[index]
+			var pane_state: Dictionary = slots[index]
+			if pane.get_script() == Graph:
+				pane.orientation = int(pane_state.get("orientation", pane.orientation))
+				pane.origin = pane_state.get("origin", Vector3.ZERO)
+				pane.zoom = float(pane_state.get("zoom", 1.0))
+				pane.view_states = pane_state.get("view_states", {})
+				pane.update_orientation_gizmo()
+			elif pane.get_script() == Camera and pane_state.has("camera_transform"):
+				pane.camera.transform = pane_state.camera_transform
+				pane.orbit_target = pane_state.get("camera_target", pane.orbit_target)
+				pane.orbit_distance = float(pane_state.get("camera_distance", pane.orbit_distance))
+				pane.sync_camera_marker(true)
+				pane.update_orientation_gizmo()
+	refresh()
+
+func file_menu_command(id: int) -> void:
+	match id:
+		0:
+			file_command("open")
+		1:
+			file_command("save")
+		2:
+			file_command("save_as")
 
 func set_session(value: RefCounted) -> void:
 	cancel_interaction()
@@ -223,18 +675,23 @@ func set_session(value: RefCounted) -> void:
 		session.message.connect(set_status)
 		session.action_recorded.connect(retain_action)
 		sessions.append(session)
-	graph_a.clip_points.clear()
-	graph_b.clip_points.clear()
+	clear_cut_state()
+	for pane in entity_panes:
+		pane.set_session(session)
+	if fallback_entity_pane != null:
+		fallback_entity_pane.set_session(session)
 	texture_field.text = session.texture
 	sync_resolver()
 	refresh()
+	plugin.update_materials_context()
 
 func _session_changed(origin: RefCounted) -> void:
 	if origin == session:
 		if origin.change_kind == "brush_translation":
-			graph_a.queue_redraw()
-			graph_b.queue_redraw()
-			camera_view.refresh()
+			for graph in graphs:
+				graph.queue_redraw()
+			for camera in cameras:
+				camera.refresh()
 			refresh_status()
 		else:
 			refresh()
@@ -264,11 +721,11 @@ func retain_action(token: RefCounted) -> void:
 	tokens = tokens.filter(func(item): return item.session != null)
 
 func cancel_interaction() -> void:
-	if graph_a != null:
-		graph_a.cancel()
-		graph_b.cancel()
-	if camera_view != null:
-		camera_view.stop_fly()
+	clear_mutation_preview()
+	for graph in graphs:
+		graph.cancel()
+	for camera in cameras:
+		camera.cancel_interaction()
 
 func set_status(text: String) -> void:
 	if notice != null:
@@ -277,37 +734,109 @@ func set_status(text: String) -> void:
 func refresh_status() -> void:
 	if session == null or status == null:
 		return
-	var baked = "never baked" if session.baked_text.is_empty() else ("baked current" if session.baked_text == session.document.export_text().value else "bake stale")
-	status.text = "%s • %s • grid %.3f • %s • %s • %d selected • %d hidden" % ["UNSAVED" if session.document.is_dirty() else "saved", baked, session.grid, tool, ["Side", "Front", "Top"][active_graph.orientation], session.selected.size() + session.points.size(), session.hidden_count()]
+	var baked = "meshes never built" if session.baked_text.is_empty() else ("meshes current" if session.baked_text == session.document.export_text().value else "meshes stale")
+	var orientation: String = ["Side", "Front", "Top"][active_graph.orientation] if is_instance_valid(active_graph) else "No grid"
+	status.text = "%s • %s • grid %.3f • %s • %s • %d selected • %d hidden" % ["UNSAVED" if session.document.is_dirty() else "saved", baked, session.grid, tool, orientation, session.selected.size() + session.points.size(), session.hidden_count()]
 	for category in visibility_buttons:
 		visibility_buttons[category].set_pressed_no_signal(session.visibility_filters[category])
 	var loader = session.loader.get_ref()
 	binding_label.text = "Bound: %s — %s" % [loader.name, loader.map_resource] if is_instance_valid(loader) else "Standalone document • Select a TBLoader, then explicitly Bind"
-	session_picker.clear()
+	update_loader_action_state()
+	changing_document_tabs = true
+	document_tabs.clear_tabs()
 	for origin in sessions:
 		if origin.scene_managed and origin.scene.get_ref() == null:
 			continue
 		var filename: String = origin.document.get_path().get_file()
 		if not origin.recovery_source.is_empty():
 			filename = "Recovered " + origin.recovery_source.get_file()
-		session_picker.add_item((filename if filename else "Untitled") + (" *" if origin.document.is_dirty() else ""))
-		var index = session_picker.item_count - 1
-		session_picker.set_item_metadata(index, weakref(origin))
+		document_tabs.add_tab((filename if filename else "Untitled") + (" *" if origin.document.is_dirty() else ""))
+		var index = document_tabs.tab_count - 1
+		document_tabs.set_tab_metadata(index, weakref(origin))
+		document_tabs.set_tab_button_icon(index, editor_icon("Close"))
+		var path: String = origin.document.get_path()
+		document_tabs.set_tab_tooltip(index, path if not path.is_empty() else "Untitled Map document")
 		if origin == session:
-			session_picker.select(index)
+			document_tabs.current_tab = index
+	document_tabs.add_tab("+")
+	document_tabs.set_tab_tooltip(document_tabs.tab_count - 1, "New Map document")
+	changing_document_tabs = false
+
+func document_tab_changed(index: int) -> void:
+	if changing_document_tabs or index < 0 or index >= document_tabs.tab_count:
+		return
+	if index == document_tabs.tab_count - 1:
+		set_session(Session.new())
+		return
+	var reference = document_tabs.get_tab_metadata(index)
+	var origin = reference.get_ref() if reference is WeakRef else null
+	if origin != null and origin != session:
+		set_session(origin)
+
+func close_document_tab(index: int) -> void:
+	if index < 0 or index >= document_tabs.tab_count - 1:
+		return
+	var reference = document_tabs.get_tab_metadata(index)
+	var origin = reference.get_ref() if reference is WeakRef else null
+	if origin == null or not sessions.has(origin):
+		return
+	if origin.document.is_dirty():
+		if origin != session:
+			set_session(origin)
+		request_replace(close_document.bind(origin))
+	else:
+		close_document(origin)
+
+func close_document(origin: RefCounted) -> void:
+	if origin == null or not sessions.has(origin):
+		return
+	var replacement = session if session != origin else adjacent_session(origin)
+	sessions.erase(origin)
+	for id in scene_sessions.keys():
+		if scene_sessions[id] == origin:
+			scene_sessions.erase(id)
+	if last_standalone.get_ref() == origin:
+		last_standalone = weakref(null)
+	for token in tokens:
+		if token.session == origin:
+			token.retire()
+	tokens = tokens.filter(func(token): return token.session != null)
+	origin.dispose()
+	discard_on_replace = null
+	set_session(replacement if replacement != null else Session.new())
+
+func adjacent_session(origin: RefCounted) -> RefCounted:
+	var index := sessions.find(origin)
+	for offset in range(1, sessions.size()):
+		for candidate_index in [index - offset, index + offset]:
+			if candidate_index < 0 or candidate_index >= sessions.size():
+				continue
+			var candidate = sessions[candidate_index]
+			if not candidate.scene_managed or candidate.scene.get_ref() != null:
+				return candidate
+	return null
 
 func refresh() -> void:
-	graph_a.queue_redraw()
-	graph_b.queue_redraw()
+	if session == null:
+		return
+	for graph in graphs:
+		graph.queue_redraw()
 	sync_texture_sizes()
-	camera_view.refresh()
+	for camera in cameras:
+		camera.refresh()
 	refresh_status()
 	refresh_uv()
-	if inspector.visible:
-		refresh_entities()
+	sync_material_selection()
+	for pane in entity_panes:
+		pane.refresh()
+	if inspector != null and inspector.visible:
+		fallback_entity_pane.refresh()
 
 func set_tool(value: String) -> void:
+	var leaving_cut := tool == "Cut" and value != "Cut"
 	cancel_interaction()
+	if leaving_cut:
+		clear_cut_state()
 	tool = value
 	if session != null:
 		session.components.clear()
@@ -316,16 +845,22 @@ func set_tool(value: String) -> void:
 	refresh()
 
 func route_key(event: InputEventKey, graph: Control) -> bool:
-	if not event.pressed or event.echo or camera_view.flying:
+	if not event.pressed or event.echo or cameras.any(func(camera): return camera.flying):
 		return false
 	var focus = get_viewport().gui_get_focus_owner()
 	if focus is LineEdit or focus is TextEdit or browser.has_browser_focus() or file_dialog.visible or dirty_dialog.visible or inspector.visible:
 		return false
-	if not is_visible_in_tree() or (focus != graph_a and focus != graph_b and focus != camera_view):
+	if is_visible_in_tree() and not event.ctrl_pressed and event.keycode == KEY_N:
+		show_entities()
+		return true
+	if not is_visible_in_tree() or (not graphs.has(focus) and not cameras.has(focus)):
 		return false
-	if focus == graph_a or focus == graph_b:
+	if graphs.has(focus):
 		graph = focus
-	active_graph = graph
+	elif cameras.has(focus):
+		graph = null
+	if is_instance_valid(graph):
+		active_graph = graph
 	var key = event.keycode
 	if event.ctrl_pressed:
 		match key:
@@ -337,7 +872,8 @@ func route_key(event: InputEventKey, graph: Control) -> bool:
 				else:
 					history.undo()
 			KEY_TAB:
-				graph.cycle_orientation()
+				if is_instance_valid(graph):
+					graph.cycle_orientation()
 			KEY_C:
 				var result: Dictionary = session.document.export_selection(session.selected)
 				if session.report(result):
@@ -351,8 +887,7 @@ func route_key(event: InputEventKey, graph: Control) -> bool:
 			KEY_O:
 				file_command("open")
 			KEY_ENTER:
-				graph.clip_flip = not graph.clip_flip
-				set_status("Clip side flipped")
+				flip_clip()
 			_:
 				if key >= KEY_3 and key <= KEY_9:
 					make_prism(key - KEY_0)
@@ -361,8 +896,10 @@ func route_key(event: InputEventKey, graph: Control) -> bool:
 	else:
 		match key:
 			KEY_ESCAPE:
-				if graph.gesture != "":
+				if is_instance_valid(graph) and graph.gesture != "":
 					graph.cancel()
+				elif cameras.any(func(camera): return camera.camera_gesture != ""):
+					cancel_interaction()
 				elif not session.components.is_empty():
 					session.components.clear()
 					session.changed.emit()
@@ -373,7 +910,8 @@ func route_key(event: InputEventKey, graph: Control) -> bool:
 			KEY_H:
 				session.hide_selection(event.shift_pressed)
 			KEY_SPACE:
-				clone_selection(graph.axes().x)
+				if is_instance_valid(graph):
+					clone_selection(graph.axes().x)
 			KEY_DELETE, KEY_BACKSPACE:
 				delete_selection()
 			KEY_N:
@@ -391,7 +929,8 @@ func route_key(event: InputEventKey, graph: Control) -> bool:
 			KEY_V:
 				set_tool("Vertex")
 			KEY_ENTER:
-				graph.apply_clip(event.shift_pressed)
+				apply_clip(event.shift_pressed, graph.orientation if is_instance_valid(graph) else -1,
+					Vector3.ZERO if is_instance_valid(graph) else active_camera_direction())
 			KEY_BRACKETLEFT:
 				session.grid = maxf(0.125, session.grid / 2)
 			KEY_BRACKETRIGHT:
@@ -401,10 +940,16 @@ func route_key(event: InputEventKey, graph: Control) -> bool:
 					session.grid = pow(2, key - KEY_1)
 				else:
 					return false
-	graph_a.queue_redraw()
-	graph_b.queue_redraw()
+	for view in graphs:
+		view.queue_redraw()
 	refresh_status()
 	return true
+
+func active_camera_direction() -> Vector3:
+	var focus = get_viewport().gui_get_focus_owner()
+	if cameras.has(focus):
+		return focus.camera_map_direction()
+	return camera_view.camera_map_direction() if is_instance_valid(camera_view) else Vector3.BACK
 
 func _input(event: InputEvent) -> void:
 	# Early, single router prevents the editor's scene shortcut from also firing.
@@ -436,12 +981,23 @@ func delete_selection() -> void:
 		return result)
 
 func make_prism(sides: int) -> void:
+	if not is_instance_valid(active_graph):
+		set_status("A grid pane is required to choose the prism axis.")
+		return
 	session.transact("Make %d-sided map prism" % sides, func():
 		for id in session.selected:
 			var result: Dictionary = session.document.make_prism(id, sides, active_graph.orientation)
 			if not result.ok:
 				return result
 		return session.success())
+
+func merge_selection() -> void:
+	var ids: PackedInt64Array = session.selected.duplicate()
+	session.transact("Merge map brushes", func():
+		var result: Dictionary = session.document.merge_brushes(ids)
+		if result.ok and result.changed:
+			session.select(PackedInt64Array([int(result.value)]))
+		return result)
 
 func configure_browser(root: String) -> void:
 	var loader = session.loader.get_ref()
@@ -494,7 +1050,11 @@ func material_selected(_resource: Resource, path: String, token: String, mapping
 		return
 	texture_field.text = token
 	session.texture = token
-	set_status("%s → %s • Assign applies to the selection" % [path, token])
+	if not face_targets().is_empty():
+		assign_texture()
+		set_status("%s → %s • Applied to selection" % [path, token])
+	else:
+		set_status("%s → %s • Select geometry to apply" % [path, token])
 
 func preview_opacity(render_category: String) -> float:
 	return {"caulk": 0.26, "clip": 0.36, "entity": 0.48}.get(render_category, 1.0)
@@ -528,7 +1088,21 @@ func refresh_materials() -> void:
 	if session == null:
 		return
 	sync_texture_sizes()
-	camera_view.refresh()
+	for camera in cameras:
+		if is_instance_valid(camera) and camera.is_inside_tree():
+			camera.refresh()
+
+func queue_material_refresh() -> void:
+	if not is_node_ready() or is_queued_for_deletion():
+		return
+	if not has_meta("material_refresh_queued"):
+		set_meta("material_refresh_queued", true)
+		call_deferred("flush_material_refresh")
+
+func flush_material_refresh() -> void:
+	remove_meta("material_refresh_queued")
+	refresh_materials()
+	sync_material_selection()
 
 func sync_texture_sizes() -> void:
 	var sizes: Dictionary = {}
@@ -563,6 +1137,24 @@ func face_targets() -> Array:
 				faces.append({"brush_id": id, "index": face.index, "topology_revision": brush.topology_revision, "kind": "face"})
 	return faces
 
+func sync_material_selection() -> void:
+	if browser == null or session == null:
+		return
+	var selected_tokens: Array[String] = []
+	for target in face_targets():
+		var brush: Dictionary = session.brush(target.brush_id)
+		for face in brush.get("faces", []):
+			if face.index == target.index and not selected_tokens.has(face.texture):
+				selected_tokens.append(face.texture)
+				break
+	if selected_tokens.size() != 1:
+		browser.highlight_path("")
+		if selected_tokens.size() > 1:
+			uv_label.text += " • Mixed materials"
+		return
+	var resolved := resolve_token(selected_tokens[0])
+	browser.highlight_path(resolved.get("resource_path", "") if resolved.get("resolved", false) else "")
+
 func assign_texture() -> void:
 	session.texture = texture_field.text.strip_edges()
 	var targets = face_targets()
@@ -588,15 +1180,18 @@ func refresh_uv() -> void:
 	var valve = false
 	var mixed = false
 	var first: Dictionary = {}
+	var texture := ""
 	for target in targets:
 		var result: Dictionary = session.document.get_face_uv(target.brush_id, target.index, target.topology_revision)
 		if not result.ok:
 			continue
 		var uv: Dictionary = result.value
+		var target_texture := face_texture(target)
 		valve = valve or uv.projection == "valve"
 		if first.is_empty():
 			first = uv
-		elif first.shift != uv.shift or first.rotation != uv.rotation or first.scale != uv.scale:
+			texture = target_texture
+		elif first.shift != uv.shift or first.rotation != uv.rotation or first.scale != uv.scale or texture != target_texture:
 			mixed = true
 	uv_apply.disabled = valve or targets.is_empty()
 	uv_label.text = "Valve / mixed projection: UV editing unavailable" if valve else ("Mixed UVs — Apply replaces selected values" if mixed else "Classic UV • %d faces" % targets.size())
@@ -606,12 +1201,63 @@ func refresh_uv() -> void:
 		var values = [first.shift.x, first.shift.y, first.rotation, first.scale.x, first.scale.y]
 		for i in values.size():
 			uv_fields[i].set_value_no_signal(values[i])
+	var pane_state: Dictionary = {
+		"texture": texture,
+		"shift": first.get("shift", Vector2.ZERO),
+		"rotation": first.get("rotation", 0.0),
+		"scale": first.get("scale", Vector2.ONE),
+		"projection": first.get("projection", "classic"),
+		"mixed": mixed,
+		"editable": not targets.is_empty(),
+		"texture_editable": not targets.is_empty(),
+	}
+	var preview := uv_preview(targets, texture)
+	pane_state.merge(preview)
+	for pane in uv_panes:
+		pane.set_state(pane_state)
+
+func face_texture(target: Dictionary) -> String:
+	var brush: Dictionary = session.brush(target.brush_id)
+	for face in brush.get("faces", []):
+		if face.index == target.index:
+			return face.texture
+	return ""
+
+func uv_preview(targets: Array, texture: String) -> Dictionary:
+	var triangles := PackedVector2Array()
+	for surface in session.document.get_preview_data():
+		if surface.texture != texture:
+			continue
+		var indices: PackedInt32Array = surface.indices
+		for triangle in surface.triangle_brush_ids.size():
+			var selected := targets.any(func(target):
+				return target.brush_id == surface.triangle_brush_ids[triangle] and target.index == surface.triangle_face_indices[triangle])
+			if not selected:
+				continue
+			for corner in 3:
+				var uv: Vector2 = surface.uvs[indices[triangle * 3 + corner]]
+				triangles.append(Vector2(fposmod(uv.x, 1.0), fposmod(uv.y, 1.0)))
+	var resolved := resolve_token(texture) if not texture.is_empty() else {}
+	var material: Material = resolved.get("material")
+	var preview_texture: Texture2D
+	if material is BaseMaterial3D:
+		preview_texture = material.albedo_texture
+	elif material != null:
+		var loader = session.loader.get_ref()
+		if is_instance_valid(loader):
+			var candidate = material.get(loader.texture_material_texture_path)
+			if candidate is Texture2D:
+				preview_texture = candidate
+	return {"texture_resource": preview_texture, "triangle_uvs": triangles}
 
 func apply_uv() -> void:
-	var targets = face_targets()
 	var shift = Vector2(uv_fields[0].value, uv_fields[1].value)
 	var rotation = uv_fields[2].value
 	var scale_value = Vector2(uv_fields[3].value, uv_fields[4].value)
+	apply_uv_transform(shift, rotation, scale_value)
+
+func apply_uv_transform(shift: Vector2, rotation: float, scale_value: Vector2) -> void:
+	var targets = face_targets()
 	session.transact("Edit map UV", func():
 		for target in targets:
 			var validation: Dictionary = session.document.get_face_uv(target.brush_id, target.index, target.topology_revision)
@@ -624,6 +1270,28 @@ func apply_uv() -> void:
 				return result
 		session.rebind_components()
 		return session.success())
+
+func uv_texture_requested(token: String) -> void:
+	texture_field.text = token
+	assign_texture()
+
+func match_uv_grid() -> void:
+	var targets := face_targets()
+	if targets.is_empty():
+		return
+	var result: Dictionary = session.document.get_face_uv(targets[0].brush_id, targets[0].index, targets[0].topology_revision)
+	if result.ok:
+		var uv: Dictionary = result.value
+		apply_uv_transform(uv.shift.snapped(Vector2.ONE * session.grid), uv.rotation, uv.scale)
+
+func reset_uv() -> void:
+	apply_uv_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+
+func unsupported_uv_axis(_axis: String) -> void:
+	set_status("Width and Height fitting require native face projection support.")
+
+func unsupported_uv_fit(_scale: Vector2) -> void:
+	set_status("UV fitting requires native face projection support.")
 
 func build_dialogs() -> void:
 	file_dialog = FileDialog.new()
@@ -649,115 +1317,70 @@ func build_dialogs() -> void:
 	inspector.size = Vector2i(660, 480)
 	inspector.close_requested.connect(inspector.hide)
 	add_child(inspector)
-	var column = VBoxContainer.new()
-	column.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	inspector.add_child(column)
-	entity_list = Tree.new()
-	entity_list.columns = 3
-	entity_list.set_column_title(0, "Entity / key")
-	entity_list.set_column_title(1, "Value (first occurrence editable)")
-	entity_list.set_column_title(2, "ID")
-	entity_list.set_column_titles_visible(true)
-	entity_list.hide_root = true
-	entity_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	entity_list.item_selected.connect(entity_row_selected)
-	column.add_child(entity_list)
-	var edit = HBoxContainer.new()
-	column.add_child(edit)
-	entity_key = LineEdit.new()
-	entity_key.placeholder_text = "Key"
-	entity_key.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	edit.add_child(entity_key)
-	entity_value = LineEdit.new()
-	entity_value.placeholder_text = "Value / mixed"
-	entity_value.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	edit.add_child(entity_value)
-	button(edit, "Set on targets", func(): edit_property(false))
-	button(edit, "Remove key", func(): edit_property(true))
-	var create = HBoxContainer.new()
-	column.add_child(create)
-	entity_class = LineEdit.new()
-	entity_class.text = "info_player_start"
-	entity_class.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	create.add_child(entity_class)
-	button(create, "Point at workzone center", create_point)
-	button(create, "Group brushes", group_brushes)
-	var actions = HBoxContainer.new()
-	column.add_child(actions)
-	button(actions, "Return brushes to world", func(): session.transact("Ungroup map brushes", func(): return session.document.return_brushes_to_worldspawn(session.selected)))
-	button(actions, "Delete entity, KEEP brushes", func(): delete_entities(false))
-	button(actions, "Delete entity AND brushes", func(): delete_entities(true))
+	fallback_entity_pane = EntityPane.new()
+	fallback_entity_pane.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	inspector.add_child(fallback_entity_pane)
+	entity_list = fallback_entity_pane.property_tree
+	entity_key = fallback_entity_pane.key_field
+	entity_value = fallback_entity_pane.value_field
+	entity_class = fallback_entity_pane.class_field
 
 func show_entities() -> void:
 	cancel_interaction()
-	refresh_entities()
+	var targets: PackedInt64Array = session.entity_targets()
+	for pane in entity_panes:
+		if pane.is_visible_in_tree():
+			pane.set_session(session)
+			if not targets.is_empty():
+				pane.set_selected_entity_id(targets[0])
+			pane.entity_list.grab_focus()
+			return
+	fallback_entity_pane.set_session(session)
+	if not targets.is_empty():
+		fallback_entity_pane.set_selected_entity_id(targets[0])
 	if DisplayServer.get_name() == "headless":
 		inspector.popup(Rect2i(Vector2i.ZERO, inspector.size))
 	else:
 		inspector.popup_centered()
-	entity_key.grab_focus()
+	fallback_entity_pane.entity_list.grab_focus()
 
 func refresh_entities() -> void:
-	entity_list.clear()
-	var root = entity_list.create_item()
 	var targets: PackedInt64Array = session.entity_targets()
-	for entity in session.entity_data():
-		if not targets.has(entity.id):
-			continue
-		var group = entity_list.create_item(root)
-		group.set_text(0, "Entity %d" % entity.id)
-		group.set_text(2, str(entity.id))
-		for pair in entity.epairs:
-			var row = entity_list.create_item(group)
-			row.set_text(0, pair.key)
-			row.set_text(1, pair.value)
-			row.set_metadata(0, pair.key)
+	fallback_entity_pane.set_session(session)
+	if not targets.is_empty():
+		fallback_entity_pane.set_selected_entity_id(targets[0])
 	inspector.title = "Map entities — %d target(s); Set edits first key, Remove deletes all duplicates" % targets.size()
 
 func entity_row_selected() -> void:
-	var row = entity_list.get_selected()
-	if row == null or row.get_metadata(0) == null:
-		return
-	entity_key.text = row.get_metadata(0)
-	var values: Array = []
-	for entity in session.entity_data():
-		if not session.entity_targets().has(entity.id):
-			continue
-		var value = "<absent>"
-		for pair in entity.epairs:
-			if pair.key == entity_key.text:
-				value = pair.value
-				break
-		if not values.has(value):
-			values.append(value)
-	entity_value.text = values[0] if values.size() == 1 and values[0] != "<absent>" else ""
-	entity_value.placeholder_text = "<mixed / absent>" if values.size() != 1 else "Value"
+	fallback_entity_pane._property_selected()
 
 func edit_property(remove: bool) -> void:
 	var ids: PackedInt64Array = session.entity_targets()
-	var key = entity_key.text
-	var value = entity_value.text
-	session.transact("Edit map entity property", func():
-		for id in ids:
-			var result: Dictionary = session.document.remove_entity_property(id, key) if remove else session.document.set_entity_property(id, key, value)
-			if not result.ok:
-				return result
-		return session.success())
+	if ids.is_empty():
+		return
+	fallback_entity_pane.set_selected_entity_id(ids[0])
+	if remove:
+		fallback_entity_pane._remove_property()
+	else:
+		fallback_entity_pane._set_property()
 
 func create_point() -> void:
-	var position: Vector3 = session.workzone.get_center().snapped(Vector3.ONE * session.grid)
-	session.transact("Create map point entity", func():
-		var result: Dictionary = session.document.create_point_entity(entity_class.text, position)
-		if result.ok:
-			session.select(PackedInt64Array(), PackedInt64Array([result.value]))
-		return result)
+	var before: PackedInt64Array = PackedInt64Array(session.entity_data().map(func(entity): return entity.id))
+	fallback_entity_pane._create_point()
+	for entity in session.entity_data():
+		if not before.has(entity.id):
+			session.select(PackedInt64Array(), PackedInt64Array([entity.id]))
+			break
 
 func group_brushes() -> void:
-	session.transact("Create map brush entity", func(): return session.document.group_brushes(session.selected, entity_class.text))
+	fallback_entity_pane._group_selected()
 
 func delete_entities(delete_brushes: bool) -> void:
-	var ids: PackedInt64Array = session.entity_targets()
-	session.transact("Delete map entities", func(): return session.document.delete_entities(ids, delete_brushes))
+	if delete_brushes:
+		var ids: PackedInt64Array = session.entity_targets()
+		session.transact("Delete map entities", func(): return session.document.delete_entities(ids, true))
+	else:
+		fallback_entity_pane._delete_entity()
 
 func request_replace(callback: Callable) -> void:
 	cancel_interaction()
@@ -779,9 +1402,9 @@ func file_command(command: String) -> void:
 	cancel_interaction()
 	match command:
 		"new":
-			request_replace(func(): replace_session(Session.new()); detach())
+			set_session(Session.new())
 		"open":
-			request_replace(func(): show_file_dialog("open"))
+			show_file_dialog("open")
 		"save":
 			if session.document.get_path().is_empty():
 				show_file_dialog("save")
@@ -808,6 +1431,11 @@ func file_selected(path: String) -> void:
 		run_pending()
 
 func open_path(path: String) -> bool:
+	var existing = find_path_session(path)
+	if existing != null:
+		set_session(existing)
+		set_status("Already open: %s" % path)
+		return true
 	var candidate = Session.new()
 	var result: Dictionary = candidate.document.load_map(path)
 	if not session.report(result):
@@ -817,6 +1445,23 @@ func open_path(path: String) -> bool:
 	refresh_materials()
 	set_status("Opened %s" % path)
 	return true
+
+func find_path_session(path: String, binding_loader: Node = null) -> RefCounted:
+	if path.is_empty():
+		return null
+	if same_path(session.document.get_path(), path):
+		var active_loader = session.loader.get_ref()
+		if binding_loader == null or active_loader == null or active_loader == binding_loader:
+			return session
+	for origin in sessions:
+		if origin == null or not same_path(origin.document.get_path(), path):
+			continue
+		if origin.scene_managed and origin.scene.get_ref() == null:
+			continue
+		var origin_loader = origin.loader.get_ref()
+		if binding_loader == null or origin_loader == null or origin_loader == binding_loader:
+			return origin
+	return null
 
 func set_scene_active(active: bool) -> void:
 	scene_active = active
@@ -901,15 +1546,17 @@ func loader_renamed() -> void:
 	queue_scene_discovery()
 
 func create_scene_session(loader: Node, root: Node) -> RefCounted:
-	var candidate = Session.new()
-	var result: Dictionary = candidate.document.load_map(loader.map_resource)
-	if not session.report(result):
-		candidate.dispose()
-		return null
+	var candidate = find_path_session(loader.map_resource, loader)
+	if candidate == null:
+		candidate = Session.new()
+		var result: Dictionary = candidate.document.load_map(loader.map_resource)
+		if not session.report(result):
+			candidate.dispose()
+			return null
+		candidate.scene_managed = true
 	candidate.loader = weakref(loader)
 	candidate.scene = weakref(root)
 	candidate.was_bound = true
-	candidate.scene_managed = true
 	return candidate
 
 func retire_scene_session(origin: RefCounted) -> void:
@@ -980,31 +1627,50 @@ func bake_after_external_save(origin: RefCounted) -> void:
 		bake_origin(origin)
 
 func bind_selected() -> void:
-	var loader = plugin.editing_loader.get_ref()
+	bind_loader(plugin.editing_loader.get_ref())
+
+func update_loader_action_state() -> void:
+	if loader_actions.is_empty():
+		return
+	var selected = plugin.editing_loader.get_ref()
 	var root = EditorInterface.get_edited_scene_root()
-	if not is_instance_valid(loader) or root == null or not root.is_ancestor_of(loader) and root != loader:
-		set_status("Select exactly one TBLoader in the current scene before binding.")
+	var can_bind: bool = is_instance_valid(selected) and selected is TBLoader and root != null and (root == selected or root.is_ancestor_of(selected))
+	loader_actions.BindLoader.disabled = not can_bind
+	var bound := valid_binding()
+	loader_actions.DetachLoader.disabled = not bound
+	loader_actions.UpdateLoaderPath.disabled = not bound
+	loader_actions.BuildMeshes.disabled = not bound
+	rebuild_on_save.disabled = not bound
+
+func bind_loader(loader: Node) -> void:
+	var root = EditorInterface.get_edited_scene_root()
+	if not is_instance_valid(loader) or not loader is TBLoader or root == null or not root.is_ancestor_of(loader) and root != loader:
+		set_status("Choose a TBLoader in the current scene before binding.")
 		return
 	var id = loader.get_instance_id()
 	if scene_sessions.has(id) and scene_sessions[id].loader.get_ref() == loader:
 		set_session(scene_sessions[id])
 		return
-	var target = weakref(loader)
-	var target_scene = weakref(root)
-	request_replace(func():
-		var node = target.get_ref()
-		if not is_instance_valid(node) or target_scene.get_ref() != EditorInterface.get_edited_scene_root():
-			set_status("Binding cancelled: target loader or scene changed.")
-			return
-		if node.map_resource.is_empty():
-			replace_session(Session.new())
-		elif not open_path(node.map_resource):
-			return
-		session.loader = target
-		session.scene = target_scene
-		session.was_bound = true
-		configure_browser(node.texture_path)
-		refresh())
+	var origin: RefCounted
+	if loader.map_resource.is_empty():
+		origin = Session.new()
+	else:
+		origin = find_path_session(loader.map_resource, loader)
+		if origin == null:
+			origin = Session.new()
+			var result: Dictionary = origin.document.load_map(loader.map_resource)
+			if not session.report(result):
+				origin.dispose()
+				return
+	origin.loader = weakref(loader)
+	origin.scene = weakref(root)
+	origin.was_bound = true
+	set_session(origin)
+	if not loader.map_resource.is_empty():
+		scene_sessions[id] = origin
+	configure_browser(loader.texture_path)
+	refresh()
+	queue_scene_discovery()
 
 func detach() -> void:
 	session.loader = weakref(null)
@@ -1045,39 +1711,39 @@ func bake() -> bool:
 
 func bake_origin(origin: RefCounted) -> bool:
 	if not valid_binding(origin):
-		set_status("Bake requires the explicitly bound loader in the current scene.")
+		set_status("Build Meshes requires the explicitly bound loader in the current scene.")
 		return false
 	var loader = origin.loader.get_ref()
 	if origin.document.is_dirty() or not same_path(loader.map_resource, origin.document.get_path()):
 		set_status("Save first; use Update loader path explicitly if Save As changed the filename.")
 		return false
 	if not loader.has_method("build_meshes_checked"):
-		set_status("Map saved. Checked bake API unavailable in this build; bake deferred.")
+		set_status("Map saved. Checked Build Meshes API unavailable in this build; mesh build deferred.")
 		return false
 	var disk = ClassDB.instantiate("TBMapDocument")
 	var loaded: Dictionary = disk.load_map(origin.document.get_path())
 	if not session.report(loaded):
 		return false
 	if disk.export_text().value != origin.document.export_text().value:
-		set_status("External change: saved file no longer matches this session; bake cancelled.")
+		set_status("External change: saved file no longer matches this session; mesh build cancelled.")
 		return false
 	if not commit_bake(loader, origin):
 		return false
 	refresh_status()
-	set_status("Map saved and baked successfully; save the Godot scene to persist generated nodes.")
+	set_status("Map saved and meshes built successfully; save the Godot scene to persist generated nodes.")
 	return true
 
 func commit_bake(loader: Node, origin: RefCounted = null) -> bool:
 	var root = EditorInterface.get_edited_scene_root()
 	if root == null or not is_instance_valid(loader) or (root != loader and not root.is_ancestor_of(loader)):
-		set_status("Bake cancelled: loader is not in the current scene.")
+		set_status("Build Meshes cancelled: loader is not in the current scene.")
 		return false
 	if not loader.has_method("build_meshes_checked"):
-		set_status("Checked bake API unavailable in this build; bake deferred.")
+		set_status("Checked Build Meshes API unavailable in this build; mesh build deferred.")
 		return false
 	var before: PackedScene = BakeAction.capture(loader)
 	if before == null:
-		set_status("Could not snapshot loader children for scene undo; bake cancelled.")
+		set_status("Could not snapshot loader children for scene undo; mesh build cancelled.")
 		return false
 	var result: Dictionary = loader.call("build_meshes_checked")
 	if not session.report(result):
@@ -1093,11 +1759,11 @@ func commit_bake(loader: Node, origin: RefCounted = null) -> bool:
 	token.reporter = Callable(self, "set_status")
 	if token.after == null:
 		token.restore(false)
-		set_status("Could not snapshot bake output; previous children restored.")
+		set_status("Could not snapshot mesh output; previous children restored.")
 		return false
 	if result.changed:
 		var manager = plugin.get_undo_redo()
-		manager.create_action("Bake TBLoader map", UndoRedo.MERGE_DISABLE, EditorInterface.get_edited_scene_root())
+		manager.create_action("Build TBLoader meshes", UndoRedo.MERGE_DISABLE, EditorInterface.get_edited_scene_root())
 		manager.add_do_method(token, "restore", true)
 		manager.add_undo_method(token, "restore", false)
 		manager.add_do_reference(token)
@@ -1107,7 +1773,7 @@ func commit_bake(loader: Node, origin: RefCounted = null) -> bool:
 		origin.baked_text = token.after_text
 	EditorInterface.mark_scene_as_unsaved()
 	plugin.refresh_materials()
-	set_status("Selected loader baked successfully; scene marked unsaved.")
+	set_status("Selected loader meshes built successfully; scene marked unsaved.")
 	return true
 
 func save_all(defer_bake = false) -> void:
@@ -1138,7 +1804,7 @@ func unsaved_status() -> String:
 	for origin in sessions:
 		if origin != null and origin.save_enabled and origin.document.is_dirty():
 			var path: String = origin.document.get_path()
-			paths.append(path if path else "Untitled (use Map → Save As before exiting)")
+			paths.append(path if path else "Untitled (use Radiant > Save As before exiting)")
 	return "Unsaved Map documents: " + ", ".join(paths) if not paths.is_empty() else ""
 
 func _process(delta: float) -> void:

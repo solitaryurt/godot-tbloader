@@ -7,8 +7,8 @@ the pinned Linux debug addon.** The broad native/editor/displayed handler gates
 below are complemented by the new XTest gate. A controlled 60 Hz responsiveness
 gate and the explicit product/platform limitations at the end remain incomplete.
 
-- Implemented real Map main screen, camera/materials left and independent Top/Front
-  grids right, resizable splitters, per-orientation pan/zoom, shared fractional grid.
+- Implemented real Map main screen with camera left and independent Top/Front grids
+  right, resizable splitters, per-orientation pan/zoom, and shared fractional grid.
 - Graph handlers implement cuboid creation, click/Shift/directional box selection,
   rigid translation, silhouette plane resize, clone/paste/delete, hide/reveal,
   cancellation, axis constraint and AABB alignment.
@@ -22,8 +22,9 @@ gate and the explicit product/platform limitations at the end remain incomplete.
   the picker exposes retained documents and background undo updates unsaved
   reporting and Save All. Discard retires saving only after successful replacement;
   resuming, editing or restoring history reactivates the document.
-- Real indexed material browser reused without modification; shader assignment,
-  classic UV controls, resolved texture dimensions and textured camera preview.
+- The global Map Materials bottom panel is contextual: Map mode hosts the indexed
+  browser, shader assignment and classic UV controls; 3D mode retains the rendered
+  material grid for the selected loader. Selection synchronization is non-assigning.
 - N inspector edits ordered keyvals on worldspawn/selected owners/points; point
   and brush entity creation, point picking/movement, ownership and deletion.
 - New/Open/Save/Save As, Save/Discard/Cancel replacement prompt, native external

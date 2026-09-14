@@ -1,8 +1,8 @@
 # Standalone material browser handoff
 
 `addons/tbloader/src/editor/material_browser.gd` is a reusable `@tool Control`
-for the Materials quadrant (camera/materials left, two grids right). Instantiate
-with `preload(...).new()` and give it expanding size flags in the host layout.
+hosted by the contextual Map Materials bottom panel. Instantiate with
+`preload(...).new()` and give it expanding size flags in the host layout.
 
 ```gdscript
 browser.configure(EditorInterface.get_resource_filesystem(), loader.texture_path)
@@ -77,7 +77,7 @@ standalone/binary Material discovery, and live add/remove refresh. Output must
 contain exactly one completion marker and no engine/script error diagnostics.
 
 Limits: headless tests establish behavior, not visual thumbnail quality or full
-quad-layout integration. Indexing is budgeted at 256 metadata operations/frame;
+bottom-panel presentation. Indexing is budgeted at 256 metadata operations/frame;
 filter/list rebuilding is linear in project resource count. At most eight
 thumbnail requests are pending per index generation, for visible rows only;
 the editor owns thumbnail generation/caching. Standalone non-editor hosts must

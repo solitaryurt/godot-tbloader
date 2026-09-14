@@ -423,9 +423,12 @@ void TBMapDocument::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("query_ray", "origin", "direction", "max_distance"), &TBMapDocument::query_ray, DEFVAL(1e30));
 	ClassDB::bind_method(D_METHOD("create_cuboid", "mins", "maxs", "texture"), &TBMapDocument::create_cuboid);
 	ClassDB::bind_method(D_METHOD("duplicate_brushes", "ids"), &TBMapDocument::duplicate_brushes);
+	ClassDB::bind_method(D_METHOD("merge_brushes", "ids"), &TBMapDocument::merge_brushes);
 	ClassDB::bind_method(D_METHOD("delete_brushes", "ids"), &TBMapDocument::delete_brushes);
 	ClassDB::bind_method(D_METHOD("translate_brushes", "ids", "delta"), &TBMapDocument::translate_brushes);
 	ClassDB::bind_method(D_METHOD("rotate_brushes", "ids", "pivot", "axis", "radians"), &TBMapDocument::rotate_brushes);
+	ClassDB::bind_method(D_METHOD("preview_translate_brushes", "ids", "delta"), &TBMapDocument::preview_translate_brushes);
+	ClassDB::bind_method(D_METHOD("preview_rotate_brushes", "ids", "pivot", "axis", "radians"), &TBMapDocument::preview_rotate_brushes);
 	ClassDB::bind_method(D_METHOD("translate_face", "id", "face", "delta", "topology_revision"), &TBMapDocument::translate_face);
 	ClassDB::bind_method(D_METHOD("set_brush_texture", "ids", "name"), &TBMapDocument::set_brush_texture);
 	ClassDB::bind_method(D_METHOD("set_face_texture", "id", "face", "name", "topology_revision"), &TBMapDocument::set_face_texture);
@@ -445,6 +448,8 @@ void TBMapDocument::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("translate_vertices", "id", "vertex_indices", "delta", "topology_revision"), &TBMapDocument::translate_vertices);
 	ClassDB::bind_method(D_METHOD("translate_components", "components", "delta"), &TBMapDocument::translate_components);
 	ClassDB::bind_method(D_METHOD("clip_brushes", "ids", "p0", "p1", "p2", "split"), &TBMapDocument::clip_brushes);
+	ClassDB::bind_method(D_METHOD("preview_translate_components", "components", "delta"), &TBMapDocument::preview_translate_components);
+	ClassDB::bind_method(D_METHOD("preview_clip_brushes", "ids", "p0", "p1", "p2", "split", "flip"), &TBMapDocument::preview_clip_brushes, DEFVAL(false));
 	ADD_SIGNAL(MethodInfo("map_changed", PropertyInfo(Variant::INT, "revision")));
 	ADD_SIGNAL(MethodInfo("preview_changed"));
 	ADD_SIGNAL(MethodInfo("dirty_changed", PropertyInfo(Variant::BOOL, "dirty")));

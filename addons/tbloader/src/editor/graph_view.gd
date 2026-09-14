@@ -1,6 +1,8 @@
 @tool
 extends Control
 
+const OrientationGizmo = preload("res://addons/tbloader/src/editor/orientation_gizmo.gd")
+
 var host: Control
 var orientation = 2 # hidden axis: XY=2, XZ=1, YZ=0
 var origin = Vector3.ZERO
@@ -13,8 +15,18 @@ var anchor = Vector3.ZERO
 var delta = Vector3.ZERO
 var resize_face: Dictionary = {}
 var drag_component: Dictionary = {}
-var clip_points: Array[Vector3] = []
-var clip_flip = false
+var clip_points: Array[Vector3]:
+	get:
+		return host.cut_points if is_instance_valid(host) else []
+	set(value):
+		if is_instance_valid(host):
+			host.set_cut_points(value)
+var clip_flip: bool:
+	get:
+		return host.cut_flip if is_instance_valid(host) else false
+	set(value):
+		if is_instance_valid(host):
+			host.cut_flip = value
 var shift_drag = false
 var ctrl_drag = false
 var rotation_pivot = Vector3.ZERO
@@ -26,6 +38,8 @@ var camera_pose_valid = false
 var dense_edge_cache_key = ""
 var dense_unselected_edges := PackedVector2Array()
 var dense_selected_edges := PackedVector2Array()
+var orientation_gizmo: Control
+var camera_views: Array[WeakRef] = []
 const DENSE_EDGE_THRESHOLD = 1024
 
 func _ready() -> void:
@@ -34,6 +48,22 @@ func _ready() -> void:
 	custom_minimum_size = Vector2(240, 180)
 	clip_contents = true
 	tooltip_text = "Components: Shift-click adds/toggles; Alt-click cycles overlapping handles. Drag a selected handle to move the group; hold Shift during motion to constrain an axis."
+	orientation_gizmo = OrientationGizmo.new()
+	orientation_gizmo.name = "GridOrientation"
+	orientation_gizmo.signed_axes = false
+	orientation_gizmo.gizmo_size = 36.0
+	orientation_gizmo.hide()
+	orientation_gizmo.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	orientation_gizmo.axis_selected.connect(func(axis: int, _positive: bool):
+		host.active_graph = self
+		grab_focus()
+		set_orientation(axis))
+	add_child(orientation_gizmo)
+	var frame_button := compact_frame_button()
+	frame_button.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
+	frame_button.position = Vector2(-72, 4)
+	add_child(frame_button)
+	update_orientation_gizmo()
 	focus_exited.connect(cancel)
 	focus_entered.connect(func(): host.active_graph = self; host.refresh_status(); queue_redraw())
 
@@ -56,6 +86,42 @@ func set_camera_pose(position: Vector3, direction: Vector3) -> void:
 	camera_pose_valid = true
 	queue_redraw()
 
+func set_camera_views(views: Array) -> void:
+	camera_views.clear()
+	for view in views:
+		if is_instance_valid(view):
+			camera_views.append(weakref(view))
+
+func current_camera_views() -> Array:
+	var result: Array = []
+	for reference in camera_views:
+		var view = reference.get_ref()
+		if is_instance_valid(view):
+			result.append(view)
+	if not result.is_empty() or not is_instance_valid(host):
+		return result
+	# Legacy coordinators do not provide a collection yet. Discover every
+	# compatible camera under this host rather than assuming one named instance.
+	for candidate in host.find_children("*", "Control", true, false):
+		if candidate != self and candidate.has_method("preview_grid_move") and candidate.has_method("clear_grid_move_preview"):
+			result.append(candidate)
+			camera_views.append(weakref(candidate))
+	return result
+
+func compact_frame_button() -> Button:
+	var button := Button.new()
+	button.name = "FrameSelection"
+	button.custom_minimum_size = Vector2(28, 28)
+	button.size = Vector2(28, 28)
+	button.tooltip_text = "Frame selection"
+	button.accessibility_name = "Frame selection"
+	button.theme_type_variation = "FlatButton"
+	var frame_icon: Texture2D = host.custom_icon("frame_selection") if is_instance_valid(host) else null
+	button.icon = frame_icon
+	button.text = ""
+	button.pressed.connect(frame_selection)
+	return button
+
 func projected_camera_direction(direction: Vector3 = camera_direction) -> Vector2:
 	var a := axes()
 	return Vector2(direction[a.x], -direction[a.y]).normalized()
@@ -72,15 +138,32 @@ func snap_point(point: Vector3) -> Vector3:
 	return point.snapped(Vector3.ONE * host.session.grid)
 
 func cycle_orientation() -> void:
+	set_orientation({2: 1, 1: 0, 0: 2}[orientation])
+
+func set_orientation(value: int) -> void:
+	if value == orientation or value < 0 or value > 2:
+		return
 	cancel()
 	view_states[orientation] = {"origin": origin, "zoom": zoom}
-	orientation = {2: 1, 1: 0, 0: 2}[orientation]
+	orientation = value
 	var state: Dictionary = view_states.get(orientation, {"origin": Vector3.ZERO, "zoom": 1.0})
 	origin = state.origin
 	zoom = state.zoom
-	clip_points.clear()
+	host.clear_cut_state()
+	update_orientation_gizmo()
 	queue_redraw()
 	host.refresh_status()
+
+func update_orientation_gizmo() -> void:
+	if orientation_gizmo == null:
+		return
+	match orientation:
+		2:
+			orientation_gizmo.set_view_axes([Vector3.RIGHT, Vector3.UP, Vector3.BACK])
+		1:
+			orientation_gizmo.set_view_axes([Vector3.RIGHT, Vector3.BACK, Vector3.UP])
+		0:
+			orientation_gizmo.set_view_axes([Vector3.BACK, Vector3.RIGHT, Vector3.UP])
 
 func zoom_at(position: Vector2, factor: float) -> void:
 	var before = unproject(position)
@@ -90,15 +173,69 @@ func zoom_at(position: Vector2, factor: float) -> void:
 	origin += offset
 	queue_redraw()
 
+func frame_selection() -> void:
+	var selected_items: Array = []
+	var visible_items: Array = []
+	for brush in host.session.draw_data():
+		if not host.session.brush_visible(brush):
+			continue
+		visible_items.append([brush.aabb_min, brush.aabb_max])
+		if host.session.selected.has(brush.id):
+			selected_items.append([brush.aabb_min, brush.aabb_max])
+	if host.session.marker_visible():
+		for marker in host.session.point_markers():
+			visible_items.append([marker.origin, marker.origin])
+			if host.session.points.has(marker.id):
+				selected_items.append([marker.origin, marker.origin])
+	var items: Array = selected_items if not selected_items.is_empty() else visible_items
+	if items.is_empty():
+		return
+	var a := axes()
+	var low := Vector2(INF, INF)
+	var high := Vector2(-INF, -INF)
+	for item in items:
+		for point in item:
+			var projected := Vector2(point[a.x], point[a.y])
+			low = low.min(projected)
+			high = high.max(projected)
+	var center := (low + high) * 0.5
+	origin[a.x] = center.x
+	origin[a.y] = center.y
+	var extent := high - low
+	var padding := 40.0
+	var available := (size - Vector2.ONE * padding * 2.0).max(Vector2.ONE)
+	var minimum_extent := maxf(host.session.grid * 4.0, 1.0)
+	zoom = clampf(minf(available.x / maxf(extent.x, minimum_extent), available.y / maxf(extent.y, minimum_extent)), 0.02, 64.0)
+	view_states[orientation] = {"origin": origin, "zoom": zoom}
+	queue_redraw()
+
 func cancel() -> void:
 	gesture = ""
 	delta = Vector3.ZERO
 	rotation_angle = 0.0
 	resize_face.clear()
 	drag_component.clear()
-	if host != null and host.camera_view != null:
-		host.camera_view.clear_grid_move_preview()
+	if is_instance_valid(host):
+		host.clear_mutation_preview(self)
 	queue_redraw()
+
+func preview_result(result: Dictionary) -> void:
+	if is_instance_valid(host):
+		host.broadcast_mutation_preview(result, self)
+
+func update_exact_preview() -> void:
+	if host.session.selected.is_empty():
+		host.clear_mutation_preview(self)
+		return
+	match gesture:
+		"move":
+			preview_result(host.session.document.preview_translate_brushes(host.session.selected, delta))
+		"rotate":
+			preview_result(host.session.document.preview_rotate_brushes(host.session.selected, rotation_pivot, orientation, rotation_angle))
+		"resize":
+			preview_result(host.session.document.preview_translate_components([resize_face], delta))
+		"component":
+			preview_result(host.session.document.preview_translate_components(host.session.components, delta))
 
 func hit_brush(position: Vector2, prefer_selected := false) -> int:
 	var p := unproject(position - Vector2.ONE * 6)
@@ -214,6 +351,12 @@ func pick_component(position: Vector2, mode: String, cycle = false) -> Dictionar
 		var previous = hits.find(host.session.components.back())
 		if previous >= 0:
 			return hits[(previous + 1) % hits.size()]
+	# Hull rebuilds can reorder coincident front/back handles. An ordinary grab
+	# must keep the selected handle's depth; only Alt explicitly cycles it.
+	if not cycle and mode in ["Vertex", "Edge"]:
+		for hit in hits:
+			if host.session.components.has(hit):
+				return hit
 	return hits[0]
 
 func component_position(component: Dictionary, brush: Dictionary) -> Vector3:
@@ -313,6 +456,13 @@ func _gui_input(event: InputEvent) -> void:
 		cursor = event.position
 		shift_drag = event.shift_pressed
 		ctrl_drag = event.ctrl_pressed
+		if gesture == "paint_select":
+			if event.shift_pressed:
+				paint_select(cursor)
+			else:
+				cancel()
+			accept_event()
+			return
 		if gesture == "pan":
 			var a = axes()
 			origin[a.x] -= event.relative.x / zoom
@@ -340,8 +490,8 @@ func _gui_input(event: InputEvent) -> void:
 				delta[orientation] = 0
 			if shift_drag and gesture in ["move", "component", "resize"]:
 				delta[a.y if absf(delta[a.x]) > absf(delta[a.y]) else a.x] = 0
-		if gesture == "move":
-			host.camera_view.preview_grid_move(delta)
+		if gesture in ["move", "rotate", "resize", "component"]:
+			update_exact_preview()
 		queue_redraw()
 		accept_event()
 
@@ -353,10 +503,8 @@ func begin_left(event: InputEventMouseButton) -> void:
 	shift_drag = event.shift_pressed
 	ctrl_drag = event.ctrl_pressed
 	if host.tool == "Cut":
-		if clip_points.size() == 3:
-			clip_points.clear()
-		clip_points.append(snap_point(anchor))
-		queue_redraw()
+		host.add_cut_point(snap_point(anchor))
+		host.preview_clip(false, orientation, Vector3.ZERO, self)
 		return
 	if host.tool == "Rotate":
 		var id = hit_brush(start, not event.shift_pressed)
@@ -403,6 +551,7 @@ func begin_left(event: InputEventMouseButton) -> void:
 			else:
 				ids.append(id)
 		host.session.select(ids, points)
+		gesture = "paint_select"
 		return
 	if point_id:
 		if not host.session.points.has(point_id):
@@ -419,6 +568,14 @@ func begin_left(event: InputEventMouseButton) -> void:
 		else:
 			host.session.select(PackedInt64Array([id]) if id else PackedInt64Array())
 			gesture = "move" if id else ""
+
+func paint_select(position: Vector2) -> void:
+	var id = hit_brush(position)
+	if not id or host.session.selected.has(id):
+		return
+	var ids = host.session.selected.duplicate()
+	ids.append(id)
+	host.session.select(ids, host.session.points)
 
 func creation_bounds() -> AABB:
 	var p = snap_point(anchor)
@@ -460,8 +617,7 @@ func finish_left(event: InputEventMouseButton) -> void:
 					r = session.document.translate_point_entities(session.points, movement)
 				return r, "brush_translation" if brush_only else "")
 			if committed and brush_only:
-				host.graph_a.apply_dense_translation(movement)
-				host.graph_b.apply_dense_translation(movement)
+				host.apply_dense_translation(movement)
 		elif gesture == "resize":
 			var component = resize_face.duplicate()
 			session.transact("Resize map face", func():
@@ -503,26 +659,7 @@ func box_select(end: Vector2) -> void:
 	host.session.select(ids, point_ids)
 
 func apply_clip(split: bool) -> void:
-	if clip_points.size() < 2:
-		host.set_status("Place two or three clip points first.")
-		return
-	var p: Vector3 = clip_points[0]
-	var q: Vector3 = clip_points[1]
-	var r: Vector3 = clip_points[2] if clip_points.size() > 2 else p
-	if clip_points.size() == 2:
-		r[orientation] -= p.distance_to(q)
-	if clip_flip:
-		var swap = q
-		q = r
-		r = swap
-	var session = host.session
-	if session.transact("Split map brushes" if split else "Clip map brushes", func():
-		var result: Dictionary = session.document.clip_brushes(session.selected, p, q, r, split)
-		if result.ok:
-			session.select(result.value)
-		return result):
-		clip_points.clear()
-	queue_redraw()
+	host.apply_clip(split, orientation)
 
 func draw_component_preview(component: Dictionary, movement: Vector3) -> void:
 	var brush: Dictionary = host.session.brush(component.brush_id)
@@ -558,6 +695,26 @@ func draw_manipulation_preview() -> void:
 		for component in host.session.components:
 			draw_component_preview(component, delta)
 
+func draw_origin_compass() -> void:
+	var center := project(Vector3.ZERO)
+	var visible_axes := axes()
+	var dimensions := [visible_axes.x, visible_axes.y]
+	var directions := [Vector2.RIGHT, Vector2.UP]
+	var font := get_theme_default_font()
+	var font_size := 11
+	for index in 2:
+		var direction: Vector2 = directions[index]
+		var axis: int = dimensions[index]
+		var color: Color = OrientationGizmo.AXIS_COLORS[axis]
+		draw_line(center, center + direction * 18.0, color, 2.0, true)
+		var label: String = ["X", "Y", "Z"][axis]
+		var label_position := center + direction * 23.0
+		if direction == Vector2.RIGHT:
+			label_position += Vector2(0, 4)
+		else:
+			label_position += Vector2(-3, 0)
+		draw_string(font, label_position, label, HORIZONTAL_ALIGNMENT_LEFT, -1, font_size, color)
+
 func _draw() -> void:
 	if host == null or host.session == null:
 		return
@@ -577,9 +734,10 @@ func _draw() -> void:
 			q[axis] = v
 			var color = Color("303742") if not is_zero_approx(fmod(v, step * 8)) else Color("424c5b")
 			if is_zero_approx(v):
-				color = Color("88605e") if axis == a.x else Color("527e93")
-			draw_line(project(p), project(q), color)
+				color = OrientationGizmo.AXIS_COLORS[axis].darkened(0.5)
+			draw_line(project(p), project(q), color, 1.0, true)
 			v += step
+	draw_origin_compass()
 	var visible_rect := Rect2(Vector2.ZERO, size).grow(10)
 	var query_p := unproject(visible_rect.position)
 	var query_q := unproject(visible_rect.end)
@@ -662,15 +820,15 @@ func _draw() -> void:
 					for p in brush.faces[component.index].winding:
 						polygon.append(project(p))
 					if polygon.size() >= 3 and absf(brush.faces[component.index].normal[orientation]) > 0.001:
-						draw_colored_polygon(polygon, Color(1, 0.6, 0.1, 0.25))
+						draw_colored_polygon(polygon, Color(0.16, 0.5, 1.0, 0.3))
 					for i in polygon.size():
-						draw_line(polygon[i], polygon[(i + 1) % polygon.size()], Color("ffe6a6"), 3)
+						draw_line(polygon[i], polygon[(i + 1) % polygon.size()], Color("69a7ff"), 3, true)
 				elif component.kind == "vertex":
 					draw_circle(project(brush.vertices[component.index]), 6, Color("ffe6a6"))
 				else:
 					var p: Vector3 = brush.vertices[brush.edge_vertex_indices[component.index * 2]]
 					var q: Vector3 = brush.vertices[brush.edge_vertex_indices[component.index * 2 + 1]]
-					draw_line(project(p), project(q), Color("ffe6a6"), 3)
+					draw_line(project(p), project(q), Color("ffe6a6"), 3, true)
 					draw_circle(project((p + q) * 0.5), 6, Color("ffe6a6"))
 	if host.session.marker_visible():
 		for marker in host.session.point_markers():
@@ -697,8 +855,8 @@ func _draw() -> void:
 		var pivot = project(rotation_pivot if gesture == "rotate" else selection_center())
 		draw_circle(pivot, 7, Color("20252d"))
 		draw_circle(pivot, 7, Color("ffda8e"), false, 2, true)
-		draw_line(pivot - Vector2(11, 0), pivot + Vector2(11, 0), Color("ffda8e"), 1)
-		draw_line(pivot - Vector2(0, 11), pivot + Vector2(0, 11), Color("ffda8e"), 1)
+		draw_line(pivot - Vector2(11, 0), pivot + Vector2(11, 0), Color("ffda8e"), 1, true)
+		draw_line(pivot - Vector2(0, 11), pivot + Vector2(0, 11), Color("ffda8e"), 1, true)
 		if gesture == "rotate":
 			draw_line(pivot, cursor, Color("ffda8e"), 2, true)
 			draw_string(ThemeDB.fallback_font, pivot + Vector2(12, -12), "%d°" % roundi(rad_to_deg(rotation_angle)), HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("ffda8e"))
@@ -707,6 +865,6 @@ func _draw() -> void:
 		draw_circle(p, 5, Color("fc7373"))
 		draw_string(ThemeDB.fallback_font, p + Vector2(8, -8), str(i + 1), HORIZONTAL_ALIGNMENT_LEFT, -1, 14)
 		if i:
-			draw_line(project(clip_points[i - 1]), p, Color("fc7373"), 2)
-	draw_rect(Rect2(0, 0, size.x, 26), Color(0.08, 0.1, 0.14, 0.95))
-	draw_string(ThemeDB.fallback_font, Vector2(9, 18), "%s  •  Ctrl+Tab  •  %.3f px/u%s" % [["Side YZ", "Front XZ", "Top XY"][orientation], zoom, "  • ACTIVE" if has_focus() else ""], HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("b9cfdf"))
+			draw_line(project(clip_points[i - 1]), p, Color("fc7373"), 2, true)
+	draw_rect(Rect2(0, 0, size.x, 36), Color(0.08, 0.1, 0.14, 0.95))
+	draw_string(ThemeDB.fallback_font, Vector2(38, 23), "Ctrl+Tab  •  %.3f px/u%s" % [zoom, "  • ACTIVE" if has_focus() else ""], HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("b9cfdf"))

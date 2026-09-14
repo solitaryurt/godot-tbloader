@@ -17,7 +17,12 @@ func run() -> void:
 	test_tohunga_fixture()
 	test_operations()
 	test_rotation()
+	test_candidate_geometry_previews()
+	test_merge_brushes()
 	test_phase5()
+	test_vertex_hull_sequences()
+	test_vertex_hull_metadata_and_degeneracy()
+	test_shallow_vertex_intersections()
 	await test_checked_bake()
 	# Preserve the real bake regression gate alongside native document assertions.
 	var loader = ClassDB.instantiate("TBLoader")
@@ -103,7 +108,7 @@ func run() -> void:
 	checks.finish(self, "document")
 
 func state(doc) -> Dictionary:
-	return {"snapshot": doc.snapshot().value, "path": doc.get_path(), "dirty": doc.is_dirty(), "revision": doc.get_revision(), "epoch": doc.get_epoch(), "entities": doc.get_entities()}
+	return {"snapshot": doc.snapshot().value, "path": doc.get_path(), "dirty": doc.is_dirty(), "revision": doc.get_revision(), "topology": doc.get_topology_revision(), "epoch": doc.get_epoch(), "entities": doc.get_entities()}
 
 func test_native_lookup_and_draw_schema() -> void:
 	var doc = ClassDB.instantiate("TBMapDocument")
@@ -911,6 +916,390 @@ func test_rotation() -> void:
 	checks.check(not doc.rotate_brushes(ids, Vector3.ZERO, 0, TAU).changed and state(doc) == unchanged, "full-turn rotation is an exact no-op")
 	expect_failure(doc, doc.rotate_brushes(ids, Vector3(INF, 0, 0), 2, PI), unchanged, "INVALID_ARGUMENT", "rotate_brushes")
 	expect_failure(doc, doc.rotate_brushes(PackedInt64Array([999999]), Vector3.ZERO, 2, PI), unchanged, "INVALID_ID", "rotate_brushes")
+
+func expect_preview(result: Dictionary, message: String) -> Array:
+	if not expect_ok(result, message):
+		return []
+	checks.check(not result.changed and result.value is Array, message + " is read-only and returns candidate brushes")
+	for brush in result.value:
+		checks.check(brush.size() == 9 and brush.has_all(["id", "source_id", "entity_id", "aabb_min", "aabb_max", "vertices", "edges", "edge_vertex_indices", "faces"]), message + " candidate brush schema")
+		checks.check(brush.faces.all(func(face): return face.size() == 6 and face.has_all(["index", "winding", "vertex_indices", "center", "normal", "texture"])), message + " candidate face schema")
+	return result.value
+
+func preview_matches_document(candidates: Array, doc, message: String) -> void:
+	for candidate in candidates:
+		var committed := brush_data(doc, candidate.id)
+		checks.check(not committed.is_empty(), message + " committed candidate ID exists")
+		for key in ["entity_id", "aabb_min", "aabb_max", "vertices", "edges", "edge_vertex_indices", "faces"]:
+			checks.check(candidate[key] == committed[key], message + " exact " + key)
+
+func test_candidate_geometry_previews() -> void:
+	var translated = ClassDB.instantiate("TBMapDocument")
+	var first: int = translated.create_cuboid(Vector3.ZERO, Vector3(16, 24, 32), "first/material").value
+	var second: int = translated.create_cuboid(Vector3(40, 0, 0), Vector3(56, 24, 32), "second/material").value
+	var ids := PackedInt64Array([first, second, first])
+	var events := {"map": 0, "preview": 0, "dirty": 0}
+	translated.map_changed.connect(func(_r): events.map += 1)
+	translated.preview_changed.connect(func(): events.preview += 1)
+	translated.dirty_changed.connect(func(_d): events.dirty += 1)
+	var manifest: Dictionary = translated.prepare_preview_chunks(1.0, PackedInt64Array(), 0)
+	var chunk_id: String = manifest.chunks[0].chunk_id
+	var before := state(translated)
+	var history = translated.capture_history_state()
+	var translation := expect_preview(translated.preview_translate_brushes(ids, Vector3(8, -4, 2)), "preview multi-brush translation")
+	checks.check(translation.map(func(b): return b.id) == [first, second] and translation.all(func(b): return b.source_id == b.id), "translation preview deduplicates with source IDs")
+	checks.check(state(translated) == before and events == {"map": 0, "preview": 0, "dirty": 0} and translated.is_history_state_current(history), "translation preview preserves text dirty revisions IDs and history")
+	checks.check(not translated.get_preview_chunk(chunk_id).is_empty(), "translation preview preserves prepared native caches")
+	expect_ok(translated.translate_brushes(ids, Vector3(8, -4, 2)), "commit previewed translation")
+	preview_matches_document(translation, translated, "translation preview")
+
+	var rotated = ClassDB.instantiate("TBMapDocument")
+	first = rotated.create_cuboid(Vector3.ZERO, Vector3(16, 24, 32), "first/material").value
+	second = rotated.create_cuboid(Vector3(40, 0, 0), Vector3(56, 24, 32), "second/material").value
+	ids = PackedInt64Array([first, second])
+	before = state(rotated)
+	var rotation := expect_preview(rotated.preview_rotate_brushes(ids, Vector3(28, 12, 16), 2, PI / 2), "preview world-axis multi-brush rotation")
+	checks.check(state(rotated) == before, "rotation preview preserves complete document state")
+	expect_ok(rotated.rotate_brushes(ids, Vector3(28, 12, 16), 2, PI / 2), "commit previewed rotation")
+	preview_matches_document(rotation, rotated, "rotation preview")
+
+	for kind in ["face", "edge", "vertex"]:
+		var components_doc = ClassDB.instantiate("TBMapDocument")
+		var id: int = components_doc.create_cuboid(Vector3.ZERO, Vector3.ONE * 64, "component/material").value
+		var brush := brush_data(components_doc, id)
+		var movement: Vector3 = brush.faces[0].normal * 8 if kind == "face" else Vector3(8, 4, 2)
+		var selected := [component(brush, kind, 0)]
+		before = state(components_doc)
+		var component_preview := expect_preview(components_doc.preview_translate_components(selected, movement), "preview " + kind + " translation")
+		checks.check(state(components_doc) == before and component_preview.size() == 1 and component_preview[0].source_id == id, kind + " preview is atomic and identifies its source")
+		expect_ok(components_doc.translate_components(selected, movement), "commit previewed " + kind + " translation")
+		preview_matches_document(component_preview, components_doc, kind + " preview")
+		var stale_before := state(components_doc)
+		expect_failure(components_doc, components_doc.preview_translate_components(selected, movement), stale_before, "STALE_COMPONENT", "preview_translate_components")
+
+	var invalid = ClassDB.instantiate("TBMapDocument")
+	var invalid_id: int = invalid.create_cuboid(Vector3.ZERO, Vector3.ONE * 64, "invalid/material").value
+	var invalid_brush := brush_data(invalid, invalid_id)
+	before = state(invalid)
+	expect_failure(invalid, invalid.preview_translate_brushes(PackedInt64Array([invalid_id, 999999]), Vector3.ONE), before, "INVALID_ID", "preview_translate_brushes")
+	expect_failure(invalid, invalid.preview_rotate_brushes(PackedInt64Array([invalid_id]), Vector3.ZERO, 3, PI), before, "INVALID_ARGUMENT", "preview_rotate_brushes")
+	expect_failure(invalid, invalid.preview_translate_components([component(invalid_brush, "face", 0)], Vector3(64, 0, 0)), before, "INVALID_GEOMETRY", "preview_translate_components")
+	expect_failure(invalid, invalid.preview_clip_brushes(PackedInt64Array([invalid_id]), Vector3.ZERO, Vector3.UP, Vector3.UP, true), before, "INVALID_ARGUMENT", "preview_clip_brushes")
+
+	var clipped = ClassDB.instantiate("TBMapDocument")
+	first = clipped.create_cuboid(Vector3(-16, 0, 0), Vector3(16, 32, 32), "first/material").value
+	second = clipped.create_cuboid(Vector3(-16, 48, 0), Vector3(16, 80, 32), "second/material").value
+	ids = PackedInt64Array([first, second, first])
+	var p0 := Vector3.ZERO
+	var p1 := Vector3(0, 0, 1)
+	var p2 := Vector3(0, 1, 0)
+	before = state(clipped)
+	var split_preview := expect_preview(clipped.preview_clip_brushes(ids, p0, p1, p2, true), "preview multi-brush split")
+	checks.check(split_preview.size() == 4 and split_preview.filter(func(b): return b.source_id == first).size() == 2 and split_preview.filter(func(b): return b.source_id == second).size() == 2, "split preview reports both pieces and source provenance")
+	checks.check(state(clipped) == before, "split preview does not consume predicted IDs")
+	var split: Dictionary = clipped.clip_brushes(ids, p0, p1, p2, true)
+	expect_ok(split, "commit previewed multi-brush split")
+	checks.check(split.value == PackedInt64Array(split_preview.map(func(b): return b.id)), "split preview IDs equal immediate commit IDs")
+	preview_matches_document(split_preview, clipped, "split preview")
+
+	var flipped = ClassDB.instantiate("TBMapDocument")
+	var flipped_id: int = flipped.create_cuboid(Vector3(-16, -16, -16), Vector3.ONE * 16, "flip/material").value
+	var flip_preview := expect_preview(flipped.preview_clip_brushes(PackedInt64Array([flipped_id]), p0, p1, p2, false, true), "preview flipped clip")
+	expect_ok(flipped.clip_brushes(PackedInt64Array([flipped_id]), p0, p2, p1, false), "commit flipped preview with reversed points")
+	preview_matches_document(flip_preview, flipped, "flipped clip preview")
+
+	var ids_doc = ClassDB.instantiate("TBMapDocument")
+	var source_id: int = ids_doc.create_cuboid(Vector3(-16, -16, -16), Vector3.ONE * 16, "ids/material").value
+	var predicted := expect_preview(ids_doc.preview_clip_brushes(PackedInt64Array([source_id]), p0, p1, p2, true), "preview predicted split IDs")
+	var created: Dictionary = ids_doc.create_cuboid(Vector3(64, 0, 0), Vector3(80, 16, 16), "after/preview")
+	expect_ok(created, "create after split preview")
+	checks.check(predicted.size() == 2 and created.value == predicted[0].id, "preview does not consume its first predicted brush ID")
+
+func test_merge_brushes() -> void:
+	var doc = ClassDB.instantiate("TBMapDocument")
+	var first: int = doc.create_cuboid(Vector3.ZERO, Vector3.ONE * 16, "first/material").value
+	var second: int = doc.create_cuboid(Vector3(16, 0, 0), Vector3(32, 16, 16), "second/material").value
+	var first_brush := brush_data(doc, first)
+	var metadata_face := -1
+	for face in first_brush.faces:
+		if face.normal == Vector3(0, -1, 0): metadata_face = face.index
+	expect_ok(doc.set_face_texture(first, metadata_face, "first/metadata", first_brush.topology_revision), "prepare merge texture metadata")
+	first_brush = brush_data(doc, first)
+	expect_ok(doc.set_face_uv(first, metadata_face, Vector2(7, -3), 22.5, Vector2(0.5, 2), first_brush.topology_revision), "prepare merge UV metadata")
+	var before_text: String = doc.export_text().value
+	var before_history = doc.capture_history_state()
+	var merged: Dictionary = doc.merge_brushes(PackedInt64Array([first, second, first]))
+	if not expect_ok(merged, "merge two full-face boxes"):
+		return
+	var merged_id: int = merged.value
+	checks.check(merged.changed and merged_id > second and brush_data(doc, first).is_empty() and brush_data(doc, second).is_empty(), "merge replaces sources with one fresh-ID brush")
+	var result := brush_data(doc, merged_id)
+	checks.check(doc.get_draw_data().size() == 1 and result.aabb_min == Vector3.ZERO and result.aabb_max == Vector3(32, 16, 16) and result.faces.size() == 6, "two-box merge is the exact convex union")
+	assert_solid(doc, merged_id, 32 * 16 * 16)
+	var retained_face := -1
+	for face in result.faces:
+		if face.normal == Vector3(0, -1, 0):
+			retained_face = face.index
+			checks.check(face.texture == "first/metadata", "coplanar outward plane keeps first retained source texture")
+	var uv: Dictionary = doc.get_face_uv(merged_id, retained_face, result.topology_revision).value
+	checks.check(uv.shift == Vector2(7, -3) and uv.rotation == 22.5 and uv.scale == Vector2(0.5, 2), "coplanar outward plane keeps first retained source UV metadata")
+	var after_text: String = doc.export_text().value
+	var after_history = doc.capture_history_state()
+	expect_ok(doc.restore_history_state(before_history), "undo merge native history state")
+	checks.check(doc.export_text().value == before_text and not brush_data(doc, first).is_empty() and not brush_data(doc, second).is_empty() and brush_data(doc, merged_id).is_empty(), "merge undo restores exact sources and identities")
+	expect_ok(doc.restore_history_state(after_history), "redo merge native history state")
+	checks.check(doc.export_text().value == after_text and not brush_data(doc, merged_id).is_empty(), "merge redo restores exact result identity")
+
+	var chain = ClassDB.instantiate("TBMapDocument")
+	var chain_ids := PackedInt64Array()
+	for x in 4:
+		chain_ids.append(chain.create_cuboid(Vector3(x * 8, 0, 0), Vector3((x + 1) * 8, 8, 8), "chain/%d" % x).value)
+	var chain_result: Dictionary = chain.merge_brushes(chain_ids)
+	expect_ok(chain_result, "merge connected N-brush chain")
+	checks.check(chain.get_draw_data().size() == 1 and brush_data(chain, chain_result.value).aabb_max == Vector3(32, 8, 8), "N-brush chain removes every interior pair")
+	assert_solid(chain, chain_result.value, 32 * 8 * 8)
+
+	var invalid = ClassDB.instantiate("TBMapDocument")
+	var base: int = invalid.create_cuboid(Vector3.ZERO, Vector3.ONE * 16, "base").value
+	var partial: int = invalid.create_cuboid(Vector3(16, 0, 0), Vector3(32, 8, 16), "partial").value
+	var disconnected: int = invalid.create_cuboid(Vector3(64, 0, 0), Vector3(80, 16, 16), "disconnected").value
+	var before := state(invalid)
+	expect_failure(invalid, invalid.merge_brushes(PackedInt64Array([base, partial])), before, "INVALID_GEOMETRY", "merge_brushes")
+	expect_failure(invalid, invalid.merge_brushes(PackedInt64Array([base, disconnected])), before, "INVALID_GEOMETRY", "merge_brushes")
+	expect_failure(invalid, invalid.merge_brushes(PackedInt64Array([base, base])), before, "INVALID_ARGUMENT", "merge_brushes")
+	expect_failure(invalid, invalid.merge_brushes(PackedInt64Array([base, 999999])), before, "INVALID_ID", "merge_brushes")
+	var next_after_failures: Dictionary = invalid.create_cuboid(Vector3(96, 0, 0), Vector3(112, 16, 16), "fresh")
+	expect_ok(next_after_failures, "create after atomic merge failures")
+	checks.check(next_after_failures.value == disconnected + 1, "failed merges consume no brush ID")
+
+	var l_shape = ClassDB.instantiate("TBMapDocument")
+	var corner: int = l_shape.create_cuboid(Vector3.ZERO, Vector3.ONE * 16, "corner").value
+	var right: int = l_shape.create_cuboid(Vector3(16, 0, 0), Vector3(32, 16, 16), "right").value
+	var upper: int = l_shape.create_cuboid(Vector3(0, 16, 0), Vector3(16, 32, 16), "upper").value
+	expect_failure(l_shape, l_shape.merge_brushes(PackedInt64Array([corner, right, upper])), state(l_shape), "INVALID_GEOMETRY", "merge_brushes")
+
+	var owners = ClassDB.instantiate("TBMapDocument")
+	var owned_a: int = owners.create_cuboid(Vector3.ZERO, Vector3.ONE * 16, "a").value
+	var owned_b: int = owners.create_cuboid(Vector3(16, 0, 0), Vector3(32, 16, 16), "b").value
+	expect_ok(owners.group_brushes(PackedInt64Array([owned_b]), "func_detail"), "prepare mixed-owner merge")
+	expect_failure(owners, owners.merge_brushes(PackedInt64Array([owned_a, owned_b])), state(owners), "INVALID_ARGUMENT", "merge_brushes")
+
+	var limited = ClassDB.instantiate("TBMapDocument")
+	var many_faces := "{\n\"classname\" \"worldspawn\"\n" + pyramid_brush_text(63, 64.0, "upper") + pyramid_brush_text(63, -64.0, "lower") + "}\n"
+	if expect_ok(limited.import_text(many_faces), "import 126-face convex merge candidate"):
+		var limited_ids: PackedInt64Array = limited.get_draw_data().map(func(brush): return brush.id)
+		expect_failure(limited, limited.merge_brushes(limited_ids), state(limited), "LIMIT_EXCEEDED", "merge_brushes")
+		var after_limit: Dictionary = limited.create_cuboid(Vector3(256, 0, 0), Vector3(272, 16, 16), "after-limit")
+		expect_ok(after_limit, "create after over-limit merge failure")
+		checks.check(after_limit.value == limited_ids[-1] + 1, "over-limit merge consumes no brush ID")
+
+func pyramid_brush_text(sides: int, apex_z: float, texture: String) -> String:
+	var ring: Array[Vector3] = []
+	for i in sides:
+		var angle := TAU * i / sides
+		ring.append(Vector3(128 * cos(angle), 128 * sin(angle), 0))
+	var points := [ring[0], ring[1], ring[2]]
+	if apex_z < 0:
+		var swap: Vector3 = points[1]; points[1] = points[2]; points[2] = swap
+	var out := "{\n" + map_face_text(points[0], points[1], points[2], texture)
+	var apex := Vector3(0, 0, apex_z)
+	for i in sides:
+		out += map_face_text(ring[i], apex if apex_z > 0 else ring[(i + 1) % sides], ring[(i + 1) % sides] if apex_z > 0 else apex, texture)
+	return out + "}\n"
+
+func map_face_text(a: Vector3, b: Vector3, c: Vector3, texture: String) -> String:
+	return "( %s %s %s ) ( %s %s %s ) ( %s %s %s ) %s 0 0 0 1 1\n" % [a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z, texture]
+
+func test_vertex_hull_sequences() -> void:
+	var random := RandomNumberGenerator.new()
+	random.seed = 73019
+	for origin in [Vector3.ZERO, Vector3(4096, -2048, 1024)]:
+		var doc = ClassDB.instantiate("TBMapDocument")
+		var id: int = doc.create_cuboid(origin, origin + Vector3.ONE * 256, "baseline/checker").value
+		for step in 24:
+			var b := brush_data(doc, id)
+			var index := random.randi_range(0, b.vertices.size() - 1)
+			var delta := Vector3(random.randi_range(-2, 2), random.randi_range(-2, 2), random.randi_range(-2, 2)) * 8
+			var expected: PackedVector3Array = b.vertices.duplicate()
+			expected[index] += delta
+			if not expect_ok(doc.translate_vertices(id, PackedInt32Array([index]), delta, b.topology_revision), "sequential different corners origin %s step %d index %d delta %s" % [origin, step, index, delta]):
+				break
+			assert_vertex_hull(doc, id, expected)
+	for extent in [1.0, 64.0, 256.0, 1024.0]:
+		for origin in [Vector3.ZERO, Vector3(4096, -2048, 1024)]:
+			var doc = ClassDB.instantiate("TBMapDocument")
+			var id: int = doc.create_cuboid(origin, origin + Vector3.ONE * extent, "baseline/checker").value
+			var snapshot: Dictionary = doc.snapshot().value
+			for corner in 8:
+				for delta in [Vector3(8, 16, 0), Vector3(16, 16, 0), Vector3(1, 2, 3), Vector3(-8, -16, -8)]:
+					doc.restore_snapshot(snapshot)
+					var b := brush_data(doc, id)
+					var expected: PackedVector3Array = b.vertices.duplicate()
+					expected[corner] += delta
+					if expect_ok(doc.translate_vertices(id, PackedInt32Array([corner]), delta, b.topology_revision), "corner %d delta %s extent %s origin %s" % [corner, delta, extent, origin]):
+						assert_vertex_hull(doc, id, expected)
+	# Re-select by position after each committed drag: face/vertex ordering changes
+	# when nonplanar sides split, and the next drag starts from regenerated planes.
+	for extent in [64.0, 256.0, 1024.0]:
+		for origin in [Vector3.ZERO, Vector3(4096, -2048, 1024)]:
+			var doc = ClassDB.instantiate("TBMapDocument")
+			var created: Dictionary = doc.create_cuboid(origin, origin + Vector3.ONE * extent, "baseline/checker")
+			if not expect_ok(created, "create sequential vertex fixture"):
+				continue
+			var id: int = created.value
+			var position: Vector3 = origin + Vector3.ONE * extent
+			var movements := [Vector3(16, 8, 0), Vector3(0, 8, 16), Vector3(-8, -16, -8), Vector3(-8, 0, -8), Vector3(-8, -8, -8), Vector3(8, 8, 8)]
+			for step in movements.size():
+				var b := brush_data(doc, id)
+				var index := -1
+				for i in b.vertices.size():
+					if b.vertices[i].distance_to(position) < 0.001:
+						index = i
+				if not checks.check(index >= 0, "sequential moved corner remains selectable"):
+					break
+				var movement: Vector3 = movements[step] * (extent / 64.0)
+				if not expect_ok(doc.translate_vertices(id, PackedInt32Array([index]), movement, b.topology_revision), "vertex drag extent %s origin %s step %d" % [extent, origin, step]):
+					break
+				position += movement
+				assert_solid(doc, id)
+				b = brush_data(doc, id)
+				checks.check(Array(b.vertices).any(func(v): return v.distance_to(position) < 0.001), "drag reaches requested corner extent %s origin %s step %d: %s in %s" % [extent, origin, step, position, b.vertices])
+				if step == 3 or step == 5:
+					checks.check(b.faces.size() == 6 and b.vertices.size() == 8, "returning corner merges coplanar faces into cuboid")
+				expect_ok(doc.rebuild(), "deformed hull survives native regeneration")
+
+func test_shallow_vertex_intersections() -> void:
+	var source := FileAccess.get_file_as_string("res://fixtures/vertex_prism.map")
+	# Reverse the serialized faces and use Valve projection too: neither plane
+	# traversal order nor UV syntax may decide whether an edited solid is closed.
+	var planes: Array = Array(source.split("\n")).filter(func(line): return line.begins_with("("))
+	planes.reverse()
+	var valve := "{\n\"classname\" \"worldspawn\"\n{\n"
+	for line in planes:
+		valve += line.replace("baseline/checker 0 0 0 1 1", "baseline/checker [ 1 0 0 0 ] [ 0 -1 0 0 ] 0 1 1") + "\n"
+	valve += "}\n}\n"
+	for map_text in [source, valve]:
+		var doc = ClassDB.instantiate("TBMapDocument")
+		if not expect_ok(doc.import_text(map_text), "import shallow-plane vertex fixture"):
+			continue
+		var id: int = doc.get_draw_data()[0].id
+		var snapshot: Dictionary = doc.snapshot().value
+		for kind in ["vertex", "edge"]:
+			doc.restore_snapshot(snapshot)
+			var b := brush_data(doc, id)
+			var a := Vector3(4144, -2043.7127685546875, 1024)
+			var c := Vector3(4155.712890625, -2032, 1024)
+			var index := -1
+			var selected := PackedInt32Array()
+			var movement := Vector3(16, 16, 0)
+			if kind == "vertex":
+				index = b.vertices.find(c)
+				selected.append(index)
+			else:
+				selected = PackedInt32Array([b.vertices.find(a), b.vertices.find(c)])
+				for edge in b.edge_vertex_indices.size() / 2:
+					if selected.has(b.edge_vertex_indices[edge * 2]) and selected.has(b.edge_vertex_indices[edge * 2 + 1]):
+						index = edge
+				var reference := (a + c) * 0.5
+				movement = (reference + movement).snapped(Vector3.ONE * 16) - reference
+			if not checks.check(index >= 0 and not selected.has(-1), "select actual prism corner/edge by position"):
+				continue
+			var expected: PackedVector3Array = b.vertices.duplicate()
+			for v in selected:
+				expected[v] += movement
+			var result: Dictionary = doc.translate_components([component(b, kind, index)], movement)
+			if not expect_ok(result, "shallow supporting planes after %s grid edit" % kind):
+				continue
+			assert_vertex_hull(doc, id, expected)
+			expect_ok(doc.rebuild(), "shallow-plane edit regenerates from serialized planes")
+			assert_vertex_hull(doc, id, expected)
+			var reopened = ClassDB.instantiate("TBMapDocument")
+			expect_ok(reopened.import_text(doc.export_text().value), "shallow-plane edit round-trips")
+			checks.check(reopened.export_text().value == doc.export_text().value, "shallow-plane round-trip retains exact source")
+
+	# Merely lowering the determinant cutoff is insufficient: solving rounded
+	# unit normals creates duplicate corners >1e-5 apart in this larger prism.
+	var doc = ClassDB.instantiate("TBMapDocument")
+	var id: int = doc.create_cuboid(Vector3(4096, -2048, 1024), Vector3(5120, -1024, 2048), "baseline/checker").value
+	if expect_ok(doc.make_prism(id, 12, 2), "create precision-loss prism"):
+		var b := brush_data(doc, id)
+		var index: int = b.vertices.find(Vector3(4864, -1979.405029296875, 1024))
+		if checks.check(index >= 0, "select precision-loss corner by position"):
+			var expected: PackedVector3Array = b.vertices.duplicate()
+			expected[index] += Vector3(-16, -16, 0)
+			if expect_ok(doc.translate_vertices(id, PackedInt32Array([index]), Vector3(-16, -16, 0), b.topology_revision), "intersections preserve incidence at shallow angles"):
+				assert_vertex_hull(doc, id, expected)
+
+func assert_vertex_hull(doc, id: int, expected: PackedVector3Array) -> void:
+	assert_solid(doc, id)
+	var b := brush_data(doc, id)
+	# Together these checks distinguish the requested convex hull from a merely
+	# closed solid whose missing supporting planes expanded/moved other corners.
+	for vertex in b.vertices:
+		checks.check(Array(expected).any(func(v): return v.distance_to(vertex) < 0.001), "hull has only input extreme points")
+	for point in expected:
+		for face in b.faces:
+			checks.check(face.normal.dot(point - face.center) <= 0.001, "hull contains every requested input point")
+
+func test_vertex_hull_metadata_and_degeneracy() -> void:
+	for fixture in ["classic_cube", "valve_cube"]:
+		var doc = ClassDB.instantiate("TBMapDocument")
+		if not expect_ok(doc.load_map("res://fixtures/" + fixture + ".map"), "load vertex metadata fixture"):
+			continue
+		var b: Dictionary = doc.get_draw_data()[0]
+		var id: int = b.id
+		for f in b.faces.size():
+			b = brush_data(doc, id)
+			expect_ok(doc.set_face_texture(id, f, "face/%d" % f, b.topology_revision), "label source face provenance")
+		var snapshot: Dictionary = doc.snapshot().value
+		var original_lines: PackedStringArray = doc.export_text().value.split("\n")
+		for delta in [Vector3(8, 16, 8), Vector3(-8, -16, -8)]:
+			doc.restore_snapshot(snapshot)
+			b = brush_data(doc, id)
+			var index: int = b.vertices.find(b.aabb_max)
+			var expected: PackedVector3Array = b.vertices.duplicate()
+			expected[index] += delta
+			var uvs: Array = []
+			for face in b.faces:
+				uvs.append(doc.get_face_uv(id, face.index, b.topology_revision).value)
+			if not expect_ok(doc.translate_vertices(id, PackedInt32Array([index]), delta, b.topology_revision), "textured inward/outward corner"):
+				continue
+			assert_vertex_hull(doc, id, expected)
+			var after := brush_data(doc, id)
+			for face in after.faces:
+				var source: int = face.texture.trim_prefix("face/").to_int()
+				checks.check(doc.get_face_uv(id, face.index, after.topology_revision).value == uvs[source], "split/merged face preserves complete classic or Valve UV metadata")
+				# Every hull triangle in this fixture has a common source face.
+				for v in face.vertex_indices:
+					checks.check(Array(b.faces[source].vertex_indices).any(func(old): return expected[old].distance_to(after.vertices[v]) < 0.001), "new plane inherits its common incident face")
+			var lines: PackedStringArray = doc.export_text().value.split("\n")
+			for line in lines:
+				if not line.begins_with("("):
+					continue
+				var suffix := line.substr(line.find('"face/'))
+				checks.check(Array(original_lines).any(func(original): return original.ends_with(suffix)), "vertex hull retains projection and optional surface flags verbatim")
+			for face in b.faces:
+				if not face.vertex_indices.has(index):
+					for original in original_lines:
+						if original.contains('"%s"' % face.texture):
+							checks.check(lines.has(original), "untouched source supporting plane is retained exactly")
+			var reopened = ClassDB.instantiate("TBMapDocument")
+			expect_ok(reopened.import_text(doc.export_text().value), "vertex hull round-trip validation")
+			checks.check(reopened.export_text().value == doc.export_text().value, "deformed face metadata round-trips exactly")
+	var doc = ClassDB.instantiate("TBMapDocument")
+	var id: int = doc.create_cuboid(Vector3.ZERO, Vector3.ONE * 64, "baseline/checker").value
+	var snapshot: Dictionary = doc.snapshot().value
+	# Coincident, collinear and interior input points cease being hull corners.
+	for destination in [Vector3(0, 64, 64), Vector3(32, 32, 64), Vector3(32, 32, 32)]:
+		doc.restore_snapshot(snapshot)
+		var b := brush_data(doc, id)
+		var index: int = b.vertices.find(Vector3.ONE * 64)
+		var expected: PackedVector3Array = b.vertices.duplicate()
+		expected[index] = destination
+		if expect_ok(doc.translate_vertices(id, PackedInt32Array([index]), destination - Vector3.ONE * 64, b.topology_revision), "corner degeneracy retains valid solid"):
+			assert_vertex_hull(doc, id, expected)
+			assert_solid(doc, id, 64.0 * 64 * 64 * 5 / 6)
+			checks.check(brush_data(doc, id).vertices.size() == 7 and brush_data(doc, id).faces.size() == 7, "redundant corner removed from hull")
 
 func test_phase5() -> void:
 	var doc = ClassDB.instantiate("TBMapDocument")
