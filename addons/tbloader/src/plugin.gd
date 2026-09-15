@@ -179,6 +179,7 @@ func create_map_control() -> Control:
 	var button_build_meshes = Button.new()
 	button_build_meshes.flat = true
 	button_build_meshes.text = "Build Meshes"
+	button_build_meshes.icon = get_editor_interface().get_base_control().get_theme_icon("Bake", "EditorIcons")
 	button_build_meshes.tooltip_text = "Build Meshes for the selected TBLoader"
 	button_build_meshes.accessibility_name = "Build Meshes"
 	button_build_meshes.connect("pressed", Callable(self, "build_meshes"))
@@ -294,6 +295,15 @@ func add_steam_audio_probe_volume(loader: Node, probe_volume: Node3D = null) -> 
 	for child in loader.find_children("*", "MeshInstance3D", true, false):
 		var mesh_instance := child as MeshInstance3D
 		if mesh_instance.mesh == null:
+			continue
+		var ancestor: Node = mesh_instance
+		var is_skybox := false
+		while ancestor != loader:
+			if String(ancestor.name).to_lower() == "skybox":
+				is_skybox = true
+				break
+			ancestor = ancestor.get_parent()
+		if is_skybox:
 			continue
 		var mesh_bounds: AABB = mesh_instance.global_transform * mesh_instance.mesh.get_aabb()
 		map_bounds = map_bounds.merge(mesh_bounds) if has_bounds else mesh_bounds

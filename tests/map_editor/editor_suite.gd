@@ -122,6 +122,7 @@ func run() -> void:
 	checks.check(ui.slot_types == ["Camera", "Side Grid", "Top Grid", "Front Grid"] and ui.camera_view.get_parent() == ui.view_slots[0] and ui.graph_a.get_parent() == ui.view_slots[2] and not ui.is_ancestor_of(ui.material_workspace), "three-view workspace starts with per-slot camera and grid types")
 	checks.check(plugin.map_control.visible and plugin.map_control.get_child_count() == 2
 		and plugin.map_control.get_child(0).text == "Build Meshes"
+		and plugin.map_control.get_child(0).icon == ui.loader_actions.BuildMeshes.icon
 		and plugin.map_control.get_child(1).text.is_empty() and plugin.map_control.get_child(1).icon != null
 		and plugin.map_control.get_child(1).tooltip_text == "Open Radiant Editor",
 		"spatial toolbar uses Build Meshes text and an accessible Radiant icon")
@@ -1104,6 +1105,14 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	var old_probe_branch := Node3D.new()
 	root.add_child(old_probe_branch)
 	old_probe_branch.add_child(old_probe_volume)
+	var skybox_branch := Node3D.new()
+	skybox_branch.name = "skybox"
+	loader.add_child(skybox_branch)
+	var skybox_mesh := MeshInstance3D.new()
+	var skybox_box := BoxMesh.new()
+	skybox_box.size = Vector3.ONE * 100000.0
+	skybox_mesh.mesh = skybox_box
+	skybox_branch.add_child(skybox_mesh)
 	var probe_volume := MockSteamAudioProbeVolume.new()
 	plugin.add_steam_audio_probe_volume(loader, probe_volume)
 	checks.check(probe_volume.get_parent() == loader.get_parent() and probe_volume.get_index() + 1 == loader.get_index()
@@ -1123,6 +1132,7 @@ func binding_journey(plugin: EditorPlugin) -> void:
 		and probe_volume.reflection_threads == OS.get_processor_count(),
 		"Steam Audio probe baking uses all available processor threads")
 	checks.check(probe_volume.generated, "Steam Audio probes are generated during map bake")
+	skybox_branch.free()
 	checks.check(not loader.find_children("*", "CollisionShape3D", true, false).is_empty(), "real baked collision output")
 	var bake_action = ui.last_bake_action.get_ref()
 	checks.check(bake_action != null and bake_action.get_retention_counters().packed_snapshot_count == 0
