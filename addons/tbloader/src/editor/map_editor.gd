@@ -1898,6 +1898,7 @@ func commit_bake(loader: Node, origin: RefCounted = null) -> bool:
 		BakeAction.attach_children(loader, before, root)
 		before.free()
 		return false
+	plugin.add_steam_audio_geometry(loader)
 	# The checked builder sees an intentionally empty loader, so account for a
 	# previous subtree when deciding whether this scene operation changed.
 	var changed: bool = result.changed or before.get_child_count() > 0

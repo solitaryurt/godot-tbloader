@@ -7,6 +7,16 @@ var ui: Control
 var manager: EditorUndoRedoManager
 var history: UndoRedo
 
+class MockSteamAudioProbeVolume extends Node3D:
+	var size := Vector3.ZERO
+	var spacing := 0.0
+	var bake_threads := 0
+	var reflection_threads := 0
+	var generated := false
+
+	func generate_probes() -> void:
+		generated = true
+
 func _enter_tree() -> void:
 	call_deferred("run")
 
@@ -92,7 +102,11 @@ func run() -> void:
 	checks.check(plugin._get_plugin_name() == "Radiant", "main screen is named Radiant")
 	checks.check(plugin._has_main_screen() and ui.is_visible_in_tree(), "Radiant main screen attached and visible")
 	checks.check(plugin.materials_panel.is_inside_tree() and plugin.uv_panel.is_inside_tree() and plugin.entities_panel.is_inside_tree(), "Map Materials, UV, and Entities bottom panels are retained")
-	checks.check(plugin.built_materials_page.get_parent() == plugin.materials_panel and plugin.materials_grid.max_columns == 0 and plugin.materials_tree.columns == 2, "Map Materials retains the rich responsive grid/list UI")
+	checks.check(plugin.built_materials_page.get_parent() == plugin.materials_panel and plugin.materials_grid.max_columns == 0
+		and plugin.materials_tree.columns == 2 and plugin.materials_search.placeholder_text == "Search materials..."
+		and plugin.material_picker_button.toggle_mode and plugin.materials_context_picker != null
+		and plugin.open_context_scene_button.text == "Open Scene",
+		"Map Materials retains contexts, search, picking, and the rich responsive grid/list UI")
 	checks.check(plugin.uv_panel == ui.material_workspace and plugin.uv_panel.is_ancestor_of(ui.browser) and plugin.uv_panel.is_ancestor_of(ui.bottom_uv_pane), "UV is a persistent dedicated UVPane with a full material browser")
 	ui.browser.set_search("shared-state")
 	plugin.show_uv()
@@ -106,7 +120,10 @@ func run() -> void:
 	plugin.show_materials()
 	plugin.hide_bottom_panel()
 	checks.check(ui.slot_types == ["Camera", "Side Grid", "Top Grid", "Front Grid"] and ui.camera_view.get_parent() == ui.view_slots[0] and ui.graph_a.get_parent() == ui.view_slots[2] and not ui.is_ancestor_of(ui.material_workspace), "three-view workspace starts with per-slot camera and grid types")
-	checks.check(plugin.map_control.visible and plugin.map_control.get_child(0).text == "Build Meshes" and plugin.map_control.get_child(2).text == "Open Radiant Editor", "spatial toolbar uses Build Meshes and Open Radiant Editor terminology")
+	checks.check(plugin.map_control.visible and plugin.map_control.get_child(0).text == "Build Meshes"
+		and plugin.map_control.get_child(2).text.is_empty() and plugin.map_control.get_child(2).icon != null
+		and plugin.map_control.get_child(2).tooltip_text == "Open Radiant Editor",
+		"spatial toolbar uses Build Meshes text and an accessible Radiant icon")
 	checks.check(plugin.map_control.get_child(0).disabled and plugin.map_control.get_child(2).disabled, "spatial loader actions are disabled without a selected TBLoader")
 	var map_toolbar: Control
 	for child in ui.get_children():
@@ -810,6 +827,14 @@ func run() -> void:
 	plugin._edit(loader)
 	plugin.show_materials()
 	checks.check(plugin.materials_panel == shared_materials_panel and plugin.materials_grid.item_count == 1 and plugin.materials_tree.get_root().get_child_count() == 1, "3D Map Materials opens the shared rich all-material grid/list")
+	plugin.materials_search.text = "missing"
+	plugin.filter_materials(plugin.materials_search.text)
+	checks.check(plugin.materials_grid.item_count == 0 and plugin.materials_count_label.text == "0 of 1 materials", "Map Materials search filters grid and list entries")
+	plugin.materials_search.text = "integration"
+	plugin.filter_materials(plugin.materials_search.text)
+	checks.check(plugin.materials_grid.item_count == 1 and plugin.materials_tree.get_root().get_child_count() == 1, "Map Materials search matches material names case-insensitively")
+	plugin.materials_search.text = ""
+	plugin.filter_materials(plugin.materials_search.text)
 	plugin.hide_bottom_panel()
 	plugin._make_visible(true)
 	plugin.show_materials()
@@ -1073,6 +1098,22 @@ func binding_journey(plugin: EditorPlugin) -> void:
 			for array_index in [Mesh.ARRAY_VERTEX, Mesh.ARRAY_NORMAL, Mesh.ARRAY_TANGENT, Mesh.ARRAY_TEX_UV, Mesh.ARRAY_TEX_UV2, Mesh.ARRAY_INDEX]:
 				checks.check(preview_arrays[array_index] == baked_arrays[array_index],
 					"built camera array %d matches bake mesh %d surface %d" % [array_index, mesh_index, surface])
+	var probe_volume := MockSteamAudioProbeVolume.new()
+	plugin.add_steam_audio_probe_volume(loader, probe_volume)
+	checks.check(probe_volume.get_parent() == loader and probe_volume.owner == root,
+		"Steam Audio probe volume is generated directly under the TBLoader with scene ownership")
+	var map_bounds: AABB = baked_meshes[0].global_transform * baked_meshes[0].mesh.get_aabb()
+	for mesh_index in range(1, baked_meshes.size()):
+		var mesh_instance: MeshInstance3D = baked_meshes[mesh_index]
+		map_bounds = map_bounds.merge(mesh_instance.global_transform * mesh_instance.mesh.get_aabb())
+	checks.check(is_equal_approx(probe_volume.spacing, 3.0)
+		and probe_volume.size.is_equal_approx(map_bounds.size)
+		and probe_volume.global_position.is_equal_approx(map_bounds.get_center()),
+		"Steam Audio probe volume uses spacing 3 and the generated map AABB")
+	checks.check(probe_volume.bake_threads == OS.get_processor_count()
+		and probe_volume.reflection_threads == OS.get_processor_count(),
+		"Steam Audio probe baking uses all available processor threads")
+	checks.check(probe_volume.generated, "Steam Audio probes are generated during map bake")
 	checks.check(not loader.find_children("*", "CollisionShape3D", true, false).is_empty(), "real baked collision output")
 	var bake_action = ui.last_bake_action.get_ref()
 	checks.check(bake_action != null and bake_action.get_retention_counters().packed_snapshot_count == 0
