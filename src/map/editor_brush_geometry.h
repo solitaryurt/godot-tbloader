@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <utility>
 #include <vector>
 
 struct LMEditorTextureSize {
@@ -41,15 +42,87 @@ struct LMEditorBrushFace {
 	int texture_idx = -1;
 };
 
+template <typename T>
+class LMEditorSharedVector {
+public:
+	using value_type = T;
+	using iterator = typename std::vector<T>::iterator;
+	using const_iterator = typename std::vector<T>::const_iterator;
+
+	LMEditorSharedVector() : values(std::make_shared<std::vector<T>>()) {}
+	size_t size() const { return values->size(); }
+	size_t capacity() const { return values->capacity(); }
+	bool empty() const { return values->empty(); }
+	void reserve(size_t count) { writable().reserve(count); }
+	void push_back(const T &value) { writable().push_back(value); }
+	void push_back(T &&value) { writable().push_back(std::move(value)); }
+	const T &operator[](size_t index) const { return (*values)[index]; }
+	T &operator[](size_t index) { return writable()[index]; }
+	const T *data() const { return values->data(); }
+	T *data() { return writable().data(); }
+	const_iterator begin() const { return values->begin(); }
+	const_iterator end() const { return values->end(); }
+	iterator begin() { return writable().begin(); }
+	iterator end() { return writable().end(); }
+	operator const std::vector<T> &() const { return *values; }
+	bool shares_storage_with(const LMEditorSharedVector &other) const { return values == other.values; }
+
+private:
+	std::vector<T> &writable() {
+		if (!values.unique()) values = std::make_shared<std::vector<T>>(*values);
+		return *values;
+	}
+	std::shared_ptr<std::vector<T>> values;
+};
+
+// Vector-compatible corner storage with immutable sparse descendants. Const
+// indexing resolves an override without materializing the complete winding.
+class LMEditorBrushCorners {
+public:
+	using value_type = LMEditorBrushCorner;
+	using iterator = LMEditorBrushCorner *;
+	using const_iterator = const LMEditorBrushCorner *;
+
+	LMEditorBrushCorners();
+	~LMEditorBrushCorners();
+	LMEditorBrushCorners(const LMEditorBrushCorners &) = default;
+	LMEditorBrushCorners &operator=(const LMEditorBrushCorners &) = default;
+	LMEditorBrushCorners(LMEditorBrushCorners &&) noexcept = default;
+	LMEditorBrushCorners &operator=(LMEditorBrushCorners &&) noexcept = default;
+	size_t size() const;
+	size_t capacity() const;
+	bool empty() const { return size() == 0; }
+	void reserve(size_t count);
+	void push_back(const LMEditorBrushCorner &corner);
+	void push_back(LMEditorBrushCorner &&corner);
+	const LMEditorBrushCorner &operator[](size_t index) const;
+	LMEditorBrushCorner &operator[](size_t index);
+	const LMEditorBrushCorner *data() const;
+	LMEditorBrushCorner *data();
+	const_iterator begin() const { return data(); }
+	const_iterator end() const { return data() + size(); }
+	iterator begin() { return data(); }
+	iterator end() { return data() + size(); }
+
+	// Returns bytes copied into the new immutable payload.
+	size_t with_uv_updates(const std::vector<std::pair<uint32_t, LMVertexUV>> &updates);
+
+private:
+	struct Store;
+	void ensure_writable();
+	std::shared_ptr<std::vector<LMEditorBrushCorner>> writable;
+	std::shared_ptr<const Store> store;
+};
+
 // Editor-local, flat, owning geometry. Face windings are spans in corners and
 // triangles are implicit fans: 0, i + 1, i + 2.
 struct LMEditorBrushGeometry {
 	int64_t brush_id = 0;
 	uint64_t source_generation = 0;
-	std::vector<vec3> positions;
-	std::vector<LMEditorBrushCorner> corners;
-	std::vector<LMEditorBrushFace> faces;
-	std::vector<LMEditorBrushEdge> edges;
+	LMEditorSharedVector<vec3> positions;
+	LMEditorBrushCorners corners;
+	LMEditorSharedVector<LMEditorBrushFace> faces;
+	LMEditorSharedVector<LMEditorBrushEdge> edges;
 	vec3 mins{};
 	vec3 maxs{};
 	bool has_bounds = false;

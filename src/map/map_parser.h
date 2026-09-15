@@ -20,6 +20,12 @@ struct LMParseError {
 class LMMapParser {
 public:
 	static constexpr size_t MAX_TEXT_BYTES = 16 * 1024 * 1024;
+	static constexpr int MAX_ENTITIES = 65536;
+	static constexpr int MAX_PROPERTIES_PER_ENTITY = 8192;
+	static constexpr int MAX_TOTAL_PROPERTIES = 262144;
+	static constexpr int MAX_PRIMITIVES_PER_ENTITY = 16384;
+	static constexpr int MAX_TOTAL_PRIMITIVES = 65536;
+	static constexpr int MAX_TEXTURES = 4096;
 	std::shared_ptr<LMMapData> map_data;
 	LMParseError error;
 	explicit LMMapParser(std::shared_ptr<LMMapData> data) : map_data(data) {}

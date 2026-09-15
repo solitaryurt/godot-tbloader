@@ -180,6 +180,7 @@ class TBMapDocument : public RefCounted {
 	struct PreviewCache;
 	std::shared_ptr<PreviewCache> preview_cache;
 	std::vector<std::shared_ptr<PreviewCache>> preview_history;
+	int64_t preview_history_evictions = 0;
 	bool preview_history_restored = false;
 	Dictionary texture_sizes;
 	StringName last_preview_change_reason;
@@ -273,9 +274,12 @@ public:
 	Array get_draw_data() const;
 	Array get_preview_data() const;
 	PackedVector2Array get_face_preview_uvs(const Array &targets, const String &texture) const;
+	Dictionary summarize_faces(const Array &targets) const;
 	Dictionary prepare_preview_chunks(double scale, const PackedInt64Array &hidden_ids, int filter_mask, int chunk_triangles = 2048, double chunk_size = 64.0);
 	Dictionary get_preview_chunk(const String &chunk_id) const;
 	PackedInt64Array query_brushes_2d(int hidden_axis, Vector3 mins, Vector3 maxs) const;
+	Dictionary query_brush_2d_hit(int hidden_axis, Vector3 point, double tolerance, const PackedInt64Array &hidden_ids,
+			int filter_mask, const PackedInt64Array &selected_ids, bool prefer_selected) const;
 	Array query_ray(Vector3 origin, Vector3 direction, double max_distance = 1e30) const;
 	Dictionary query_ray_nearest_visible(Vector3 origin, Vector3 direction, double max_distance, const PackedInt64Array &hidden_ids, int filter_mask) const;
 	Dictionary create_cuboid(Vector3 mins, Vector3 maxs, const String &texture);

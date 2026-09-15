@@ -13,6 +13,7 @@ func run() -> void:
 	test_document()
 	test_native_lookup_and_draw_schema()
 	test_spatial_queries()
+	test_face_summary()
 	test_preview_chunks()
 	test_tohunga_fixture()
 	test_operations()
@@ -176,6 +177,32 @@ func test_spatial_queries() -> void:
 	checks.check(doc.query_brushes_2d(2, Vector3(2, 0, 0), Vector3(1, 1, 1)).is_empty(), "2D query rejects reversed visible bounds")
 	checks.check(doc.query_brushes_2d(2, Vector3(NAN, 0, 0), Vector3.ONE).is_empty(), "2D query rejects non-finite bounds")
 
+	var exact_doc = ClassDB.instantiate("TBMapDocument")
+	var exact_first: int = exact_doc.create_cuboid(Vector3(-10, -10, -10), Vector3(10, 10, 10), "stone").value
+	var exact_second: int = exact_doc.create_cuboid(Vector3(-10, -10, -10), Vector3(10, 10, 10), "stone").value
+	var no_ids := PackedInt64Array()
+	var exact_hit: Dictionary = exact_doc.query_brush_2d_hit(2, Vector3.ZERO, 0.0, no_ids, 0, no_ids, false)
+	checks.check(exact_hit.get("brush_id", 0) == exact_second, "exact 2D hit preserves reverse source draw order")
+	exact_hit = exact_doc.query_brush_2d_hit(2, Vector3.ZERO, 0.0, no_ids, 0, PackedInt64Array([exact_first]), true)
+	checks.check(exact_hit.get("brush_id", 0) == exact_first, "exact 2D hit gives selected overlap priority")
+	exact_hit = exact_doc.query_brush_2d_hit(2, Vector3.ZERO, 0.0, PackedInt64Array([exact_second]), 0, no_ids, false)
+	checks.check(exact_hit.get("brush_id", 0) == exact_first, "exact 2D hit passes through explicitly hidden brushes")
+	checks.check(exact_doc.query_brush_2d_hit(2, Vector3(15, 0, 0), 6.0, no_ids, 0, no_ids, false).get("brush_id", 0) == exact_second
+		and exact_doc.query_brush_2d_hit(2, Vector3(17, 0, 0), 6.0, no_ids, 0, no_ids, false).is_empty(),
+		"exact 2D edge tolerance includes near misses and rejects farther points")
+	expect_ok(exact_doc.rotate_brushes(PackedInt64Array([exact_second]), Vector3.ZERO, 2, PI / 4.0), "rotate exact 2D narrow-phase fixture")
+	exact_hit = exact_doc.query_brush_2d_hit(2, Vector3(13.5, 13.5, 0), 0.0, PackedInt64Array([exact_first]), 0, no_ids, false)
+	checks.check(exact_doc.query_brushes_2d(2, Vector3(13.5, 13.5, 0), Vector3(13.5, 13.5, 0)).has(exact_second) and exact_hit.is_empty(),
+		"exact 2D narrow phase rejects an AABB-only rotated-brush corner")
+	var filtered_doc = ClassDB.instantiate("TBMapDocument")
+	var filtered: int = filtered_doc.create_cuboid(Vector3.ZERO, Vector3.ONE * 10, "common/caulk").value
+	checks.check(filtered_doc.query_brush_2d_hit(2, Vector3(5, 5, 0), 0.0, no_ids, 2, no_ids, false).is_empty(),
+		"exact 2D hit excludes brushes whose every face is material-filtered")
+	var filtered_brush: Dictionary = brush_data(filtered_doc, filtered)
+	expect_ok(filtered_doc.set_face_texture(filtered, 0, "stone", filtered_brush.topology_revision), "make mixed exact-hit fixture")
+	checks.check(filtered_doc.query_brush_2d_hit(2, Vector3(5, 5, 0), 0.0, no_ids, 2, no_ids, false).get("brush_id", 0) == filtered,
+		"exact 2D hit preserves mixed-brush visibility")
+
 	var ray_doc = ClassDB.instantiate("TBMapDocument")
 	var ray_first: int = ray_doc.create_cuboid(Vector3.ZERO, Vector3(10, 10, 10), "first/texture").value
 	var ray_second: int = ray_doc.create_cuboid(Vector3(20, 0, 0), Vector3(30, 10, 10), "second/texture").value
@@ -282,6 +309,30 @@ func test_spatial_queries() -> void:
 	expect_ok(interleaved.load_map("res://fixtures/interleaved.map"), "load spatial patch omission fixture")
 	var primitive_ids: Array = interleaved.get_entities()[0].primitives
 	checks.check(interleaved.query_brushes_2d(2, Vector3(-100, -100, 0), Vector3(100, 100, 0)) == PackedInt64Array([primitive_ids[0].id, primitive_ids[2].id]), "BVH omits patches and preserves interleaved source order")
+
+func test_face_summary() -> void:
+	var doc = ClassDB.instantiate("TBMapDocument")
+	var id: int = doc.create_cuboid(Vector3.ZERO, Vector3.ONE * 16, "stone/a").value
+	var brush: Dictionary = brush_data(doc, id)
+	expect_ok(doc.set_face_uv(id, 0, Vector2(3, 4), 15.0, Vector2(2, 2), brush.topology_revision), "set aggregate face UV fixture")
+	expect_ok(doc.set_face_texture(id, 1, "stone/b", brush.topology_revision), "set aggregate face material fixture")
+	var targets := [
+		{"brush_id": id, "index": 0, "topology_revision": brush.topology_revision, "kind": "face"},
+		{"brush_id": id, "index": 1, "topology_revision": brush.topology_revision, "kind": "face"},
+	]
+	var result: Dictionary = doc.summarize_faces(targets)
+	checks.check(result.ok and result.value.targets == targets and result.value.textures == PackedStringArray(["stone/a", "stone/b"]),
+		"bulk face summary preserves target order and returns aligned materials")
+	checks.check(result.value.unique_textures == PackedStringArray(["stone/a", "stone/b"]) and result.value.mixed and not result.value.valve
+		and result.value.texture == "stone/a" and result.value.first.shift == Vector2(3, 4)
+		and result.value.first.rotation == 15.0 and result.value.first.scale == Vector2(2, 2),
+		"bulk face summary aggregates material and UV state in one result")
+	expect_ok(doc.translate_face(id, 0, brush.faces[0].normal, brush.topology_revision), "invalidate aggregate face token")
+	result = doc.summarize_faces(targets)
+	checks.check(not result.ok and result.error.code == &"STALE_COMPONENT" and result.error.operation == &"summarize_faces",
+		"bulk face summary safely rejects stale topology tokens")
+	result = doc.summarize_faces([{"brush_id": id, "index": "bad", "topology_revision": 0}])
+	checks.check(not result.ok and result.error.code == &"INVALID_ARGUMENT", "bulk face summary rejects malformed targets")
 
 func test_preview_chunks() -> void:
 	var doc = ClassDB.instantiate("TBMapDocument")
@@ -394,6 +445,11 @@ func test_preview_chunks() -> void:
 	var history_after = change.capture_history_state()
 	var changed_cache_bytes: Dictionary = change.get_preview_cache_counters()
 	checks.check(changed_cache_bytes.descriptor_count == changed.triangle_count and changed_cache_bytes.logical_bytes <= changed.triangle_count * (40 + 4 + 4) and changed_cache_bytes.retained_bytes <= changed.triangle_count * 80, "translated preview cache remains compact without geometry copies")
+	checks.check(changed_cache_bytes.history_byte_budget == 64 * 1024 * 1024
+		and changed_cache_bytes.history_retained_bytes <= changed_cache_bytes.history_byte_budget
+		and changed_cache_bytes.history_state_limit == 2 and changed_cache_bytes.history_state_count == 1
+		and changed_cache_bytes.history_evictions == 0,
+		"preview predecessor history has a strict byte budget and retains normal one-step undo")
 	checks.check(change.get_last_operation_counters().deep_clones == 0, "incremental preview preparation does not deep-clone or materialize the map")
 	expect_ok(change.restore_history_state(history_before), "restore cached preview history state")
 	checks.check(change.get_preview_chunk(stable_id).geometry_hash == stable_hash and change.get_preview_chunk(stable_id).vertices == stable_vertices and change.is_history_state_current(history_before), "history undo reads its retained preview source")
@@ -405,6 +461,25 @@ func test_preview_chunks() -> void:
 	var current_id: String = change.prepare_preview_chunks(1.0, PackedInt64Array(), 0).chunks[0].chunk_id
 	expect_ok(change.import_text("{\n\"classname\" \"worldspawn\"\n}\n"), "replace preview map")
 	checks.check(change.get_preview_chunk(current_id).is_empty(), "map replacement invalidates prepared chunk access")
+
+	var bounded = ClassDB.instantiate("TBMapDocument")
+	var bounded_id: int = bounded.create_cuboid(Vector3.ZERO, Vector3.ONE * 8, "bounded/material").value
+	var oldest_state = bounded.capture_history_state()
+	var bounded_chunk: String = bounded.prepare_preview_chunks(1.0, PackedInt64Array(), 0).chunks[0].chunk_id
+	expect_ok(bounded.translate_brushes(PackedInt64Array([bounded_id]), Vector3.RIGHT), "advance bounded preview generation one")
+	bounded.prepare_preview_chunks(1.0, PackedInt64Array(), 0)
+	expect_ok(bounded.translate_brushes(PackedInt64Array([bounded_id]), Vector3.RIGHT), "advance bounded preview generation two")
+	bounded.prepare_preview_chunks(1.0, PackedInt64Array(), 0)
+	var newest_retained_state = bounded.capture_history_state()
+	expect_ok(bounded.translate_brushes(PackedInt64Array([bounded_id]), Vector3.RIGHT), "advance bounded preview generation three")
+	var bounded_history: Dictionary = bounded.get_preview_cache_counters()
+	checks.check(bounded_history.history_state_count == bounded_history.history_state_limit
+		and bounded_history.history_evictions == 1 and bounded_history.history_retained_bytes <= bounded_history.history_byte_budget,
+		"preview history deterministically evicts its oldest state at the retention limit")
+	expect_ok(bounded.restore_history_state(oldest_state), "restore oldest document state after preview eviction")
+	checks.check(bounded.get_preview_chunk(bounded_chunk).is_empty(), "oldest evicted preview state is not retained")
+	expect_ok(bounded.restore_history_state(newest_retained_state), "restore newest retained preview state")
+	checks.check(not bounded.get_preview_chunk(bounded_chunk).is_empty(), "newest in-budget preview state remains available for one-step undo")
 
 	checks.check(doc.get_preview_chunk("missing").is_empty(), "invalid preview chunk ID is safe")
 	for invalid in [doc.prepare_preview_chunks(0.0, PackedInt64Array(), 0), doc.prepare_preview_chunks(NAN, PackedInt64Array(), 0), doc.prepare_preview_chunks(INF, PackedInt64Array(), 0), doc.prepare_preview_chunks(1.0, PackedInt64Array(), 16), doc.prepare_preview_chunks(1.0, PackedInt64Array(), 0, 0), doc.prepare_preview_chunks(1.0, PackedInt64Array(), 0, 1, 0.0), doc.prepare_preview_chunks(1.0, PackedInt64Array(), 0, 1, INF)]:
@@ -1653,7 +1728,9 @@ func test_candidate_geometry_previews() -> void:
 	var translated = ClassDB.instantiate("TBMapDocument")
 	var first: int = translated.create_cuboid(Vector3.ZERO, Vector3(16, 24, 32), "first/material").value
 	var second: int = translated.create_cuboid(Vector3(40, 0, 0), Vector3(56, 24, 32), "second/material").value
-	var ids := PackedInt64Array([first, second, first])
+	var first_token: int = brush_data(translated, first).topology_revision
+	expect_ok(translated.set_face_texture(first, 0, "first/overlay", first_token), "prepare preview editor material overlay")
+	var ids := PackedInt64Array([second, first, second])
 	var events := {"map": 0, "preview": 0, "dirty": 0}
 	translated.map_changed.connect(func(_r): events.map += 1)
 	translated.preview_changed.connect(func(): events.preview += 1)
@@ -1663,7 +1740,7 @@ func test_candidate_geometry_previews() -> void:
 	var before := state(translated)
 	var history = translated.capture_history_state()
 	var translation := expect_preview(translated.preview_translate_brushes(ids, Vector3(8, -4, 2)), "preview multi-brush translation")
-	checks.check(translation.map(func(b): return b.id) == [first, second] and translation.all(func(b): return b.source_id == b.id), "translation preview deduplicates with source IDs")
+	checks.check(translation.map(func(b): return b.id) == [first, second] and translation.all(func(b): return b.source_id == b.id), "translation preview deduplicates in source order rather than selection order")
 	checks.check(state(translated) == before and events == {"map": 0, "preview": 0, "dirty": 0} and translated.is_history_state_current(history), "translation preview preserves text dirty revisions IDs and history")
 	checks.check(not translated.get_preview_chunk(chunk_id).is_empty(), "translation preview preserves prepared native caches")
 	expect_ok(translated.translate_brushes(ids, Vector3(8, -4, 2)), "commit previewed translation")

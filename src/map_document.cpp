@@ -256,7 +256,7 @@ Dictionary TBMapDocument::update_texture_context_geometry(const LMMapData &data,
 	const LMEditorBrushBuildContext old_base_context{old_base_dimensions.data(), old_base_dimensions.size()};
 	const LMEditorBrushBuildContext new_base_context{new_base_dimensions.data(), new_base_dimensions.size()};
 	auto next_base = std::make_shared<TBMapDocumentState::BaseEditorGeometry>();
-	if (source_base) next_base->brushes = source_base->brushes;
+	if (source_base) next_base->brushes.reserve(source_base->brushes.size());
 	for (int e = 0; e < data.entity_count; ++e) for (int b = 0; b < data.entities[e].brush_count; ++b) {
 		const LMBrush &brush = data.entities[e].brushes[b];
 		auto found = source_base ? source_base->brushes.find(brush.id) : decltype(source_base->brushes.find(brush.id)){};
@@ -273,6 +273,7 @@ Dictionary TBMapDocument::update_texture_context_geometry(const LMMapData &data,
 			next_base->brushes[brush.id] = std::make_shared<const LMEditorBrushGeometry>(std::move(built.geometry));
 		} else if (updated.geometry == existing) {
 			++last_operation.compact_shared_brushes;
+			next_base->brushes.emplace(brush.id, existing);
 		} else {
 			++last_operation.compact_uv_updates; last_operation.compact_uv_copy_bytes += updated.copied_bytes;
 			next_base->brushes[brush.id] = std::move(updated.geometry);
@@ -800,9 +801,11 @@ void TBMapDocument::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_draw_data"), &TBMapDocument::get_draw_data);
 	ClassDB::bind_method(D_METHOD("get_preview_data"), &TBMapDocument::get_preview_data);
 	ClassDB::bind_method(D_METHOD("get_face_preview_uvs", "targets", "texture"), &TBMapDocument::get_face_preview_uvs);
+	ClassDB::bind_method(D_METHOD("summarize_faces", "targets"), &TBMapDocument::summarize_faces);
 	ClassDB::bind_method(D_METHOD("prepare_preview_chunks", "scale", "hidden_ids", "filter_mask", "chunk_triangles", "chunk_size"), &TBMapDocument::prepare_preview_chunks, DEFVAL(2048), DEFVAL(64.0));
 	ClassDB::bind_method(D_METHOD("get_preview_chunk", "chunk_id"), &TBMapDocument::get_preview_chunk);
 	ClassDB::bind_method(D_METHOD("query_brushes_2d", "hidden_axis", "mins", "maxs"), &TBMapDocument::query_brushes_2d);
+	ClassDB::bind_method(D_METHOD("query_brush_2d_hit", "hidden_axis", "point", "tolerance", "hidden_ids", "filter_mask", "selected_ids", "prefer_selected"), &TBMapDocument::query_brush_2d_hit);
 	ClassDB::bind_method(D_METHOD("query_ray", "origin", "direction", "max_distance"), &TBMapDocument::query_ray, DEFVAL(1e30));
 	ClassDB::bind_method(D_METHOD("query_ray_nearest_visible", "origin", "direction", "max_distance", "hidden_ids", "filter_mask"), &TBMapDocument::query_ray_nearest_visible);
 	ClassDB::bind_method(D_METHOD("create_cuboid", "mins", "maxs", "texture"), &TBMapDocument::create_cuboid);

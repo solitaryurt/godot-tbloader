@@ -29,11 +29,14 @@ ABSOLUTE_BUDGETS = {
     "move_connected_session_translation_ms": 5,
     "selection_layer_queue_to_frame_post_draw_ms": 10,
     "camera_marker_queue_to_frame_post_draw_ms": 10,
-    "grid_redraw_queue_to_frame_post_draw_ms": 100,
+    "grid_redraw_queue_to_frame_post_draw_ms": 16.7,
+    "rendered_following_frame_p95_ms": 16.7,
     "local_mutation_and_preview_array_max_ms": 10,
     "memento_undo_redo_p95_ms": 1,
     "full_visible_rss_growth_mib": 450,
     "full_visible_godot_static_growth_mib": 375,
+    "populated_to_full_rss_growth_mib": 192,
+    "populated_to_full_godot_static_growth_mib": 128,
 }
 LOCAL_ARRAY_TIMINGS = (
     "native_preview_translate_one_brush", "native_preview_rotate_one_brush",
@@ -113,6 +116,8 @@ def validate(report, samples):
     if (texture_sizes.get("compact_full_builds") != 0
             or texture_sizes.get("compact_uv_updates", 0) <= 0
             or texture_sizes.get("compact_uv_copy_bytes", 0) <= 0
+            or texture_sizes.get("compact_uv_copy_bytes", 0) * 2
+            >= texture_sizes.get("compact_retained_bytes", 0)
             or texture_sizes.get("brush_builds") != 0):
         raise harness.GateFailure("invalid texture-size UV-only counters")
     texture_memory = report.get("set_texture_sizes_memory", {})
@@ -155,11 +160,22 @@ def validate(report, samples):
                        timings["apply_document_change_redo_local"])
     measured["memento_undo_redo_p95_ms"] = max(
         sorted(values)[math.ceil(len(values) * .95) - 1] for values in memento_values) / 1000
+    following_frame_p95 = [
+        sorted(timings[name])[math.ceil(len(timings[name]) * .95) - 1]
+        for name in ("undo_following_frame", "redo_following_frame")
+    ]
+    measured["rendered_following_frame_p95_ms"] = max(
+        timings["move_following_frame"], *following_frame_p95) / 1000
     empty = report["checkpoints"]["empty_editor"]["memory"]
+    populated = report["checkpoints"]["populated_production_caches"]["memory"]
     final = report["checkpoints"]["full_visible_grids_camera_after_render_sync"]["memory"]
     measured["full_visible_rss_growth_mib"] = (final["VmRSS_bytes"] - empty["VmRSS_bytes"]) / MIB
     measured["full_visible_godot_static_growth_mib"] = (
         final["godot_static_bytes"] - empty["godot_static_bytes"]) / MIB
+    measured["populated_to_full_rss_growth_mib"] = (
+        final["VmRSS_bytes"] - populated["VmRSS_bytes"]) / MIB
+    measured["populated_to_full_godot_static_growth_mib"] = (
+        final["godot_static_bytes"] - populated["godot_static_bytes"]) / MIB
     report["regression_budgets"] = {name: {"measured": measured[name], "limit": limit}
                                     for name, limit in ABSOLUTE_BUDGETS.items()}
     exceeded = [f"{name}={measured[name]:.3f} > {limit}"
@@ -174,6 +190,8 @@ def main():
     parser.add_argument("--samples", type=int, default=31)
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--display-driver", choices=("headless", "x11"), default="headless")
+    parser.add_argument("--dense-render-mode", choices=("antialiased", "non_antialiased"),
+                        default="non_antialiased")
     parser.add_argument("--skip-build", action="store_true", help="use the existing debug extension without running scons")
     args = parser.parse_args()
     if args.samples < 1 or not math.isfinite(args.timeout) or args.timeout <= 0:
@@ -239,6 +257,7 @@ def main():
             raise harness.GateFailure("staged debug library hash differs")
         env["TB_TEST_SUITE"] = "current_editor_performance"
         env["TB_CURRENT_EDITOR_PERF_SAMPLES"] = str(args.samples)
+        env["TB_CURRENT_EDITOR_DENSE_RENDER_MODE"] = args.dense_render_mode
         command = base + ["--editor", "--resolution", "1600x1100"]
         if args.display_driver == "headless":
             command.append("--headless")

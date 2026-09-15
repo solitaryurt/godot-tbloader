@@ -6,12 +6,18 @@
 #include "platform.h"
 
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <memory>
 #include <utility>
 
 namespace {
+uint64_t texture_hash(const char *value) {
+	uint64_t hash = 1469598103934665603ull;
+	for (const unsigned char *p = reinterpret_cast<const unsigned char *>(value); *p; ++p) hash = (hash ^ *p) * 1099511628211ull;
+	return hash;
+}
 char *clone_string(const char *source) {
 	if (!source) return nullptr;
 	const size_t bytes = strlen(source) + 1;
@@ -46,6 +52,7 @@ size_t LMMapData::retained_bytes() const {
 	}
 	bytes += size_t(texture_count) * sizeof(LMTextureData);
 	for (int t = 0; t < texture_count; ++t) bytes += textures[t].name ? strlen(textures[t].name) + 1 : 0;
+	bytes += size_t(texture_index_capacity) * sizeof(int);
 	bytes += size_t(worldspawn_layer_count) * sizeof(LMWorldspawnLayer);
 	bytes += size_t(geometry_entity_count) * sizeof(LMEntityGeometry);
 	for (int e = 0; e < geometry_entity_count; ++e) {
@@ -99,6 +106,7 @@ std::shared_ptr<LMMapData> LMMapData::source_clone() const {
 		result->textures[t] = textures[t];
 		result->textures[t].name = clone_string(textures[t].name);
 	}
+	if (texture_count) result->rebuild_texture_index();
 	result->worldspawn_layer_count = worldspawn_layer_count;
 	result->worldspawn_layers = clone_array(worldspawn_layers, worldspawn_layer_count);
 	return result;
@@ -185,6 +193,9 @@ void LMMapData::map_data_reset() {
 	free(textures);
 	textures = nullptr;
 	texture_count = 0;
+	free(texture_index);
+	texture_index = nullptr;
+	texture_index_capacity = 0;
 	free(worldspawn_layers);
 	worldspawn_layers = nullptr;
 	worldspawn_layer_count = 0;
@@ -200,6 +211,8 @@ void LMMapData::swap(LMMapData &other) {
 	swap(geometry_entity_count, other.geometry_entity_count);
 	swap(textures, other.textures);
 	swap(texture_count, other.texture_count);
+	swap(texture_index, other.texture_index);
+	swap(texture_index_capacity, other.texture_index_capacity);
 	swap(worldspawn_layers, other.worldspawn_layers);
 	swap(worldspawn_layer_count, other.worldspawn_layer_count);
 }
@@ -233,22 +246,27 @@ LMWorldspawnLayer *LMMapData::map_data_get_worldspawn_layers() {
 }
 
 int LMMapData::map_data_register_texture(const char *name) {
-	if (textures != NULL) {
-		for (int t = 0; t < texture_count; ++t) {
-			LMTextureData *texture = &textures[t];
-			if (strcmp(texture->name, name) == 0) {
-				return t;
-			}
-		}
+	int found = map_data_find_texture(name);
+	if (found >= 0) return found;
+	if (texture_count == INT32_MAX) return -1;
+	if (texture_count + 1 > texture_index_capacity / 2) {
+		if (texture_index_capacity > INT32_MAX / 2) return -1;
+		if (!rebuild_texture_index(texture_index_capacity ? texture_index_capacity * 2 : 16)) return -1;
 	}
 
-	textures = (LMTextureData *)realloc(textures, (texture_count + 1) * sizeof(LMTextureData));
+	auto *grown = (LMTextureData *)realloc(textures, (texture_count + 1) * sizeof(LMTextureData));
+	if (!grown) return -1;
+	textures = grown;
 	LMTextureData *texture = &textures[texture_count];
 	*texture = { 0 };
 	texture->name = STRDUP(name);
+	if (!texture->name) return -1;
 	texture->width = texture->height = 1;
-	texture_count++;
-	return texture_count - 1;
+	const int index = texture_count++;
+	int slot = int(texture_hash(texture->name) & uint64_t(texture_index_capacity - 1));
+	while (texture_index[slot]) slot = (slot + 1) & (texture_index_capacity - 1);
+	texture_index[slot] = index + 1;
+	return index;
 }
 
 void LMMapData::map_data_set_texture_size(const char *name, int width, int height) {
@@ -279,14 +297,37 @@ LMTextureData *LMMapData::map_data_get_texture(int texture_idx) {
 }
 
 int LMMapData::map_data_find_texture(const char *texture_name) {
-	for (int t = 0; t < texture_count; ++t) {
-		LMTextureData *texture = &textures[t];
-		if (strcmp(texture->name, texture_name) == 0) {
-			return t;
-		}
+	if (!texture_index_capacity) {
+		for (int i = 0; i < texture_count; ++i) if (!strcmp(textures[i].name, texture_name)) return i;
+		return -1;
 	}
-
+	int slot = int(texture_hash(texture_name) & uint64_t(texture_index_capacity - 1));
+	while (texture_index[slot]) {
+		int index = texture_index[slot] - 1;
+		if (!strcmp(textures[index].name, texture_name)) return index;
+		slot = (slot + 1) & (texture_index_capacity - 1);
+	}
 	return -1;
+}
+
+bool LMMapData::rebuild_texture_index(int minimum_capacity) {
+	if (texture_count > INT32_MAX / 2) return false;
+	int capacity = 16;
+	while (capacity < minimum_capacity || capacity < texture_count * 2) {
+		if (capacity > INT32_MAX / 2) return false;
+		capacity *= 2;
+	}
+	auto *slots = static_cast<int *>(calloc(size_t(capacity), sizeof(int)));
+	if (!slots) return false;
+	for (int i = 0; i < texture_count; ++i) {
+		int slot = int(texture_hash(textures[i].name) & uint64_t(capacity - 1));
+		while (slots[slot]) slot = (slot + 1) & (capacity - 1);
+		slots[slot] = i + 1;
+	}
+	free(texture_index);
+	texture_index = slots;
+	texture_index_capacity = capacity;
+	return true;
 }
 
 void LMMapData::map_data_set_spawn_type_by_classname(const char *key, int spawn_type) {

@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cmath>
 #include <limits>
+#include <mutex>
 #include <utility>
 
 namespace {
@@ -28,7 +29,96 @@ constexpr size_t MAX_EDITOR_BRUSH_CORNERS = 4096;
 bool finite(vec3 value) {
 	return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
 }
+}
 
+struct LMEditorBrushCorners::Store {
+	struct Patch {
+		uint32_t index = 0;
+		LMEditorBrushCorner corner{};
+	};
+	std::shared_ptr<const std::vector<LMEditorBrushCorner>> root;
+	std::shared_ptr<const Store> parent;
+	std::vector<Patch> patches;
+	size_t count = 0;
+	mutable std::once_flag materialize_once;
+	mutable std::vector<LMEditorBrushCorner> materialized;
+
+	const LMEditorBrushCorner &at(size_t index) const {
+		auto found = std::lower_bound(patches.begin(), patches.end(), index,
+				[](const Patch &patch, size_t candidate) { return patch.index < candidate; });
+		if (found != patches.end() && found->index == index) return found->corner;
+		return parent ? parent->at(index) : (*root)[index];
+	}
+	const LMEditorBrushCorner *data() const {
+		if (root && patches.empty()) return root->data();
+		std::call_once(materialize_once, [this]() {
+			materialized.reserve(count);
+			for (size_t i = 0; i < count; ++i) materialized.push_back(at(i));
+		});
+		return materialized.data();
+	}
+};
+
+LMEditorBrushCorners::LMEditorBrushCorners() : writable(std::make_shared<std::vector<LMEditorBrushCorner>>()) {}
+LMEditorBrushCorners::~LMEditorBrushCorners() = default;
+size_t LMEditorBrushCorners::size() const { return writable ? writable->size() : store->count; }
+size_t LMEditorBrushCorners::capacity() const { return writable ? writable->capacity() : store->count; }
+void LMEditorBrushCorners::ensure_writable() {
+	if (writable) {
+		if (!writable.unique()) writable = std::make_shared<std::vector<LMEditorBrushCorner>>(*writable);
+		return;
+	}
+	auto materialized = std::make_shared<std::vector<LMEditorBrushCorner>>();
+	materialized->reserve(store->count);
+	for (size_t i = 0; i < store->count; ++i) materialized->push_back(store->at(i));
+	writable = std::move(materialized);
+	store.reset();
+}
+void LMEditorBrushCorners::reserve(size_t count) { ensure_writable(); writable->reserve(count); }
+void LMEditorBrushCorners::push_back(const LMEditorBrushCorner &corner) { ensure_writable(); writable->push_back(corner); }
+void LMEditorBrushCorners::push_back(LMEditorBrushCorner &&corner) { ensure_writable(); writable->push_back(std::move(corner)); }
+const LMEditorBrushCorner &LMEditorBrushCorners::operator[](size_t index) const { return writable ? (*writable)[index] : store->at(index); }
+LMEditorBrushCorner &LMEditorBrushCorners::operator[](size_t index) { ensure_writable(); return (*writable)[index]; }
+const LMEditorBrushCorner *LMEditorBrushCorners::data() const { return writable ? writable->data() : store->data(); }
+LMEditorBrushCorner *LMEditorBrushCorners::data() { ensure_writable(); return writable->data(); }
+
+size_t LMEditorBrushCorners::with_uv_updates(const std::vector<std::pair<uint32_t, LMVertexUV>> &updates) {
+	if (updates.empty()) return 0;
+	const size_t count = size();
+	if (updates.size() == count) {
+		auto replacement = std::make_shared<std::vector<LMEditorBrushCorner>>();
+		replacement->reserve(count);
+		for (size_t i = 0; i < count; ++i) {
+			LMEditorBrushCorner corner = static_cast<const LMEditorBrushCorners &>(*this)[i];
+			corner.uv = updates[i].second;
+			replacement->push_back(corner);
+		}
+		writable = std::move(replacement);
+		store.reset();
+		return updates.size() * sizeof(LMEditorBrushCorner);
+	}
+	std::shared_ptr<const Store> parent = store;
+	if (!parent) {
+		auto root = std::make_shared<Store>();
+		root->root = writable;
+		root->count = writable->size();
+		parent = std::move(root);
+	}
+	auto next = std::make_shared<Store>();
+	next->count = parent->count;
+	next->parent = std::move(parent);
+	next->patches.reserve(updates.size());
+	for (const auto &update : updates) {
+		LMEditorBrushCorner corner = next->parent->at(update.first);
+		corner.uv = update.second;
+		next->patches.push_back({update.first, corner});
+	}
+	writable.reset();
+	store = std::move(next);
+	return updates.size() * sizeof(LMEditorBrushCorner);
+}
+
+namespace {
 bool valid_face(const LMFace &face) {
 	return finite(face.plane_points.v0) && finite(face.plane_points.v1) && finite(face.plane_points.v2) &&
 			finite(face.plane_normal) && std::isfinite(face.plane_dist) &&
@@ -162,7 +252,7 @@ static LMEditorBrushBuildResult build_editor_brush_geometry(const LMBrush &brush
 	auto &out = result.geometry;
 	out.brush_id = brush.id;
 	out.positions.reserve(unique_positions.size());
-	out.positions.insert(out.positions.end(), unique_positions.begin(), unique_positions.end());
+	for (const vec3 position : unique_positions) out.positions.push_back(position);
 	out.corners.reserve(corner_count);
 	out.faces.reserve(static_cast<size_t>(brush.face_count));
 	out.edges.reserve(unique_edges.size());
@@ -250,24 +340,30 @@ LMEditorBrushUVUpdateResult lm_update_editor_brush_uvs(const LMBrush &brush,
 		return result;
 	}
 	auto updated = std::make_shared<LMEditorBrushGeometry>(*geometry);
+	std::vector<std::pair<uint32_t, LMVertexUV>> uv_updates;
+	size_t update_count = 0;
+	for (int f = 0; f < brush.face_count; ++f) if (changed[f]) update_count += geometry->faces[f].corner_count;
+	uv_updates.reserve(update_count);
 	for (int f = 0; f < brush.face_count; ++f) {
 		if (!changed[f]) continue;
-		const auto &face = updated->faces[f];
+		const auto &face = static_cast<const LMEditorBrushGeometry &>(*updated).faces[f];
 		for (uint32_t v = 0; v < face.corner_count; ++v) {
-			auto &corner = updated->corners[face.corner_begin + v];
+			const uint32_t corner_index = face.corner_begin + v;
+			const auto &corner = static_cast<const LMEditorBrushGeometry &>(*updated).corners[corner_index];
 			if (corner.position >= updated->positions.size()) {
 				result.status = LMEditorBrushBuildStatus::SOURCE_TOKEN_MISMATCH;
 				return result;
 			}
-			corner.uv = face_uv(updated->positions[corner.position], brush.faces[f], new_context.textures[brush.faces[f].texture_idx]);
-			if (!std::isfinite(corner.uv.u) || !std::isfinite(corner.uv.v) ||
-					std::abs(corner.uv.u) > 1e9 || std::abs(corner.uv.v) > 1e9) {
+			const LMVertexUV uv = face_uv(static_cast<const LMEditorBrushGeometry &>(*updated).positions[corner.position],
+					brush.faces[f], new_context.textures[brush.faces[f].texture_idx]);
+			if (!std::isfinite(uv.u) || !std::isfinite(uv.v) || std::abs(uv.u) > 1e9 || std::abs(uv.v) > 1e9) {
 				result.status = LMEditorBrushBuildStatus::NONFINITE_SOURCE;
 				return result;
 			}
+			uv_updates.emplace_back(corner_index, uv);
 		}
 	}
-	result.copied_bytes = updated->retained_bytes();
+	result.copied_bytes = updated->corners.with_uv_updates(uv_updates);
 	result.geometry = std::move(updated);
 	return result;
 }

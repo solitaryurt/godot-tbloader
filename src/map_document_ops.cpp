@@ -136,7 +136,7 @@ std::string brush_source_text(const std::vector<LMFace> &faces, const std::vecto
 	return out;
 }
 LMBrushTopology compact_topology(const LMEditorBrushGeometry &geometry) {
-	LMBrushTopology out; out.vertices = geometry.positions; out.mins = geometry.mins; out.maxs = geometry.maxs;
+	LMBrushTopology out; out.vertices.assign(geometry.positions.begin(), geometry.positions.end()); out.mins = geometry.mins; out.maxs = geometry.maxs;
 	for (const auto &edge : geometry.edges) out.edges.emplace_back(edge.a, edge.b);
 	for (const auto &face : geometry.faces) { LMBrushTopologyFace item; item.center = face.center;
 		for (uint32_t v = 0; v < face.corner_count; ++v) { const auto &corner = geometry.corners[face.corner_begin + v]; item.vertex_indices.push_back(corner.position); item.winding.push_back(geometry.positions[corner.position]); }
@@ -233,24 +233,25 @@ Dictionary TBMapDocument::preview_edit(const LMMapEdit &edit, const StringName &
 }
 
 void TBMapDocument::stage_preview_brushes(const PackedInt64Array &ids, LMMapEdit &edit) const {
-	const auto view = materialize_current_source();
-	const auto list = unique(ids);
-	const std::set<int64_t> selected(list.begin(), list.end());
-	for (int e = 0; e < view->entity_count; ++e) {
-		const auto &source = view->entities[e];
-		LMEditEntity entity;
-		entity.id = source.id;
-		for (int k = 0; k < source.property_count; ++k) entity.epairs.emplace_back(source.properties[k].key, source.properties[k].value);
-		for (int k = 0; k < source.primitive_count; ++k) {
-			const auto &primitive = source.primitives[k];
-			if (primitive.is_patch || !selected.count(source.brushes[primitive.index].id)) continue;
-			const auto &brush = source.brushes[primitive.index];
-			LMEditPrimitive staged;
-			staged.id = brush.id;
-			for (int f = 0; f < brush.face_count; ++f) staged.faces.push_back({brush.faces[f], view->textures[brush.faces[f].texture_idx].name});
-			entity.primitives.push_back(std::move(staged));
+	auto list = unique(ids);
+	list.erase(std::remove_if(list.begin(), list.end(), [&](int64_t id) { return !live_location(id, 'b'); }), list.end());
+	std::sort(list.begin(), list.end(), [&](int64_t a, int64_t b) {
+		const auto *left = live_location(a, 'b'); const auto *right = live_location(b, 'b');
+		return left->entity != right->entity ? left->entity < right->entity : left->primitive < right->primitive;
+	});
+	int current_entity = -1;
+	for (int64_t id : list) {
+		const auto *location = live_location(id, 'b');
+		if (location->entity != current_entity) {
+			const auto &source = map->entities[location->entity]; LMEditEntity entity; entity.id = source.id;
+			entity.epairs.reserve(source.property_count);
+			for (int k = 0; k < source.property_count; ++k) entity.epairs.emplace_back(source.properties[k].key, source.properties[k].value);
+			edit.entities.push_back(std::move(entity)); current_entity = location->entity;
 		}
-		if (!entity.primitives.empty()) edit.entities.push_back(std::move(entity));
+		const auto &brush = current_brush(location->entity, location->index); LMEditPrimitive staged; staged.id = id;
+		staged.faces.reserve(brush.face_count);
+		for (int f = 0; f < brush.face_count; ++f) staged.faces.push_back({brush.faces[f], current_face_texture(location->entity, location->index, f)});
+		edit.entities.back().primitives.push_back(std::move(staged));
 	}
 }
 
@@ -260,9 +261,12 @@ Dictionary TBMapDocument::preview_fragments(const LMMapEdit &before, const LMMap
 	const size_t current_text_size = size_t(int64_t(canonical->size()) + (editor ? editor->canonical_size_delta : 0));
 	if (new_text.size() > old_text.size() && new_text.size() - old_text.size() > LMMapParser::MAX_TEXT_BYTES - current_text_size)
 		return failure("LIMIT_EXCEEDED", "Canonical map exceeds 16 MiB", operation, path);
-	const size_t old_work = edit_geometry_work(before), new_work = edit_geometry_work(after), current_work = map_geometry_work(*map);
-	if (new_work > old_work && new_work - old_work > 8000000 - current_work)
-		return failure("LIMIT_EXCEEDED", "Geometry work budget exceeded", operation, path);
+	const size_t old_work = edit_geometry_work(before), new_work = edit_geometry_work(after);
+	if (new_work > old_work) {
+		const size_t current_work = map_geometry_work(*map);
+		if (current_work >= 8000000 || new_work - old_work > 8000000 - current_work)
+			return failure("LIMIT_EXCEEDED", "Geometry work budget exceeded", operation, path);
+	}
 	std::shared_ptr<LMMapData> candidate;
 	Dictionary result = prepare(new_text, candidate, operation, path); if (!bool(result["ok"])) return result;
 	for (int e = 0; e < candidate->entity_count; ++e) {
@@ -520,6 +524,46 @@ Dictionary TBMapDocument::get_face_uv(int64_t id, int face, int64_t topology_rev
 	uv["shift"] = f.is_valve_uv ? Vector2(f.uv_valve.u.offset, f.uv_valve.v.offset) : Vector2(f.uv_standard.u, f.uv_standard.v);
 	uv["rotation"] = f.uv_extra.rot; uv["scale"] = Vector2(f.uv_extra.scale_x, f.uv_extra.scale_y);
 	uv["u_axis"] = vector(f.uv_valve.u.axis); uv["v_axis"] = vector(f.uv_valve.v.axis); return success(false, uv);
+}
+
+Dictionary TBMapDocument::summarize_faces(const Array &targets) const {
+	Array normalized_targets;
+	PackedStringArray textures, unique_textures;
+	Dictionary first;
+	bool valve = false, mixed = false;
+	String first_texture;
+	for (int i = 0; i < targets.size(); ++i) {
+		if (targets[i].get_type() != Variant::DICTIONARY) return failure("INVALID_ARGUMENT", "Expected face target dictionary", "summarize_faces");
+		const Dictionary target = targets[i];
+		if (!target.has("brush_id") || !target.has("index") || !target.has("topology_revision") ||
+				target["brush_id"].get_type() != Variant::INT || target["index"].get_type() != Variant::INT || target["topology_revision"].get_type() != Variant::INT)
+			return failure("INVALID_ARGUMENT", "Invalid face target schema", "summarize_faces");
+		const int64_t face_value = target["index"];
+		if (face_value < std::numeric_limits<int>::min() || face_value > std::numeric_limits<int>::max())
+			return failure("INVALID_ARGUMENT", "Invalid face index", "summarize_faces");
+		const int64_t id = target["brush_id"]; const int face_index = face_value;
+		auto checked = check_face(id, face_index, target["topology_revision"], "summarize_faces");
+		if (!bool(checked["ok"])) return checked;
+		const auto *location = live_location(id, 'b');
+		const auto &face = current_brush(location->entity, location->index).faces[face_index];
+		const String texture = String::utf8(current_face_texture(location->entity, location->index, face_index).c_str());
+		const Vector2 shift = face.is_valve_uv ? Vector2(face.uv_valve.u.offset, face.uv_valve.v.offset) : Vector2(face.uv_standard.u, face.uv_standard.v);
+		const Vector2 scale(face.uv_extra.scale_x, face.uv_extra.scale_y);
+		valve = valve || face.is_valve_uv;
+		if (first.is_empty()) {
+			first["projection"] = face.is_valve_uv ? "valve" : "classic"; first["shift"] = shift;
+			first["rotation"] = face.uv_extra.rot; first["scale"] = scale;
+			first["u_axis"] = vector(face.uv_valve.u.axis); first["v_axis"] = vector(face.uv_valve.v.axis); first_texture = texture;
+		} else if (Vector2(first["shift"]) != shift || double(first["rotation"]) != face.uv_extra.rot ||
+				Vector2(first["scale"]) != scale || first_texture != texture) mixed = true;
+		textures.push_back(texture);
+		if (!unique_textures.has(texture)) unique_textures.push_back(texture);
+		normalized_targets.push_back(target);
+	}
+	Dictionary summary;
+	summary["targets"] = normalized_targets; summary["textures"] = textures; summary["unique_textures"] = unique_textures;
+	summary["first"] = first; summary["texture"] = first_texture; summary["valve"] = valve; summary["mixed"] = mixed;
+	return success(false, summary);
 }
 Dictionary TBMapDocument::set_face_uv(int64_t id, int face, Vector2 shift, double rotation, Vector2 scale, int64_t topology_revision) {
 	last_document_change.unref();

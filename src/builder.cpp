@@ -22,6 +22,76 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <vector>
+
+namespace {
+bool normalized_res_path(const String& value, std::vector<std::string>& components, bool reject_navigation)
+{
+	auto utf8 = value.utf8();
+	std::string path(utf8.get_data(), utf8.length());
+	if (path.compare(0, 6, "res://") != 0 || path.find('\\') != std::string::npos) return false;
+	components.clear();
+	for (size_t begin = 6; begin <= path.size();) {
+		size_t end = path.find('/', begin);
+		if (end == std::string::npos) end = path.size();
+		std::string component = path.substr(begin, end - begin);
+		if (!component.empty() && component != ".") {
+			if (component == "..") {
+				if (reject_navigation || components.empty()) return false;
+				components.pop_back();
+			} else {
+				components.push_back(std::move(component));
+			}
+		}
+		if (end == path.size()) break;
+		begin = end + 1;
+	}
+	return true;
+}
+
+String resource_under_root(const String& configured_root, const String& token, const String& suffix = String())
+{
+	std::vector<std::string> root;
+	if (!normalized_res_path(configured_root, root, false)) return String();
+	String candidate;
+	bool explicit_resource = false;
+	if (token.begins_with("res://")) {
+		candidate = token + suffix;
+		explicit_resource = true;
+	} else {
+		auto bytes = token.utf8();
+		std::string relative(bytes.get_data(), bytes.length());
+		if (relative.empty() || relative[0] == '/' || relative.find("://") != std::string::npos) return String();
+		candidate = configured_root.trim_suffix("/") + "/" + token + suffix;
+	}
+	std::vector<std::string> path;
+	if (!normalized_res_path(candidate, path, true) || (!explicit_resource && (path.size() < root.size() || !std::equal(root.begin(), root.end(), path.begin())))) return String();
+	String normalized = "res://";
+	for (size_t i = 0; i < path.size(); ++i) {
+		if (i) normalized += "/";
+		normalized += String::utf8(path[i].c_str());
+	}
+	return normalized;
+}
+
+bool safe_classname(const String& classname)
+{
+	auto bytes = classname.utf8();
+	std::string value(bytes.get_data(), bytes.length());
+	if (value.empty()) return false;
+	bool component_start = true;
+	for (unsigned char c : value) {
+		if (c == '_') {
+			if (component_start) return false;
+			component_start = true;
+		} else {
+			if ((component_start && !std::isalpha(c)) || (!component_start && !std::isalnum(c))) return false;
+			component_start = false;
+		}
+	}
+	return !component_start;
+}
+}
 
 Builder::Builder(TBLoader* loader, Node3D* parent)
 {
@@ -234,21 +304,29 @@ Node* Builder::build_entity_custom(int idx, LMEntity& ent, LMEntityGeometry& geo
 	// "thing" => "thing.tscn"
 
 	auto resource_loader = ResourceLoader::get_singleton();
+	if (!safe_classname(classname)) {
+		m_error = "Invalid entity classname for scene lookup: " + classname;
+		return nullptr;
+	}
 
 	auto arr = classname.split("_");
 	for (int i = 0; i < arr.size(); i++) {
-		String path = m_loader->m_entity_path + "/";
+		String relative;
 		for (int j = 0; j < arr.size(); j++) {
 			if (j > 0) {
 				if (j <= i) {
-					path = path + "/";
+					relative = relative + "/";
 				} else {
-					path = path + "_";
+					relative = relative + "_";
 				}
 			}
-			path = path + arr[j];
+			relative = relative + arr[j];
 		}
-		path = path + ".tscn";
+		String path = resource_under_root(m_loader->m_entity_path, relative, ".tscn");
+		if (path.is_empty()) {
+			m_error = "Entity path must be a res:// directory: " + m_loader->m_entity_path;
+			return nullptr;
+		}
 
 		if (resource_loader->exists(path, "PackedScene")) {
 			Ref<PackedScene> scene = resource_loader->load(path);
@@ -295,8 +373,8 @@ Node* Builder::build_entity_custom(int idx, LMEntity& ent, LMEntityGeometry& geo
 					case Variant::FLOAT: instance->set(prop.key, atof(prop.value)); break; //TODO: Locale?
 					case Variant::STRING: instance->set(prop.key, prop.value); break;
 
-					case Variant::STRING_NAME: instance->set(prop.key, StringName(prop.value));
-					case Variant::NODE_PATH: instance->set(prop.key, NodePath(prop.value)); //TODO: More TrenchBroom focused node path conversion?
+					case Variant::STRING_NAME: instance->set(prop.key, StringName(prop.value)); break;
+					case Variant::NODE_PATH: instance->set(prop.key, NodePath(prop.value)); break; //TODO: More TrenchBroom focused node path conversion?
 
 					case Variant::VECTOR2: {
 						vec2 v = vec2_parse(prop.value);
@@ -399,9 +477,15 @@ Node* Builder::build_entity_sound(int idx, LMEntity& ent)
 	// Load the audio stream resource
 	const char* sound_path = ent.get_property("sound", "");
 	if (strlen(sound_path) > 0) {
+		String path = resource_under_root("res://", String::utf8(sound_path));
+		if (path.is_empty()) {
+			m_error = "Audio stream path must stay under res://: " + String::utf8(sound_path);
+			memdelete(player);
+			return nullptr;
+		}
 		auto resource_loader = ResourceLoader::get_singleton();
-		if (resource_loader->exists(sound_path, "AudioStream")) {
-			Ref<AudioStream> stream = resource_loader->load(sound_path);
+		if (resource_loader->exists(path, "AudioStream")) {
+			Ref<AudioStream> stream = resource_loader->load(path);
 			if (stream.is_valid()) {
 				player->set_stream(stream);
 			} else {
@@ -853,6 +937,10 @@ void Builder::load_and_cache_map_textures()
 	for (int tex_i = 0; tex_i < m_map->texture_count; tex_i++) {
 		const LMTextureData& tex = m_map->textures[tex_i];
 		String token = String::utf8(tex.name);
+		if (resource_under_root(m_loader->m_texture_path, token).is_empty()) {
+			m_error = "Texture or material path must stay under texture_path: " + token;
+			return;
+		}
 		Dictionary resolved = resolve_material(token);
 		m_loaded_map_textures[token] = resolved["texture"];
 		m_loaded_map_materials[token] = resolved["material"];
@@ -867,15 +955,16 @@ void Builder::load_and_cache_map_textures()
 
 String Builder::texture_path(const char* name, const char* extension)
 {
-	return m_loader->m_texture_path + "/" + String::utf8(name) + "." + extension;
+	return resource_under_root(m_loader->m_texture_path, String::utf8(name), "." + String(extension));
 }
 
 String Builder::material_path(const char* name)
 {
 	String token = String::utf8(name);
-	if (token.begins_with("res://")) return token;
-	auto root_path = m_loader->m_texture_path + "/" + token;
+	auto root_path = resource_under_root(m_loader->m_texture_path, token);
+	if (root_path.is_empty()) return String();
 	String extension = token.get_extension().to_lower();
+	if (token.begins_with("res://")) return root_path;
 	if (extension == "material" || extension == "tres" || extension == "res") return root_path;
 	String material_path;
 

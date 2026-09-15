@@ -4,6 +4,8 @@ bin/
 *.os
 .DS_Store
 .vscode
+__pycache__/
+*.py[cod]
 
 # Generated code
 src/gen/

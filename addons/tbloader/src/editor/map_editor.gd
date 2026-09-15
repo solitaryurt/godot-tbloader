@@ -10,6 +10,8 @@ const UVPane = preload("res://addons/tbloader/src/editor/uv_pane.gd")
 const EntityPane = preload("res://addons/tbloader/src/editor/entity_pane.gd")
 const POINT_ENTITY_CLASSES := ["info_player_start", "light", "player", "target_speaker"]
 const BRUSH_ENTITY_CLASSES := ["area", "func_group", "nocollision", "trigger_location"]
+const BAKED_STATE_META := &"_tbloader_editor_baked_state"
+const BAKED_STATE_RECORD_LIMIT := 128
 
 const PANE_TYPES := ["Camera", "Top Grid", "Front Grid", "Side Grid", "UV", "Entities"]
 
@@ -78,6 +80,7 @@ var discovered_scene_id = 0
 var changing_scene_tabs = false
 var changing_document_tabs = false
 var last_standalone: WeakRef = weakref(null)
+var last_bake_action: WeakRef = weakref(null)
 var discard_on_replace: RefCounted
 var history_total_budget = 128 * 1024 * 1024
 var history_session_budget = 64 * 1024 * 1024
@@ -742,6 +745,7 @@ func file_menu_command(id: int) -> void:
 func set_session(value: RefCounted) -> void:
 	cancel_interaction()
 	session = value
+	sync_baked_state(session)
 	if not session.scene_managed:
 		last_standalone = weakref(session)
 	session.save_enabled = true
@@ -762,6 +766,7 @@ func set_session(value: RefCounted) -> void:
 	plugin.update_bottom_panel_sessions()
 
 func _session_changed(origin: RefCounted) -> void:
+	sync_baked_state(origin)
 	if origin == session:
 		if origin.change_kind == "selection":
 			refresh_selection()
@@ -812,10 +817,55 @@ func set_status(text: String) -> void:
 	if notice != null:
 		notice.text = text
 
+func sync_baked_state(origin: RefCounted) -> Dictionary:
+	var state: Dictionary = origin.get_meta(BAKED_STATE_META, {
+		"observed_text": "", "current_records": [], "records": [],
+	})
+	var records: Array = state.get("records", [])
+	if records.size() > BAKED_STATE_RECORD_LIMIT:
+		records = records.slice(records.size() - BAKED_STATE_RECORD_LIMIT)
+		state.records = records
+	if state.observed_text == origin.baked_text:
+		origin.set_meta(BAKED_STATE_META, state)
+		return state
+	state.observed_text = origin.baked_text
+	state.current_records = []
+	if not origin.baked_text.is_empty():
+		for record in records:
+			if record.text == origin.baked_text:
+				state.current_records.append(record)
+	origin.set_meta(BAKED_STATE_META, state)
+	return state
+
+func remember_baked_state(origin: RefCounted, text: String) -> void:
+	var state: Dictionary = sync_baked_state(origin)
+	var records: Array = state.records
+	var record := {"text": text, "epoch": origin.document.get_epoch(),
+		"generation": origin.document.get_state_generation()}
+	var known := false
+	for existing in records:
+		if existing.text == text and existing.epoch == record.epoch and existing.generation == record.generation:
+			known = true
+			break
+	if not known:
+		records.append(record)
+		if records.size() > BAKED_STATE_RECORD_LIMIT:
+			records.pop_front()
+	state.records = records
+	state.observed_text = text
+	state.current_records = records.filter(func(existing): return existing.text == text)
+	origin.set_meta(BAKED_STATE_META, state)
+
+func baked_state_is_current(origin: RefCounted, state: Dictionary) -> bool:
+	var epoch: int = origin.document.get_epoch()
+	var generation: int = origin.document.get_state_generation()
+	return state.current_records.any(func(record): return record.epoch == epoch and record.generation == generation)
+
 func refresh_status() -> void:
 	if session == null or status == null:
 		return
-	var baked = "meshes never built" if session.baked_text.is_empty() else ("meshes current" if session.baked_text == session.document.export_text().value else "meshes stale")
+	var baked_state: Dictionary = sync_baked_state(session)
+	var baked = "meshes never built" if session.baked_text.is_empty() else ("meshes current" if baked_state_is_current(session, baked_state) else "meshes stale")
 	var orientation: String = ["Side", "Front", "Top"][active_graph.orientation] if is_instance_valid(active_graph) else "No grid"
 	status.text = "%s • %s • grid %.3f • %s • %s • %d selected • %d hidden" % ["UNSAVED" if session.has_unsaved_changes() else "saved", baked, session.grid, tool, orientation, session.selected.size() + session.points.size(), session.hidden_count()]
 	for category in visibility_buttons:
@@ -906,8 +956,9 @@ func refresh() -> void:
 	for camera in cameras:
 		camera.refresh()
 	refresh_status()
-	refresh_uv()
-	sync_material_selection()
+	var face_selection := face_selection_snapshot()
+	refresh_uv(face_selection)
+	sync_material_selection(face_selection)
 	for pane in entity_panes:
 		pane.refresh()
 	if inspector != null and inspector.visible:
@@ -921,8 +972,9 @@ func refresh_selection() -> void:
 	if tool == "Cut" and cut_plane_points.size() == 3:
 		preview_clip(false)
 	refresh_status()
-	refresh_uv()
-	sync_material_selection()
+	var face_selection := face_selection_snapshot()
+	refresh_uv(face_selection)
+	sync_material_selection(face_selection)
 	for pane in entity_panes:
 		pane.refresh_selection()
 	if inspector != null and inspector.visible:
@@ -934,8 +986,9 @@ func refresh_visibility() -> void:
 	for camera in cameras:
 		camera.refresh()
 	refresh_status()
-	refresh_uv()
-	sync_material_selection()
+	var face_selection := face_selection_snapshot()
+	refresh_uv(face_selection)
+	sync_material_selection(face_selection)
 
 func set_tool(value: String) -> void:
 	var leaving_cut := tool == "Cut" and value != "Cut"
@@ -1170,8 +1223,9 @@ func material_selected(_resource: Resource, path: String, token: String, mapping
 		return
 	texture_field.text = token
 	session.texture = token
-	if not face_targets().is_empty():
-		assign_texture()
+	var face_selection := face_selection_snapshot()
+	if not face_selection.targets.is_empty():
+		assign_texture(face_selection.targets)
 		set_status("%s → %s • Applied to selection" % [path, token])
 	else:
 		set_status("%s → %s • Select geometry to apply" % [path, token])
@@ -1245,39 +1299,43 @@ func sync_texture_sizes() -> void:
 	session.document.set_texture_sizes(sizes)
 
 func face_targets() -> Array:
-	var faces: Array = []
+	var selection := face_selection_snapshot()
+	return selection.get("requested_targets", selection.targets)
+
+func face_selection_snapshot() -> Dictionary:
+	var targets: Array = []
 	if not session.components.is_empty():
 		for component in session.components:
-			if component.kind == "face":
-				faces.append(component.duplicate())
+			if component.kind != "face":
+				continue
+			targets.append(component.duplicate())
 	else:
 		for id in session.selected:
 			var brush: Dictionary = session.brush(id)
 			for face in brush.faces:
-				faces.append({"brush_id": id, "index": face.index, "topology_revision": brush.topology_revision, "kind": "face"})
-	return faces
+				targets.append({"brush_id": id, "index": face.index, "topology_revision": brush.topology_revision, "kind": "face"})
+	var result: Dictionary = session.document.summarize_faces(targets)
+	return result.value if result.ok else {"targets": [], "requested_targets": targets, "textures": PackedStringArray(),
+		"unique_textures": PackedStringArray(), "first": {}, "texture": "", "valve": false, "mixed": false}
 
-func sync_material_selection() -> void:
+func sync_material_selection(selection: Dictionary = {}) -> void:
 	if browser == null or session == null:
 		return
-	var selected_tokens: Array[String] = []
-	for target in face_targets():
-		var brush: Dictionary = session.brush(target.brush_id)
-		for face in brush.get("faces", []):
-			if face.index == target.index and not selected_tokens.has(face.texture):
-				selected_tokens.append(face.texture)
-				break
+	if selection.is_empty():
+		selection = face_selection_snapshot()
+	var selected_tokens: PackedStringArray = selection.unique_textures
 	if selected_tokens.size() != 1:
 		browser.highlight_path("")
 		if selected_tokens.size() > 1:
 			uv_label.text += " • Mixed materials"
 		return
-	var resolved := resolve_token(selected_tokens[0])
+	var resolved := selection_material_resolution(selection, selected_tokens[0])
 	browser.highlight_path(resolved.get("resource_path", "") if resolved.get("resolved", false) else "")
 
-func assign_texture() -> void:
+func assign_texture(targets = null) -> void:
 	session.texture = texture_field.text.strip_edges()
-	var targets = face_targets()
+	if targets == null:
+		targets = face_targets()
 	var component_mode: bool = not session.components.is_empty()
 	session.transact("Assign map material", func():
 		if not component_mode:
@@ -1289,24 +1347,14 @@ func assign_texture() -> void:
 		return session.apply_face_edits(edits))
 	refresh_materials()
 
-func refresh_uv() -> void:
-	var targets = face_targets()
-	var valve = false
-	var mixed = false
-	var first: Dictionary = {}
-	var texture := ""
-	for target in targets:
-		var result: Dictionary = session.document.get_face_uv(target.brush_id, target.index, target.topology_revision)
-		if not result.ok:
-			continue
-		var uv: Dictionary = result.value
-		var target_texture := face_texture(target)
-		valve = valve or uv.projection == "valve"
-		if first.is_empty():
-			first = uv
-			texture = target_texture
-		elif first.shift != uv.shift or first.rotation != uv.rotation or first.scale != uv.scale or texture != target_texture:
-			mixed = true
+func refresh_uv(selection: Dictionary = {}) -> void:
+	if selection.is_empty():
+		selection = face_selection_snapshot()
+	var targets: Array = selection.targets
+	var valve: bool = selection.valve
+	var mixed: bool = selection.mixed
+	var first: Dictionary = selection.first
+	var texture: String = selection.texture
 	uv_label.text = "Valve / mixed projection: UV editing unavailable" if valve else ("Mixed UVs — edits replace selected values" if mixed else "Classic UV • %d faces" % targets.size())
 	for field in uv_fields:
 		field.editable = not valve
@@ -1324,7 +1372,7 @@ func refresh_uv() -> void:
 		"editable": not targets.is_empty(),
 		"texture_editable": not targets.is_empty(),
 	}
-	var preview := uv_preview(targets, texture)
+	var preview := uv_preview(targets, texture, selection)
 	pane_state.merge(preview)
 	bottom_uv_pane.set_state(pane_state)
 	for pane in uv_panes:
@@ -1332,14 +1380,24 @@ func refresh_uv() -> void:
 
 func face_texture(target: Dictionary) -> String:
 	var brush: Dictionary = session.brush(target.brush_id)
+	if target.index >= 0 and target.index < brush.get("faces", []).size():
+		var indexed_face: Dictionary = brush.faces[target.index]
+		if indexed_face.index == target.index:
+			return indexed_face.texture
 	for face in brush.get("faces", []):
 		if face.index == target.index:
 			return face.texture
 	return ""
 
-func uv_preview(targets: Array, texture: String) -> Dictionary:
+func selection_material_resolution(selection: Dictionary, texture: String) -> Dictionary:
+	if selection.get("resolved_token", "") != texture:
+		selection.resolved_token = texture
+		selection.resolved_material = resolve_token(texture)
+	return selection.resolved_material
+
+func uv_preview(targets: Array, texture: String, selection: Dictionary = {}) -> Dictionary:
 	var triangles: PackedVector2Array = session.document.get_face_preview_uvs(targets, texture) if not targets.is_empty() and not texture.is_empty() else PackedVector2Array()
-	var resolved := resolve_token(texture) if not texture.is_empty() else {}
+	var resolved := selection_material_resolution(selection, texture) if not texture.is_empty() else {}
 	var material: Material = resolved.get("material")
 	var preview_texture: Texture2D
 	if material is BaseMaterial3D:
@@ -1358,8 +1416,9 @@ func apply_uv() -> void:
 	var scale_value = Vector2(uv_fields[3].value, uv_fields[4].value)
 	apply_uv_transform(shift, rotation, scale_value)
 
-func apply_uv_transform(shift: Vector2, rotation: float, scale_value: Vector2) -> void:
-	var targets = face_targets()
+func apply_uv_transform(shift: Vector2, rotation: float, scale_value: Vector2, targets = null) -> void:
+	if targets == null:
+		targets = face_targets()
 	session.transact("Edit map UV", func():
 		var edits: Array = []
 		for target in targets:
@@ -1379,7 +1438,7 @@ func match_uv_grid() -> void:
 	var result: Dictionary = session.document.get_face_uv(targets[0].brush_id, targets[0].index, targets[0].topology_revision)
 	if result.ok:
 		var uv: Dictionary = result.value
-		apply_uv_transform(uv.shift.snapped(Vector2.ONE * session.grid), uv.rotation, uv.scale)
+		apply_uv_transform(uv.shift.snapped(Vector2.ONE * session.grid), uv.rotation, uv.scale, targets)
 
 func reset_uv() -> void:
 	apply_uv_transform(Vector2.ZERO, 0.0, Vector2.ONE)
@@ -1768,6 +1827,7 @@ func detach() -> void:
 	session.scene = weakref(null)
 	session.was_bound = false
 	session.baked_text = ""
+	sync_baked_state(session)
 	sync_resolver(true)
 	refresh_status()
 
@@ -1832,27 +1892,25 @@ func commit_bake(loader: Node, origin: RefCounted = null) -> bool:
 	if not loader.has_method("build_meshes_checked"):
 		set_status("Checked Build Meshes API unavailable in this build; mesh build deferred.")
 		return false
-	var before: PackedScene = BakeAction.capture(loader)
-	if before == null:
-		set_status("Could not snapshot loader children for scene undo; mesh build cancelled.")
-		return false
+	var before: Node = BakeAction.detach_children(loader)
 	var result: Dictionary = loader.call("build_meshes_checked")
 	if not session.report(result):
+		BakeAction.attach_children(loader, before, root)
+		before.free()
 		return false
+	# The checked builder sees an intentionally empty loader, so account for a
+	# previous subtree when deciding whether this scene operation changed.
+	var changed: bool = result.changed or before.get_child_count() > 0
 	var token = BakeAction.new()
 	token.loader = weakref(loader)
 	token.scene = weakref(root)
 	token.session = weakref(origin)
-	token.before = before
-	token.after = BakeAction.capture(loader)
+	token.detached = before
 	token.before_text = origin.baked_text if origin != null else ""
 	token.after_text = origin.document.export_text().value if origin != null else ""
 	token.reporter = Callable(self, "set_status")
-	if token.after == null:
-		token.restore(false)
-		set_status("Could not snapshot mesh output; previous children restored.")
-		return false
-	if result.changed:
+	last_bake_action = weakref(token)
+	if changed:
 		var manager = plugin.get_undo_redo()
 		manager.create_action("Build TBLoader meshes", UndoRedo.MERGE_DISABLE, EditorInterface.get_edited_scene_root())
 		manager.add_do_method(token, "restore", true)
@@ -1862,6 +1920,7 @@ func commit_bake(loader: Node, origin: RefCounted = null) -> bool:
 		manager.commit_action(false)
 	if origin != null:
 		origin.baked_text = token.after_text
+		remember_baked_state(origin, token.after_text)
 	EditorInterface.mark_scene_as_unsaved()
 	plugin.refresh_materials()
 	set_status("Selected loader meshes built successfully; scene marked unsaved.")

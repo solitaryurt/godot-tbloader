@@ -11,12 +11,6 @@
 #include <limits>
 
 namespace {
-template <typename T> T &append(T *&items, int &count) {
-	items = static_cast<T *>(realloc(items, (count + 1) * sizeof(T)));
-	items[count] = T{};
-	return items[count++];
-}
-
 struct Token {
 	std::string text;
 	int line = 1, column = 1;
@@ -30,6 +24,8 @@ class Parser {
 	size_t offset = 0;
 	int line = 1, column = 1;
 	size_t work = 0;
+	int total_properties = 0;
+	int total_primitives = 0;
 	Token current;
 	char peek(size_t ahead = 0) const { return offset + ahead < source.size() ? source[offset + ahead] : '\0'; }
 	char take() {
@@ -40,6 +36,14 @@ class Parser {
 	bool fail(const char *message, const char *code = "PARSE_ERROR") {
 		if (error.code.empty()) error = { code, message, current.line, current.column };
 		return false;
+	}
+	template <typename T> T *append(T *&items, int &count) {
+		if (count == std::numeric_limits<int>::max()) { fail("Parser item limit exceeded", "LIMIT_EXCEEDED"); return nullptr; }
+		auto *grown = static_cast<T *>(realloc(items, size_t(count + 1) * sizeof(T)));
+		if (!grown) { fail("Unable to allocate map data", "OUT_OF_MEMORY"); return nullptr; }
+		items = grown;
+		items[count] = T{};
+		return &items[count++];
 	}
 	bool next() {
 		for (;;) {
@@ -108,7 +112,10 @@ class Parser {
 	bool point(vec3 &v) { return expect("(") && vector(v) && expect(")"); }
 	bool texture(int &index) {
 		if (current.text.empty() || (!current.quoted && current.text.find_first_of("{}()[]") != std::string::npos)) return fail("Expected texture name");
+		index = map.map_data_find_texture(current.text.c_str());
+		if (index < 0 && map.texture_count >= LMMapParser::MAX_TEXTURES) return fail("Too many textures", "LIMIT_EXCEEDED");
 		index = map.map_data_register_texture(current.text.c_str());
+		if (index < 0) return fail("Unable to allocate texture data", "OUT_OF_MEMORY");
 		return next();
 	}
 	bool face(LMFace &f) {
@@ -143,7 +150,8 @@ class Parser {
 		if (!expect(")") || !expect("(")) return false;
 		work += size_t(p.width) * p.height * 33 * 33;
 		if (work > 8000000) return fail("Geometry work budget exceeded", "LIMIT_EXCEEDED");
-		p.control_points = static_cast<LMPatchControlPoint *>(calloc(p.width * p.height, sizeof(LMPatchControlPoint)));
+		p.control_points = static_cast<LMPatchControlPoint *>(calloc(size_t(p.width) * p.height, sizeof(LMPatchControlPoint)));
+		if (!p.control_points) return fail("Unable to allocate patch data", "OUT_OF_MEMORY");
 		for (int x = 0; x < p.width; ++x) {
 			if (!expect("(")) return false;
 			for (int y = 0; y < p.height; ++y) {
@@ -156,17 +164,25 @@ class Parser {
 	}
 	bool primitive(LMEntity &e) {
 		if (!expect("{")) return false;
-		auto &order = append(e.primitives, e.primitive_count);
+		if (e.primitive_count >= LMMapParser::MAX_PRIMITIVES_PER_ENTITY || total_primitives >= LMMapParser::MAX_TOTAL_PRIMITIVES)
+			return fail("Too many primitives", "LIMIT_EXCEEDED");
+		auto *order = append(e.primitives, e.primitive_count);
+		if (!order) return false;
+		++total_primitives;
 		if (is("patchDef2") || is("patchDef3")) {
-			order = { true, e.patch_count };
-			return patch(append(e.patches, e.patch_count));
+			*order = { true, e.patch_count };
+			auto *item = append(e.patches, e.patch_count);
+			return item && patch(*item);
 		}
 		if (!is("(")) return fail("Unsupported or empty primitive; expected brush faces or patchDef2/3", "UNSUPPORTED_SYNTAX");
-		order = { false, e.brush_count };
-		auto &b = append(e.brushes, e.brush_count);
+		*order = { false, e.brush_count };
+		auto *brush = append(e.brushes, e.brush_count);
+		if (!brush) return false;
+		auto &b = *brush;
 		while (is("(")) {
 			if (b.face_count >= 64) return fail("Brush exceeds 64 faces", "LIMIT_EXCEEDED");
-			if (!face(append(b.faces, b.face_count))) return false;
+			auto *item = append(b.faces, b.face_count);
+			if (!item || !face(*item)) return false;
 		}
 		if (b.face_count < 4) return fail("Brush requires at least four planes", "INVALID_GEOMETRY");
 		work += size_t(b.face_count) * b.face_count * b.face_count;
@@ -201,17 +217,26 @@ public:
 		if (source.compare(0, 3, "\xef\xbb\xbf") == 0) { offset = 3; column = 4; }
 		if (!next()) return false;
 		while (!current.text.empty() || current.quoted) {
-			if (map.entity_count >= 65536) return fail("Too many entities", "LIMIT_EXCEEDED");
+			if (map.entity_count >= LMMapParser::MAX_ENTITIES) return fail("Too many entities", "LIMIT_EXCEEDED");
 			if (!expect("{")) return false;
-			auto &e = append(map.entities, map.entity_count);
+			auto *entity = append(map.entities, map.entity_count);
+			if (!entity) return false;
+			auto &e = *entity;
 			e.spawn_type = EST_ENTITY;
 			while (!is("}")) {
 				if (current.quoted) {
-					auto &prop = append(e.properties, e.property_count);
+					if (e.property_count >= LMMapParser::MAX_PROPERTIES_PER_ENTITY || total_properties >= LMMapParser::MAX_TOTAL_PROPERTIES)
+						return fail("Too many entity properties", "LIMIT_EXCEEDED");
+					auto *property = append(e.properties, e.property_count);
+					if (!property) return false;
+					++total_properties;
+					auto &prop = *property;
 					prop.key = STRDUP(current.text.c_str());
+					if (!prop.key) return fail("Unable to allocate entity property", "OUT_OF_MEMORY");
 					if (!next()) return false;
 					if (!current.quoted) return fail("Expected quoted entity property value");
 					prop.value = STRDUP(current.text.c_str());
+					if (!prop.value) return fail("Unable to allocate entity property", "OUT_OF_MEMORY");
 					if (!next()) return false;
 				} else if (is("{")) {
 					if (!primitive(e)) return false;

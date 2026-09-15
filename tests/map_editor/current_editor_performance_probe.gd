@@ -175,6 +175,13 @@ func run() -> void:
 		finish(1)
 		return
 	var ui: Control = plugin.map_editor
+	var dense_render_mode := OS.get_environment("TB_CURRENT_EDITOR_DENSE_RENDER_MODE")
+	if not require(dense_render_mode in ["antialiased", "non_antialiased"],
+			"dense render mode is recognized"):
+		finish(1)
+		return
+	ui.graph_a.dense_render_mode = dense_render_mode
+	ui.graph_b.dense_render_mode = dense_render_mode
 	EditorInterface.set_main_screen_editor("Radiant")
 	plugin._make_visible(true)
 	await get_tree().process_frame
@@ -194,6 +201,7 @@ func run() -> void:
 		"debug_build": OS.is_debug_build(),
 		"clock": "Time.get_ticks_usec (monotonic)",
 		"samples": int(OS.get_environment("TB_CURRENT_EDITOR_PERF_SAMPLES")),
+		"dense_render_mode": dense_render_mode,
 		"timings_us": {"empty_editor_frame_post_draw_boundary": empty_boundary_us},
 		"checkpoints": {},
 		"checkpoint_order": [],
@@ -308,6 +316,7 @@ func run() -> void:
 	ui.graph_b.queue_view_redraw()
 	report.timings_us.grid_redraw_queue_to_frame_post_draw = await frame_post_draw_boundary()
 	ui.graph_a.reset_render_counters()
+	ui.camera_view.reset_render_counters()
 	candidate.select(PackedInt64Array([data[1].id]))
 	report.timings_us.selection_layer_queue_to_frame_post_draw = await frame_post_draw_boundary()
 	var selection_layer_counts: Dictionary = ui.graph_a.render_counters()
@@ -349,6 +358,7 @@ func run() -> void:
 	report.timings_us.move_capture_after = move_capture_after.usec
 	var after_move_text: String = candidate.document.export_text().value
 	ui.graph_a.reset_render_counters()
+	ui.camera_view.reset_render_counters()
 	var move_refresh := timed(func():
 		candidate.change_kind = "brush_translation"
 		candidate.changed.emit()
@@ -358,30 +368,72 @@ func run() -> void:
 	ui.graph_b.apply_dense_translation(Vector3(candidate.grid, 0, 0))
 	report.timings_us.move_following_frame = await frame_post_draw_boundary()
 	var grid_move_layer_counts: Dictionary = ui.graph_a.render_counters()
+	var grid_move_camera_counts: Dictionary = ui.camera_view.render_counters()
 	require(grid_move_layer_counts.static_redraws > 0 and grid_move_layer_counts.static_edge_builds == 0,
 		"grid translation patches the queued dense static redraw without rebuilding all edges")
+	require(grid_move_layer_counts.dense_buffer_uploads > 0
+		and grid_move_layer_counts.dense_buffer_upload_points < ui.graph_a.dense_base_edges.size(),
+		"grid translation uploads only touched retained graph buffers")
+	require(grid_move_camera_counts.chunk_reuses > 0
+		and grid_move_camera_counts.chunk_mesh_uploads < ui.camera_view.geometry_chunks.size()
+		and grid_move_camera_counts.chunk_renderer_writes == 0
+		and grid_move_camera_counts.ground_grid_rebuilds == 0,
+		"grid translation reuses unchanged camera chunks and the unchanged ground grid")
 	report.graph_render_boundaries.grid_translation = grid_move_layer_counts
+	report.camera_render_boundaries = {"grid_translation": grid_move_camera_counts}
 	var undo_restore_samples: Array = []
 	var undo_frame_samples: Array = []
 	var redo_restore_samples: Array = []
 	var redo_frame_samples: Array = []
+	var history_renderer_max := {"graph_buffer_uploads": 0, "graph_buffer_upload_points": 0,
+		"graph_full_refreshes": 0, "camera_chunk_uploads": 0, "camera_renderer_writes": 0,
+		"camera_ground_grid_rebuilds": 0}
 	for index in report.samples:
+		ui.graph_a.reset_render_counters()
+		ui.camera_view.reset_render_counters()
 		var undo_draw_before: Dictionary = candidate.draw_cache_counters()
 		var undo := timed(func(): candidate.restore(move_capture_before.value))
 		undo_restore_samples.append(undo.usec)
 		require_local_draw_delta(candidate, undo_draw_before, "connected production undo")
 		require(candidate.document.export_text().value == before_move_text, "session undo restores exact Tohunga text")
 		undo_frame_samples.append(await frame_post_draw_boundary())
+		var undo_graph_counts: Dictionary = ui.graph_a.render_counters()
+		var undo_camera_counts: Dictionary = ui.camera_view.render_counters()
+		history_renderer_max.graph_buffer_uploads = maxi(history_renderer_max.graph_buffer_uploads, undo_graph_counts.dense_buffer_uploads)
+		history_renderer_max.graph_buffer_upload_points = maxi(history_renderer_max.graph_buffer_upload_points, undo_graph_counts.dense_buffer_upload_points)
+		history_renderer_max.graph_full_refreshes = maxi(history_renderer_max.graph_full_refreshes, undo_graph_counts.dense_buffer_full_refreshes)
+		history_renderer_max.camera_chunk_uploads = maxi(history_renderer_max.camera_chunk_uploads, undo_camera_counts.chunk_mesh_uploads)
+		history_renderer_max.camera_renderer_writes = maxi(history_renderer_max.camera_renderer_writes, undo_camera_counts.chunk_renderer_writes)
+		history_renderer_max.camera_ground_grid_rebuilds = maxi(history_renderer_max.camera_ground_grid_rebuilds, undo_camera_counts.ground_grid_rebuilds)
+		ui.graph_a.reset_render_counters()
+		ui.camera_view.reset_render_counters()
 		var redo_draw_before: Dictionary = candidate.draw_cache_counters()
 		var redo := timed(func(): candidate.restore(move_capture_after.value))
 		redo_restore_samples.append(redo.usec)
 		require_local_draw_delta(candidate, redo_draw_before, "connected production redo")
 		require(candidate.document.export_text().value == after_move_text, "session redo restores exact Tohunga text")
 		redo_frame_samples.append(await frame_post_draw_boundary())
+		var redo_graph_counts: Dictionary = ui.graph_a.render_counters()
+		var redo_camera_counts: Dictionary = ui.camera_view.render_counters()
+		history_renderer_max.graph_buffer_uploads = maxi(history_renderer_max.graph_buffer_uploads, redo_graph_counts.dense_buffer_uploads)
+		history_renderer_max.graph_buffer_upload_points = maxi(history_renderer_max.graph_buffer_upload_points, redo_graph_counts.dense_buffer_upload_points)
+		history_renderer_max.graph_full_refreshes = maxi(history_renderer_max.graph_full_refreshes, redo_graph_counts.dense_buffer_full_refreshes)
+		history_renderer_max.camera_chunk_uploads = maxi(history_renderer_max.camera_chunk_uploads, redo_camera_counts.chunk_mesh_uploads)
+		history_renderer_max.camera_renderer_writes = maxi(history_renderer_max.camera_renderer_writes, redo_camera_counts.chunk_renderer_writes)
+		history_renderer_max.camera_ground_grid_rebuilds = maxi(history_renderer_max.camera_ground_grid_rebuilds, redo_camera_counts.ground_grid_rebuilds)
 	report.timings_us.undo_session_restore = undo_restore_samples
 	report.timings_us.undo_following_frame = undo_frame_samples
 	report.timings_us.redo_session_restore = redo_restore_samples
 	report.timings_us.redo_following_frame = redo_frame_samples
+	report.history_renderer_boundaries = history_renderer_max
+	require(history_renderer_max.graph_buffer_uploads > 0
+		and history_renderer_max.graph_buffer_upload_points < ui.graph_a.dense_base_edges.size()
+		and history_renderer_max.graph_full_refreshes == 0,
+		"undo/redo uploads only touched retained graph buffers")
+	require(history_renderer_max.camera_chunk_uploads < ui.camera_view.geometry_chunks.size()
+		and history_renderer_max.camera_renderer_writes == 0
+		and history_renderer_max.camera_ground_grid_rebuilds == 0,
+		"undo/redo avoids resubmitting unchanged camera chunks and grid meshes")
 	if failed:
 		finish(1)
 		return

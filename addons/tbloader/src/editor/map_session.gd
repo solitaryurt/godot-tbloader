@@ -50,7 +50,6 @@ var _hidden_generation_state: Dictionary = {}
 var _filters_generation_state := {"entities": false, "caulk": false, "clips": false, "hint_skip": false}
 var _draw_cache: Array = []
 var _draw_index: Dictionary = {}
-var _draw_positions: Dictionary = {}
 var _entity_cache: Array = []
 var _brush_entity_ids: Dictionary = {}
 var _marker_cache: Array = []
@@ -104,15 +103,13 @@ func _invalidate_draw_cache(count_reset := false) -> void:
 	_draw_generation = -1
 	_draw_cache.clear()
 	_draw_index.clear()
-	_draw_positions.clear()
 
 func _patch_draw_changes(change: Dictionary) -> void:
 	for item in change.brushes:
-		var position: int = _draw_positions.get(item.id, -1)
+		var position: int = _draw_index.get(item.id, -1)
 		if position < 0:
 			continue
 		_draw_cache[position] = item
-		_draw_index[item.id] = item
 		_draw_changed_entries += 1
 	_draw_generation = change.generation
 
@@ -142,9 +139,10 @@ func patch_draw_translation(ids: PackedInt64Array, movement: Vector3) -> void:
 		if patched.has(id):
 			continue
 		patched[id] = true
-		if not _draw_index.has(id):
+		var index: int = _draw_index.get(id, -1)
+		if index < 0:
 			continue
-		var item: Dictionary = _draw_index[id].duplicate(true)
+		var item: Dictionary = _draw_cache[index].duplicate(true)
 		item.aabb_min += movement
 		item.aabb_max += movement
 		for key in ["vertices", "edges"]:
@@ -158,10 +156,7 @@ func patch_draw_translation(ids: PackedInt64Array, movement: Vector3) -> void:
 			for i in winding.size():
 				winding[i] += movement
 			face.winding = winding
-		var index: int = _draw_positions.get(id, -1)
-		if index >= 0:
-			_draw_cache[index] = item
-		_draw_index[id] = item
+		_draw_cache[index] = item
 		_draw_changed_entries += 1
 
 func translate_brushes(ids: PackedInt64Array, movement: Vector3) -> Dictionary:
@@ -193,7 +188,6 @@ func dispose() -> void:
 	manager = null
 	_draw_cache.clear()
 	_draw_index.clear()
-	_draw_positions.clear()
 	_entity_cache.clear()
 	_brush_entity_ids.clear()
 	_marker_cache.clear()
@@ -203,12 +197,10 @@ func draw_data() -> Array:
 		_draw_cache = document.get_draw_data()
 		_draw_full_reads += 1
 		_draw_index.clear()
-		_draw_positions.clear()
 		for position in _draw_cache.size():
 			_draw_full_iterations += 1
 			var item: Dictionary = _draw_cache[position]
-			_draw_index[item.id] = item
-			_draw_positions[item.id] = position
+			_draw_index[item.id] = position
 		_draw_valid = true
 		_draw_generation = document.get_state_generation()
 	return _draw_cache
@@ -358,7 +350,8 @@ func transact(label: String, operation: Callable, kind := "") -> bool:
 
 func brush(id: int) -> Dictionary:
 	draw_data()
-	return _draw_index.get(id, {})
+	var position: int = _draw_index.get(id, -1)
+	return _draw_cache[position] if position >= 0 else {}
 
 func visible_brushes_2d(hidden_axis: int, mins: Vector3, maxs: Vector3) -> Array:
 	var result: Array = []
@@ -487,11 +480,11 @@ func prune_selection(sync_generation := true) -> void:
 	draw_data()
 	var valid := PackedInt64Array()
 	for id in selected:
-		var item: Dictionary = _draw_index.get(id, {})
+		var item: Dictionary = brush(id)
 		if brush_visible(item):
 			valid.append(id)
 	selected = valid
-	components = components.filter(func(c): return component_valid(c, _draw_index.get(c.brush_id, {})))
+	components = components.filter(func(c): return component_valid(c, brush(c.brush_id)))
 	var marker_ids: Dictionary = {}
 	for marker in point_markers():
 		marker_ids[marker.id] = true
@@ -503,7 +496,7 @@ func prune_selection(sync_generation := true) -> void:
 	points = valid
 	var first := true
 	for id in selected:
-		var item: Dictionary = _draw_index[id]
+		var item: Dictionary = brush(id)
 		var bounds := AABB(item.aabb_min, item.aabb_max - item.aabb_min)
 		workzone = bounds if first else workzone.merge(bounds)
 		first = false

@@ -20,6 +20,10 @@ typedef struct LMWorldspawnLayer {
 } LMWorldspawnLayer;
 
 class LMMapData {
+	int *texture_index = nullptr;
+	int texture_index_capacity = 0;
+	bool rebuild_texture_index(int minimum_capacity = 0);
+
 public:
 	int entity_count = 0;
 	LMEntity *entities = NULL;

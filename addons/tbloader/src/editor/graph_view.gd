@@ -47,6 +47,20 @@ var dense_edge_ranges: Dictionary = {}
 var dense_cache_history: Dictionary = {}
 var dense_cache_history_order: Array[String] = []
 var dense_cache_restore_count := 0
+var dense_render_layers: Array[Control] = []
+var dense_render_key := ""
+var dense_render_document_id := 0
+var dense_render_revision := -1
+var dense_render_visibility_generation := -1
+var dense_render_orientation := -1
+var dense_buffer_upload_count := 0
+var dense_buffer_upload_points := 0
+var dense_buffer_full_refreshes := 0
+var dense_buffer_partial_refreshes := 0
+var dense_render_mode := "non_antialiased"
+var dense_visible_buffer_count := 0
+var dense_view_signature: Array = []
+var dense_last_visible_ids := PackedInt64Array()
 var static_layer: Control
 var selection_layer: Control
 var camera_layer: Control
@@ -63,6 +77,7 @@ var orientation_gizmo: Control
 var camera_views: Array[WeakRef] = []
 const DENSE_EDGE_THRESHOLD = 1024
 const DENSE_CACHE_STATE_LIMIT = 2
+const DENSE_RENDER_BUFFER_POINTS = 8192
 const DENSE_EDGE_POINT_BYTES = 8
 const DENSE_EDGE_RANGE_BYTES = 16
 const CONTEXT_DRAG_THRESHOLD = 4.0
@@ -131,7 +146,12 @@ func render_counters() -> Dictionary:
 		"static_edge_restores": dense_cache_restore_count, "dense_cache_states": dense_cache_history.size(),
 		"dense_cache_retained_bytes": dense_cache_retained_bytes_estimate(),
 		"selection_redraws": selection_redraw_count, "selection_mask_points": selection_mask_point_count,
-		"camera_redraws": camera_redraw_count}
+		"camera_redraws": camera_redraw_count, "dense_buffer_uploads": dense_buffer_upload_count,
+		"dense_buffer_upload_points": dense_buffer_upload_points,
+		"dense_buffer_full_refreshes": dense_buffer_full_refreshes,
+		"dense_buffer_partial_refreshes": dense_buffer_partial_refreshes,
+		"dense_visible_buffers": dense_visible_buffer_count,
+		"dense_total_buffers": dense_render_layers.size()}
 
 func static_edge_signature() -> Dictionary:
 	return {"generation": static_edge_generation, "points": static_edge_point_count, "sum": static_edge_sum}
@@ -140,6 +160,10 @@ func reset_render_counters() -> void:
 	static_redraw_count = 0
 	static_edge_build_count = 0
 	dense_cache_restore_count = 0
+	dense_buffer_upload_count = 0
+	dense_buffer_upload_points = 0
+	dense_buffer_full_refreshes = 0
+	dense_buffer_partial_refreshes = 0
 	selection_redraw_count = 0
 	selection_mask_point_count = 0
 	camera_redraw_count = 0
@@ -317,37 +341,9 @@ func update_exact_preview() -> void:
 			preview_result(host.session.document.preview_translate_components(host.session.components, delta))
 
 func hit_brush(position: Vector2, prefer_selected := false) -> int:
-	var p := unproject(position - Vector2.ONE * 6)
-	var q := unproject(position + Vector2.ONE * 6)
-	var candidates: PackedInt64Array = host.session.document.query_brushes_2d(orientation, p.min(q), p.max(q))
-	var first_hit := 0
-	for candidate in range(candidates.size() - 1, -1, -1):
-		var brush: Dictionary = host.session.brush(candidates[candidate])
-		if not host.session.brush_visible(brush):
-			continue
-		var bounds := Rect2(project(brush.aabb_min), project(brush.aabb_max) - project(brush.aabb_min)).abs().grow(6)
-		if not bounds.has_point(position):
-			continue
-		var hit := false
-		for face in brush.faces:
-			var polygon = PackedVector2Array()
-			for point in face.winding:
-				polygon.append(project(point))
-			if polygon.size() >= 3 and Geometry2D.is_point_in_polygon(position, polygon):
-				hit = true
-				break
-		if not hit:
-			for i in range(0, brush.edges.size(), 2):
-				if position.distance_to(Geometry2D.get_closest_point_to_segment(position,
-						project(brush.edges[i]), project(brush.edges[i + 1]))) < 6:
-					hit = true
-					break
-		if hit:
-			if prefer_selected and host.session.selected.has(brush.id):
-				return brush.id
-			if first_hit == 0:
-				first_hit = brush.id
-	return first_hit
+	var hit: Dictionary = host.session.document.query_brush_2d_hit(orientation, unproject(position), 6.0 / zoom,
+		host.session.hidden_brush_ids(), host.session.visibility_filter_mask(), host.session.selected, prefer_selected)
+	return hit.get("brush_id", 0)
 
 func hit_point(position: Vector2) -> int:
 	if not host.session.marker_visible():
@@ -485,6 +481,142 @@ func clear_dense_edge_cache() -> void:
 	static_edge_generation = -1
 	static_edge_point_count = 0
 	static_edge_sum = Vector2.ZERO
+	clear_dense_render_layers()
+
+func clear_dense_render_layers() -> void:
+	for layer in dense_render_layers:
+		if is_instance_valid(layer):
+			layer.queue_free()
+	dense_render_layers.clear()
+	dense_render_key = ""
+	dense_render_document_id = 0
+	dense_render_revision = -1
+	dense_render_visibility_generation = -1
+	dense_render_orientation = -1
+	dense_view_signature.clear()
+	dense_last_visible_ids = PackedInt64Array()
+
+func ensure_dense_render_layers() -> bool:
+	var required := ceili(float(dense_base_edges.size()) / DENSE_RENDER_BUFFER_POINTS)
+	var changed := false
+	while dense_render_layers.size() < required:
+		var layer := GraphViewLayer.new()
+		layer.name = "DenseEdges%d" % dense_render_layers.size()
+		layer.graph = self
+		layer.layer_kind = "DenseEdges"
+		layer.buffer_index = dense_render_layers.size()
+		layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		add_child(layer)
+		move_child(layer, static_layer.get_index() + 1 + dense_render_layers.size())
+		dense_render_layers.append(layer)
+		changed = true
+	while dense_render_layers.size() > required:
+		var layer: Control = dense_render_layers.pop_back()
+		layer.queue_free()
+		changed = true
+	return changed
+
+func update_dense_render_transforms() -> void:
+	var a := axes()
+	var canvas_origin: Vector2 = size * 0.5 + Vector2(-origin[a.x], origin[a.y]) * zoom
+	for layer in dense_render_layers:
+		layer.position = canvas_origin
+		layer.scale = Vector2(zoom, -zoom)
+
+func dense_changed_buffers(ids: PackedInt64Array) -> Dictionary:
+	var result := {}
+	for id in ids:
+		var edge_range: Vector2i = dense_edge_ranges.get(id, Vector2i(-1, 0))
+		if edge_range.x < 0:
+			continue
+		var first := floori(float(edge_range.x) / DENSE_RENDER_BUFFER_POINTS)
+		var last := floori(float(edge_range.x + maxi(edge_range.y - 1, 0)) / DENSE_RENDER_BUFFER_POINTS)
+		for buffer_index in range(first, last + 1):
+			result[buffer_index] = true
+	return result
+
+func show_dense_buffer(index: int) -> void:
+	if index < 0 or index >= dense_render_layers.size() or dense_render_layers[index].visible:
+		return
+	dense_render_layers[index].visible = true
+	dense_render_layers[index].queue_redraw()
+
+func update_dense_buffer_visibility(visible_ids: PackedInt64Array, changed_ids: PackedInt64Array, force: bool) -> void:
+	var signature := [dense_cache_document_id, dense_cache_visibility_generation,
+		dense_cache_orientation, origin, zoom, size]
+	if not force and signature == dense_view_signature:
+		for id in changed_ids:
+			if visible_ids.has(id):
+				for index in dense_changed_buffers(PackedInt64Array([id])):
+					show_dense_buffer(index)
+		dense_visible_buffer_count = 0
+		for layer in dense_render_layers:
+			dense_visible_buffer_count += int(layer.visible)
+		return
+	dense_view_signature = signature
+	var visible_buffers := dense_changed_buffers(visible_ids)
+	dense_visible_buffer_count = visible_buffers.size()
+	for index in dense_render_layers.size():
+		var layer: Control = dense_render_layers[index]
+		var should_show := visible_buffers.has(index)
+		if should_show == layer.visible:
+			continue
+		layer.visible = should_show
+		if should_show:
+			layer.queue_redraw()
+		else:
+			# CanvasItem draw commands retain their expanded renderer geometry. Drop
+			# offscreen buffers and recreate only the command when it re-enters view.
+			RenderingServer.canvas_item_clear(layer.get_canvas_item())
+
+func hide_dense_render_layers() -> void:
+	dense_visible_buffer_count = 0
+	dense_view_signature.clear()
+	for layer in dense_render_layers:
+		if layer.visible:
+			layer.visible = false
+			RenderingServer.canvas_item_clear(layer.get_canvas_item())
+
+func sync_dense_render_layers(visible_ids: PackedInt64Array, changed_ids := PackedInt64Array()) -> void:
+	var resized := ensure_dense_render_layers()
+	update_dense_render_transforms()
+	var current_key: String = dense_edge_cache_key
+	var change: Dictionary = host.session.document.get_last_change()
+	var ids: PackedInt64Array = changed_ids if not changed_ids.is_empty() else change.get("brush_ids", PackedInt64Array())
+	dense_last_visible_ids = visible_ids
+	update_dense_buffer_visibility(visible_ids, ids, resized)
+	if not resized and current_key == dense_render_key:
+		return
+	var incremental: bool = (not resized and dense_render_document_id == dense_cache_document_id
+		and dense_render_visibility_generation == dense_cache_visibility_generation
+		and dense_render_orientation == dense_cache_orientation and not ids.is_empty()
+		and change.get("generation", -1) == dense_cache_revision
+		and change.get("before_generation", -1) == dense_render_revision)
+	var buffers := dense_changed_buffers(ids) if incremental else {}
+	if not incremental or buffers.is_empty():
+		for index in dense_render_layers.size():
+			buffers[index] = true
+		dense_buffer_full_refreshes += 1
+	else:
+		dense_buffer_partial_refreshes += 1
+	for index in buffers:
+		if dense_render_layers[index].visible:
+			dense_render_layers[index].queue_redraw()
+	dense_render_key = current_key
+	dense_render_document_id = dense_cache_document_id
+	dense_render_revision = dense_cache_revision
+	dense_render_visibility_generation = dense_cache_visibility_generation
+	dense_render_orientation = dense_cache_orientation
+
+func draw_dense_edge_buffer(canvas: Control, buffer_index: int) -> void:
+	var start_index := buffer_index * DENSE_RENDER_BUFFER_POINTS
+	var end_index := mini(start_index + DENSE_RENDER_BUFFER_POINTS, dense_base_edges.size())
+	if start_index >= end_index:
+		return
+	var points := dense_base_edges.slice(start_index, end_index)
+	canvas.draw_multiline(points, Color("9eb2c7"), 1.0 / zoom, dense_render_mode == "antialiased")
+	dense_buffer_upload_count += 1
+	dense_buffer_upload_points += points.size()
 
 func retain_dense_edge_cache() -> void:
 	if dense_cache_revision < 0 or dense_edge_cache_key.is_empty():
@@ -542,15 +674,10 @@ func rebuild_dense_edge_cache() -> void:
 	static_edge_build_count += 1
 	retain_dense_edge_cache()
 
-func draw_dense_edges(canvas: Control) -> void:
+func draw_dense_edges(canvas: Control, visible_ids: PackedInt64Array) -> void:
 	if not dense_edge_cache_matches() and not restore_dense_edge_cache():
 		rebuild_dense_edge_cache()
-	var a := axes()
-	var canvas_origin: Vector2 = size * 0.5 + Vector2(-origin[a.x], origin[a.y]) * zoom
-	canvas.draw_set_transform(canvas_origin, 0.0, Vector2(zoom, -zoom))
-	if not dense_base_edges.is_empty():
-		canvas.draw_multiline(dense_base_edges, Color("9eb2c7"), 1.0 / zoom, true)
-	canvas.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+	sync_dense_render_layers(visible_ids)
 
 func apply_dense_translation(movement: Vector3) -> void:
 	var document_id: int = host.session.document.get_instance_id()
@@ -578,7 +705,10 @@ func apply_dense_translation(movement: Vector3) -> void:
 	capture_dense_edge_cache_state()
 	static_edge_generation = dense_cache_revision
 	retain_dense_edge_cache()
-	queue_static_redraw()
+	if not dense_last_visible_ids.is_empty():
+		sync_dense_render_layers(dense_last_visible_ids, change.get("brush_ids", PackedInt64Array()))
+	else:
+		hide_dense_render_layers()
 	queue_selection_redraw()
 
 func selected_edge_data(map_space := true) -> PackedVector2Array:
@@ -957,8 +1087,9 @@ func draw_static_layer(canvas: Control) -> void:
 	draw_origin_compass(canvas)
 	var query := visible_query()
 	if query.dense:
-		draw_dense_edges(canvas)
+		draw_dense_edges(canvas, query.ids)
 		return
+	hide_dense_render_layers()
 	var base_edges := PackedVector2Array()
 	static_edge_sum = Vector2.ZERO
 	for id in query.ids:

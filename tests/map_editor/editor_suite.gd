@@ -1074,9 +1074,16 @@ func binding_journey(plugin: EditorPlugin) -> void:
 				checks.check(preview_arrays[array_index] == baked_arrays[array_index],
 					"built camera array %d matches bake mesh %d surface %d" % [array_index, mesh_index, surface])
 	checks.check(not loader.find_children("*", "CollisionShape3D", true, false).is_empty(), "real baked collision output")
+	var bake_action = ui.last_bake_action.get_ref()
+	checks.check(bake_action != null and bake_action.get_retention_counters().packed_snapshot_count == 0
+		and bake_action.get_retention_counters().detached_root_count == 1,
+		"bake history retains one detached predecessor subtree and no packed generated snapshots")
 	checks.check(ui.camera_view.triangle_count == 0 and not hidden_ids.is_empty(), "bake retains brushes hidden from editor preview")
 	ui.session.hide_selection(true)
 	checks.check(scene_history.undo() and loader.has_node("PreviousOutput"), "bake undo uses scene history and restores prior children")
+	checks.check(not bake_action.get_retention_counters().live_is_after
+		and bake_action.get_retention_counters().detached_root_count > 0,
+		"bake undo swaps generated output into the single detached history subtree")
 	checks.check(scene_history.redo() and not loader.has_node("PreviousOutput"), "bake scene redo restores generated nodes")
 	checks.check(loader.get_child(0).owner == root, "bake history restores scene ownership")
 	var previous_output: Node = loader.get_child(0)
@@ -1442,6 +1449,15 @@ func review_edit(label: String) -> void:
 func review_regressions(plugin: EditorPlugin) -> void:
 	print("TB_UI_STAGE: independent-review lifecycle regressions")
 	var original = ui.session
+	var freshness = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	for generation in ui.BAKED_STATE_RECORD_LIMIT + 7:
+		freshness.document.create_cuboid(Vector3(generation * 16, 0, 0), Vector3(generation * 16 + 8, 8, 8), "review/freshness")
+		ui.remember_baked_state(freshness, freshness.document.export_text().value)
+	var freshness_state: Dictionary = freshness.get_meta(ui.BAKED_STATE_META)
+	checks.check(freshness_state.records.size() == ui.BAKED_STATE_RECORD_LIMIT
+		and freshness_state.current_records.size() == 1 and ui.baked_state_is_current(freshness, freshness_state),
+		"baked freshness records retain the current generation with a strict per-session bound")
+	freshness.dispose()
 	var Session = load("res://addons/tbloader/src/editor/map_session.gd")
 	var Action = load("res://addons/tbloader/src/editor/map_action.gd")
 	var direct = Session.new()
@@ -2142,6 +2158,10 @@ func grid_draw_batch_regression() -> void:
 		and patched_counts.dense_cache_states == 2
 		and patched_counts.dense_cache_retained_bytes == 2 * (48 * 8 + 2 * 16),
 		"translation retains exactly two selection-independent base arrays and brush-range payloads")
+	await get_tree().process_frame
+	RenderingServer.force_draw()
+	checks.check(graph.render_counters().dense_buffer_uploads <= 1,
+		"translation resubmits at most the visible retained graph buffer containing changed edges")
 	graph.reset_render_counters()
 	for repeat in 3:
 		scratch.restore(cache_a)
@@ -2199,9 +2219,13 @@ func grid_draw_batch_regression() -> void:
 	scratch.select(PackedInt64Array([selected]))
 	graph.gesture = "move"
 	graph.delta = Vector3(16, 0, 0)
+	ui.camera_view.reset_render_counters()
 	ui.camera_view.preview_grid_move(graph.delta)
+	await get_tree().process_frame
 	checks.check(ui.camera_view.grid_move_preview.visible and ui.camera_view.grid_move_preview.get_child_count() == 4,
-		"grid move immediately consumes the exact candidate into two hull/edge passes")
+		"grid move coalesces the exact candidate into two hull/edge passes on the next frame")
+	checks.check(ui.camera_view.render_counters().candidate_mesh_uploads == 2,
+		"candidate hidden and visible passes share one hull and one edge mesh upload")
 	var hidden_candidate: BaseMaterial3D = ui.camera_view.grid_move_preview.get_node("HiddenEdges").material_override
 	var visible_candidate: BaseMaterial3D = ui.camera_view.grid_move_preview.get_node("VisibleEdges").material_override
 	checks.check(hidden_candidate.no_depth_test and not visible_candidate.no_depth_test and

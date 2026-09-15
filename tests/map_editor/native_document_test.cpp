@@ -23,6 +23,22 @@ static std::string fixture(const std::string &name) {
 	assert(file.good());
 	return { std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>() };
 }
+static std::string tetrahedron(const std::string &texture_prefix, int texture_base = -1) {
+	const char *planes[] = {
+		"( 0 0 0 ) ( 0 1 0 ) ( 1 0 0 ) ",
+		"( 0 0 0 ) ( 1 0 0 ) ( 0 0 1 ) ",
+		"( 0 0 0 ) ( 0 0 1 ) ( 0 1 0 ) ",
+		"( 1 0 0 ) ( 0 1 0 ) ( 0 0 1 ) "
+	};
+	std::string result = "{\n";
+	for (int face = 0; face < 4; ++face) {
+		result += planes[face];
+		result += texture_prefix;
+		if (texture_base >= 0) result += std::to_string(texture_base + face);
+		result += " 0 0 0 1 1\n";
+	}
+	return result + "}\n";
+}
 static void equal_vector(vec3 a, vec3 b) { assert(a.x == b.x && a.y == b.y && a.z == b.z); }
 static LMEditorBrushBuildContext editor_context(const LMMapData &map, std::vector<LMEditorTextureSize> &sizes) {
 	sizes.reserve(map.texture_count);
@@ -216,12 +232,30 @@ static void check_uv_only_update(const LMMapData &map, const LMBrush &brush) {
 	changed_sizes[changed_texture].height *= 3;
 	const LMEditorBrushBuildContext changed_context{changed_sizes.data(), changed_sizes.size()};
 	const auto updated = lm_update_editor_brush_uvs(brush, original, old_context, changed_context);
-	assert(updated && updated.geometry != original && updated.updated_faces > 0 && updated.copied_bytes == updated.geometry->retained_bytes());
+	size_t changed_corners = 0;
+	std::vector<uint8_t> changed_corner(original->corners.size());
+	for (int face = 0; face < brush.face_count; ++face) {
+		const int texture = brush.faces[face].texture_idx;
+		if (old_sizes[texture].width != changed_sizes[texture].width || old_sizes[texture].height != changed_sizes[texture].height) {
+			changed_corners += original->faces[face].corner_count;
+			for (uint32_t corner = 0; corner < original->faces[face].corner_count; ++corner)
+				changed_corner[original->faces[face].corner_begin + corner] = 1;
+		}
+	}
+	assert(updated && updated.geometry != original && updated.updated_faces > 0);
+	assert(updated.copied_bytes == changed_corners * sizeof(LMEditorBrushCorner));
+	assert(updated.copied_bytes * 2 < updated.geometry->retained_bytes());
 	const auto after = lm_editor_brush_instrumentation();
 	assert(after.builds == before.builds);
 	const auto fresh = lm_build_editor_brush_geometry(brush, changed_context);
 	assert(fresh && lm_validate_editor_brush_geometry(brush, fresh.geometry));
 	const auto &actual = *updated.geometry;
+	assert(actual.positions.shares_storage_with(original->positions));
+	assert(actual.faces.shares_storage_with(original->faces));
+	assert(actual.edges.shares_storage_with(original->edges));
+	for (size_t corner = 0; corner < changed_corner.size(); ++corner) {
+		if (!changed_corner[corner]) assert(&actual.corners[corner] == &original->corners[corner]);
+	}
 	assert(actual.positions.size() == original->positions.size() && actual.faces.size() == original->faces.size() &&
 			actual.edges.size() == original->edges.size() && actual.corners.size() == original->corners.size());
 	assert(!memcmp(actual.positions.data(), original->positions.data(), actual.positions.size() * sizeof(vec3)));
@@ -235,6 +269,33 @@ static void check_uv_only_update(const LMMapData &map, const LMBrush &brush) {
 }
 
 int main() {
+	{
+		auto map = std::make_shared<LMMapData>();
+		LMMapParser parser(map);
+		assert(parser.load_from_text("{\"classname\" \"worldspawn\"}"));
+		const std::string before = lm_write_map(*map);
+		std::string properties = "{";
+		for (int i = 0; i <= LMMapParser::MAX_PROPERTIES_PER_ENTITY; ++i) properties += "\"k\" \"v\"\n";
+		properties += "}";
+		assert(!parser.load_from_text(properties) && parser.error.code == "LIMIT_EXCEEDED" && lm_write_map(*map) == before);
+
+		std::string entities;
+		entities.reserve(size_t(LMMapParser::MAX_ENTITIES + 1) * 3);
+		for (int i = 0; i <= LMMapParser::MAX_ENTITIES; ++i) entities += "{}\n";
+		assert(!parser.load_from_text(entities) && parser.error.code == "LIMIT_EXCEEDED" && lm_write_map(*map) == before);
+
+		std::string textures = "{";
+		for (int i = 0; i <= LMMapParser::MAX_TEXTURES / 4; ++i) textures += tetrahedron("texture", i * 4);
+		textures += "}";
+		assert(!parser.load_from_text(textures) && parser.error.code == "LIMIT_EXCEEDED" && lm_write_map(*map) == before);
+	}
+	{
+		auto map = std::make_shared<LMMapData>();
+		const std::string source = "{\n\"classname\" \"worldspawn\"\n" + tetrahedron("sparse/texture", 0) + "}\n";
+		assert(LMMapParser(map).load_from_text(source));
+		assert(map->texture_count == 4 && map->entities[0].brush_count == 1);
+		check_uv_only_update(*map, map->entities[0].brushes[0]);
+	}
 	// A real bevel with a 1e-6 angle still has a crease. The old intersection
 	// cutoff discarded that crease and generated an open top region.
 	for (bool reverse : {false, true}) {

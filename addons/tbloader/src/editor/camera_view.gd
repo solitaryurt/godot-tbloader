@@ -16,6 +16,9 @@ var core_overlays: Node3D
 var ground_grid: Node3D
 var grid_move_preview: Node3D
 var grid_move_preview_key = ""
+var grid_move_preview_pending := false
+var grid_move_preview_delta := Vector3.ZERO
+var grid_move_preview_generation := 0
 var candidate_offscreen := false
 var candidate_indicator: Label
 var preview_lights: Node3D
@@ -26,6 +29,10 @@ var environment_dirty := true
 var inferred_scene_key: Array = []
 var inferred_scene: WeakRef = weakref(null)
 var inferred_loader: WeakRef = weakref(null)
+var scene_nodes_key: Array = []
+var scene_nodes_dirty := true
+var scene_directional_light_refs: Array = []
+var scene_world_environment_refs: Array = []
 var built_appearance := false
 var built_preview_key := ""
 var built_preview_context_key := ""
@@ -67,6 +74,13 @@ var rendered_material_key = ""
 var core_overlay_key: Array = []
 var cut_overlay_context_key: Array = []
 var geometry_chunks: Dictionary = {}
+var chunk_reuse_count := 0
+var chunk_mesh_upload_count := 0
+var chunk_renderer_write_count := 0
+var ground_grid_rebuild_count := 0
+var candidate_mesh_upload_count := 0
+var candidate_hull_mesh: ArrayMesh
+var candidate_edge_mesh: ArrayMesh
 var lighting_key: Array = []
 var lighting_initialized = false
 var lighting_sync_delay = 0.0
@@ -90,10 +104,22 @@ var camera_rotation_angle := 0.0
 var surface_grid_visible := false
 var surface_grid_key: Array = []
 var ground_grid_key: Array = []
+var ground_grid_extent_document_id := 0
+var ground_grid_extent_generation := -1
+var ground_grid_extent_spacing := 0.0
+var ground_grid_extent_scale := 0.0
+var ground_grid_extent_value := 0.0
+var previous_ground_grid_extent_document_id := 0
+var previous_ground_grid_extent_generation := -1
+var previous_ground_grid_extent_spacing := 0.0
+var previous_ground_grid_extent_scale := 0.0
+var previous_ground_grid_extent_value := 0.0
 const CHUNK_TRIANGLES = 2048
 const CHUNK_SIZE = 64.0
 const GROUND_GRID_MIN_EXTENT = 2048.0
 const GROUND_GRID_MAJOR_INTERVAL = 8
+const GROUND_GRID_MAX_VERTICES = 8192
+const GROUND_GRID_MAX_VIEW_EXTENT = 5000.0
 const DRAG_THRESHOLD = 4.0
 const MIN_FLY_SPEED = 1.0
 const MAX_FLY_SPEED = 64.0
@@ -166,6 +192,8 @@ func _ready() -> void:
 	viewport.add_child(preview_world_environment)
 	preview_lights = Node3D.new()
 	viewport.add_child(preview_lights)
+	get_tree().node_added.connect(scene_tree_node_changed)
+	get_tree().node_removed.connect(scene_tree_node_changed)
 	sync_scene_environment(true)
 	sync_scene_lighting(true)
 	hint = Label.new()
@@ -367,6 +395,8 @@ func set_camera_grid_visible(visible: bool) -> void:
 		camera_grid_button.set_pressed_no_signal(visible)
 	if ground_grid != null:
 		ground_grid.visible = visible
+		if visible and ground_grid_key != ground_grid_signature():
+			rebuild_ground_grid()
 
 func add_toggle_slash(button: Button) -> void:
 	var slash := Line2D.new()
@@ -544,6 +574,19 @@ func refresh() -> void:
 	refresh_built_appearance()
 	refresh_selection()
 
+func render_counters() -> Dictionary:
+	return {"chunk_reuses": chunk_reuse_count, "chunk_mesh_uploads": chunk_mesh_upload_count,
+		"chunk_renderer_writes": chunk_renderer_write_count,
+		"ground_grid_rebuilds": ground_grid_rebuild_count,
+		"candidate_mesh_uploads": candidate_mesh_upload_count}
+
+func reset_render_counters() -> void:
+	chunk_reuse_count = 0
+	chunk_mesh_upload_count = 0
+	chunk_renderer_write_count = 0
+	ground_grid_rebuild_count = 0
+	candidate_mesh_upload_count = 0
+
 func refresh_selection(force := false) -> void:
 	if core_overlays == null or not is_instance_valid(host) or host.session == null:
 		return
@@ -565,7 +608,7 @@ func refresh_selection(force := false) -> void:
 	if cut_key != cut_overlay_context_key:
 		cut_overlay_context_key = cut_key
 		rebuild_cut_overlay()
-	if ground_grid_key != ground_grid_signature():
+	if camera_grid_visible and ground_grid_key != ground_grid_signature():
 		rebuild_ground_grid()
 	if surface_grid_visible and surface_grid_key != surface_grid_signature():
 		rebuild_surface_grid_overlay()
@@ -644,28 +687,44 @@ func refresh_built_appearance() -> void:
 	if is_instance_valid(host):
 		host.set_status("%s: %s" % [error.get("code", "PREVIEW_FAILED"), error.get("message", "Built appearance failed")])
 
-func candidate_mesh_instance(vertices: PackedVector3Array, primitive: int, material: Material, name_value: String) -> MeshInstance3D:
-	if vertices.is_empty():
-		return null
-	var arrays: Array = []
-	arrays.resize(Mesh.ARRAY_MAX)
-	arrays[Mesh.ARRAY_VERTEX] = vertices
-	var mesh := ArrayMesh.new()
-	mesh.add_surface_from_arrays(primitive, arrays)
+func candidate_mesh_instance(mesh: ArrayMesh, material: Material, name_value: String) -> MeshInstance3D:
 	var instance := MeshInstance3D.new()
 	instance.name = name_value
 	instance.mesh = mesh
 	instance.material_override = material
-	var loader = host.session.loader.get_ref()
-	if is_instance_valid(loader):
-		instance.layers = loader.option_visual_layer_mask
 	grid_move_preview.add_child(instance)
 	return instance
 
-func set_candidate_preview(candidates: Array) -> void:
-	clear_candidate_preview()
-	if candidates.is_empty() or grid_move_preview == null:
+func ensure_candidate_preview() -> void:
+	if grid_move_preview.get_child_count() != 0:
 		return
+	candidate_hull_mesh = ArrayMesh.new()
+	candidate_edge_mesh = ArrayMesh.new()
+	# The hidden pass ignores depth; the visible pass depth-tests. Neither pass writes depth.
+	candidate_mesh_instance(candidate_hull_mesh, candidate_material(Color(1.0, 0.72, 0.38, 0.12), true), "HiddenHulls")
+	candidate_mesh_instance(candidate_edge_mesh, candidate_material(Color(1.0, 0.78, 0.48, 0.42), true), "HiddenEdges")
+	candidate_mesh_instance(candidate_hull_mesh, candidate_material(Color(1.0, 0.52, 0.12, 0.24), false), "VisibleHulls")
+	candidate_mesh_instance(candidate_edge_mesh, candidate_material(Color(1.0, 0.58, 0.14, 0.96), false), "VisibleEdges")
+
+func update_candidate_mesh(names: Array[String], mesh: ArrayMesh, vertices: PackedVector3Array, primitive: int, visual_layer: int) -> void:
+	mesh.clear_surfaces()
+	for name_value in names:
+		var instance := grid_move_preview.get_node(name_value) as MeshInstance3D
+		instance.visible = not vertices.is_empty()
+		instance.layers = visual_layer
+	if vertices.is_empty():
+		return
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = vertices
+	mesh.add_surface_from_arrays(primitive, arrays)
+	candidate_mesh_upload_count += 1
+
+func set_candidate_preview(candidates: Array) -> void:
+	if candidates.is_empty() or grid_move_preview == null:
+		clear_candidate_preview()
+		return
+	ensure_candidate_preview()
 	var triangles := PackedVector3Array()
 	var edges := PackedVector3Array()
 	var points := PackedVector3Array()
@@ -682,11 +741,10 @@ func set_candidate_preview(candidates: Array) -> void:
 		var brush_edges: PackedVector3Array = brush.get("edges", PackedVector3Array())
 		for point in brush_edges:
 			edges.append(transform_map_scaled(point, scale_value))
-	# The hidden pass ignores depth; the visible pass depth-tests. Neither pass writes depth.
-	candidate_mesh_instance(triangles, Mesh.PRIMITIVE_TRIANGLES, candidate_material(Color(1.0, 0.72, 0.38, 0.12), true), "HiddenHulls")
-	candidate_mesh_instance(edges, Mesh.PRIMITIVE_LINES, candidate_material(Color(1.0, 0.78, 0.48, 0.42), true), "HiddenEdges")
-	candidate_mesh_instance(triangles, Mesh.PRIMITIVE_TRIANGLES, candidate_material(Color(1.0, 0.52, 0.12, 0.24), false), "VisibleHulls")
-	candidate_mesh_instance(edges, Mesh.PRIMITIVE_LINES, candidate_material(Color(1.0, 0.58, 0.14, 0.96), false), "VisibleEdges")
+	var loader = host.session.loader.get_ref()
+	var visual_layer: int = loader.option_visual_layer_mask if is_instance_valid(loader) else 1
+	update_candidate_mesh(["HiddenHulls", "VisibleHulls"], candidate_hull_mesh, triangles, Mesh.PRIMITIVE_TRIANGLES, visual_layer)
+	update_candidate_mesh(["HiddenEdges", "VisibleEdges"], candidate_edge_mesh, edges, Mesh.PRIMITIVE_LINES, visual_layer)
 	grid_move_preview.visible = true
 	candidate_offscreen = not points.is_empty()
 	for point in points:
@@ -714,10 +772,20 @@ func update_candidate_indicator(points: PackedVector3Array) -> void:
 	candidate_indicator.position = edge
 
 func preview_grid_move(delta: Vector3) -> void:
+	grid_move_preview_delta = delta
+	if grid_move_preview_pending:
+		return
+	grid_move_preview_pending = true
+	call_deferred("apply_grid_move_preview", grid_move_preview_generation)
+
+func apply_grid_move_preview(generation: int) -> void:
+	if generation != grid_move_preview_generation:
+		return
+	grid_move_preview_pending = false
 	if host.session.selected.is_empty():
 		clear_candidate_preview()
 		return
-	var result: Dictionary = host.session.document.preview_translate_brushes(host.session.selected, delta)
+	var result: Dictionary = host.session.document.preview_translate_brushes(host.session.selected, grid_move_preview_delta)
 	if result.get("ok", false):
 		set_candidate_preview(result.get("value", []))
 	else:
@@ -727,10 +795,11 @@ func clear_grid_move_preview() -> void:
 	clear_candidate_preview()
 
 func clear_candidate_preview() -> void:
+	grid_move_preview_generation += 1
+	grid_move_preview_pending = false
 	if grid_move_preview != null:
 		for child in grid_move_preview.get_children():
-			grid_move_preview.remove_child(child)
-			child.queue_free()
+			child.hide()
 		grid_move_preview.visible = false
 		grid_move_preview.position = Vector3.ZERO
 	candidate_offscreen = false
@@ -795,17 +864,63 @@ func preview_scene_context() -> Dictionary:
 			return {"root": root, "loader": candidate}
 	return {}
 
-func scene_directional_lights() -> Array[DirectionalLight3D]:
-	var result: Array[DirectionalLight3D] = []
+func scene_tree_node_changed(_node: Node) -> void:
+	if viewport != null and (_node == viewport or viewport.is_ancestor_of(_node)):
+		return
+	scene_nodes_dirty = true
+	inferred_scene_key.clear()
+
+func cached_scene_nodes() -> Dictionary:
 	var context := preview_scene_context()
 	if context.is_empty():
-		return result
+		scene_nodes_key.clear()
+		scene_directional_light_refs.clear()
+		scene_world_environment_refs.clear()
+		scene_nodes_dirty = false
+		return {}
 	var root: Node = context.root
-	if root is DirectionalLight3D:
-		result.append(root)
-	for node in root.find_children("*", "DirectionalLight3D", true, false):
-		result.append(node)
-	return result
+	var loader: Node = context.loader
+	var key := [root.get_instance_id(), loader.get_instance_id() if is_instance_valid(loader) else 0]
+	var lights: Array[DirectionalLight3D] = []
+	var environments: Array[WorldEnvironment] = []
+	if not scene_nodes_dirty and key == scene_nodes_key:
+		for reference in scene_directional_light_refs:
+			var light = reference.get_ref()
+			if not is_instance_valid(light):
+				scene_nodes_dirty = true
+				break
+			lights.append(light)
+		if not scene_nodes_dirty:
+			for reference in scene_world_environment_refs:
+				var environment = reference.get_ref()
+				if not is_instance_valid(environment):
+					scene_nodes_dirty = true
+					break
+				environments.append(environment)
+	if scene_nodes_dirty or key != scene_nodes_key:
+		lights.clear()
+		environments.clear()
+		if root is DirectionalLight3D:
+			lights.append(root)
+		if root is WorldEnvironment:
+			environments.append(root)
+		for node in root.find_children("*", "", true, false):
+			if node is DirectionalLight3D:
+				lights.append(node)
+			elif node is WorldEnvironment:
+				environments.append(node)
+		scene_nodes_key = key
+		scene_directional_light_refs.assign(lights.map(func(node): return weakref(node)))
+		scene_world_environment_refs.assign(environments.map(func(node): return weakref(node)))
+		scene_nodes_dirty = false
+	return {"root": root, "loader": loader, "lights": lights, "environments": environments}
+
+func scene_directional_lights() -> Array[DirectionalLight3D]:
+	var context := cached_scene_nodes()
+	if context.is_empty():
+		return []
+	var lights: Array[DirectionalLight3D] = context.lights
+	return lights
 
 func studio_environment() -> Environment:
 	var environment := Environment.new()
@@ -816,22 +931,13 @@ func studio_environment() -> Environment:
 	environment.ambient_light_energy = 0.75
 	return environment
 
-func scene_world_environments(root: Node) -> Array[WorldEnvironment]:
-	var result: Array[WorldEnvironment] = []
-	if root is WorldEnvironment:
-		result.append(root)
-	for node in root.find_children("*", "WorldEnvironment", true, false):
-		result.append(node)
-	return result
-
 func effective_scene_environment() -> Dictionary:
-	var scene_context := preview_scene_context()
+	var scene_context := cached_scene_nodes()
 	if scene_context.is_empty():
 		return {}
-	var root: Node = scene_context.root
 	var loader: Node = scene_context.loader
 	var world: World3D = loader.get_world_3d() if is_instance_valid(loader) else null
-	var environments := scene_world_environments(root)
+	var environments: Array = scene_context.environments
 	if world != null and world.environment != null:
 		for node in environments:
 			if node.environment == world.environment:
@@ -962,19 +1068,26 @@ func rebuild_geometry(scale_value: float) -> void:
 	var manifest: Dictionary = host.session.document.prepare_preview_chunks(scale_value,
 		host.session.hidden_brush_ids(), host.session.visibility_filter_mask(), CHUNK_TRIANGLES, CHUNK_SIZE)
 	triangle_count = manifest.get("triangle_count", 0)
-	var retained: Dictionary = {}
+	var active_keys: Dictionary = {}
 	for entry in manifest.get("chunks", []):
 		var key: String = entry.chunk_id
+		active_keys[key] = true
 		var category: String = entry.get("render_category", "opaque")
 		var material: Material = host.preview_material(entry.texture, category)
 		var cached: Dictionary = geometry_chunks.get(key, {})
 		if not cached.is_empty() and cached.get("geometry_hash") == entry.geometry_hash and cached.get("geometry_version") == entry.geometry_version:
-			apply_preview_material(cached.instance, material, category)
 			var loader = host.session.loader.get_ref()
-			cached.instance.layers = loader.option_visual_layer_mask if is_instance_valid(loader) else 1
+			var visual_layer: int = loader.option_visual_layer_mask if is_instance_valid(loader) else 1
+			if cached.get("texture") != entry.texture or cached.get("render_category") != category:
+				apply_preview_material(cached.instance, material, category)
+				chunk_renderer_write_count += 1
+			if cached.instance.layers != visual_layer:
+				cached.instance.layers = visual_layer
+				chunk_renderer_write_count += 1
 			cached.texture = entry.texture
 			cached.render_category = category
-			retained[key] = cached
+			geometry_chunks[key] = cached
+			chunk_reuse_count += 1
 			continue
 		if not cached.is_empty():
 			map_geometry.remove_child(cached.instance)
@@ -984,19 +1097,22 @@ func rebuild_geometry(scale_value: float) -> void:
 			continue
 		var instance := add_preview_mesh(chunk.vertices, chunk.normals, chunk.uvs, material)
 		apply_preview_material(instance, material, category)
-		retained[key] = {"instance": instance, "texture": entry.texture, "render_category": category, "geometry_hash": entry.geometry_hash, "geometry_version": entry.geometry_version}
-	for key in geometry_chunks:
-		if not retained.has(key):
+		chunk_mesh_upload_count += 1
+		geometry_chunks[key] = {"instance": instance, "texture": entry.texture, "render_category": category, "geometry_hash": entry.geometry_hash, "geometry_version": entry.geometry_version}
+	for key in geometry_chunks.keys():
+		if not active_keys.has(key):
 			var stale: Dictionary = geometry_chunks[key]
 			map_geometry.remove_child(stale.instance)
 			stale.instance.queue_free()
-	geometry_chunks = retained
+			geometry_chunks.erase(key)
 
 func refresh_chunk_materials(visual_layer: int) -> void:
 	for cached in geometry_chunks.values():
 		var category: String = cached.get("render_category", "opaque")
 		apply_preview_material(cached.instance, host.preview_material(cached.texture, category), category)
-		cached.instance.layers = visual_layer
+		if cached.instance.layers != visual_layer:
+			cached.instance.layers = visual_layer
+		chunk_renderer_write_count += 1
 
 func selection_overlay_material(color: Color, priority: int) -> StandardMaterial3D:
 	var material := StandardMaterial3D.new()
@@ -1149,16 +1265,42 @@ func build_overlays(scale_value: float, visual_layer: int) -> void:
 func ground_grid_signature() -> Array:
 	if not is_instance_valid(host) or host.session == null:
 		return []
-	return [host.session.document.get_instance_id(), host.session.preview_generation,
-		host.session.visibility_generation, host.session.grid, map_scale()]
+	var scale_value := map_scale()
+	var loader = host.session.loader.get_ref()
+	var visual_layer: int = loader.option_visual_layer_mask if is_instance_valid(loader) else 1
+	var extent := cached_ground_grid_extent(host.session.grid, scale_value) if host.session.grid > 0.0 else 0.0
+	return [host.session.document.get_instance_id(), host.session.grid, scale_value, extent, visual_layer]
 
-func ground_grid_extent(spacing: float) -> float:
+func cached_ground_grid_extent(spacing: float, scale_value := map_scale()) -> float:
+	var document_id: int = host.session.document.get_instance_id()
+	var generation: int = host.session.document.get_state_generation()
+	if (ground_grid_extent_document_id == document_id and ground_grid_extent_generation == generation
+			and is_equal_approx(ground_grid_extent_spacing, spacing)
+			and is_equal_approx(ground_grid_extent_scale, scale_value)):
+		return ground_grid_extent_value
+	if (previous_ground_grid_extent_document_id == document_id
+			and previous_ground_grid_extent_generation == generation
+			and is_equal_approx(previous_ground_grid_extent_spacing, spacing)
+			and is_equal_approx(previous_ground_grid_extent_scale, scale_value)):
+		return previous_ground_grid_extent_value
 	var extent := maxf(GROUND_GRID_MIN_EXTENT, spacing * GROUND_GRID_MAJOR_INTERVAL * 8.0)
 	for brush in host.session.draw_data():
 		for value in [brush.aabb_min.x, brush.aabb_min.y, brush.aabb_max.x, brush.aabb_max.y]:
 			extent = maxf(extent, absf(value))
+	var maximum_extent := maxf(GROUND_GRID_MIN_EXTENT, scale_value * GROUND_GRID_MAX_VIEW_EXTENT)
+	extent = minf(extent, maximum_extent)
 	var major_spacing := spacing * GROUND_GRID_MAJOR_INTERVAL
-	return ceilf((extent + major_spacing * 2.0) / major_spacing) * major_spacing
+	previous_ground_grid_extent_document_id = ground_grid_extent_document_id
+	previous_ground_grid_extent_generation = ground_grid_extent_generation
+	previous_ground_grid_extent_spacing = ground_grid_extent_spacing
+	previous_ground_grid_extent_scale = ground_grid_extent_scale
+	previous_ground_grid_extent_value = ground_grid_extent_value
+	ground_grid_extent_value = minf(ceilf((extent + major_spacing * 2.0) / major_spacing) * major_spacing, maximum_extent)
+	ground_grid_extent_document_id = document_id
+	ground_grid_extent_generation = generation
+	ground_grid_extent_spacing = spacing
+	ground_grid_extent_scale = scale_value
+	return ground_grid_extent_value
 
 func add_ground_grid_lines(name_value: String, lines: PackedVector3Array, color: Color, priority: int) -> void:
 	if lines.is_empty():
@@ -1182,8 +1324,13 @@ func build_ground_grid(scale_value: float) -> void:
 	var spacing: float = host.session.grid
 	if spacing <= 0.0:
 		return
-	var extent := ground_grid_extent(spacing)
+	var extent := cached_ground_grid_extent(spacing, scale_value)
 	var steps := ceili(extent / spacing)
+	var max_steps := floori(float(GROUND_GRID_MAX_VERTICES - 4) / 8.0)
+	var stride := maxi(1, ceili(float(steps) / max_steps))
+	spacing *= stride
+	steps = mini(floori(extent / spacing), max_steps)
+	extent = steps * spacing
 	var minor := PackedVector3Array()
 	var major := PackedVector3Array()
 	var x_axis := PackedVector3Array([
@@ -1204,7 +1351,7 @@ func build_ground_grid(scale_value: float) -> void:
 			transform_map_scaled(Vector3(coordinate, -extent, 0), scale_value),
 			transform_map_scaled(Vector3(coordinate, extent, 0), scale_value),
 		]
-		if index % GROUND_GRID_MAJOR_INTERVAL == 0:
+		if index * stride % GROUND_GRID_MAJOR_INTERVAL == 0:
 			major.append_array(horizontal)
 		else:
 			minor.append_array(horizontal)
@@ -1214,12 +1361,13 @@ func build_ground_grid(scale_value: float) -> void:
 	add_ground_grid_lines("MapYAxis", y_axis, Color(0.36, 0.76, 0.48, 0.38), -1)
 
 func rebuild_ground_grid() -> void:
-	if ground_grid == null:
+	if ground_grid == null or not camera_grid_visible or not ground_grid.visible or not is_visible_in_tree():
 		return
 	for child in ground_grid.get_children():
 		ground_grid.remove_child(child)
 		child.queue_free()
 	build_ground_grid(map_scale())
+	ground_grid_rebuild_count += 1
 
 func surface_grid_signature() -> Array:
 	if not is_instance_valid(host) or host.session == null:
@@ -1902,6 +2050,7 @@ func _notification(what: int) -> void:
 		if is_visible_in_tree():
 			set_process(true)
 			call_deferred("_sync_suspension")
+			call_deferred("rebuild_ground_grid")
 		else:
 			_sync_suspension()
 	if what in [NOTIFICATION_APPLICATION_FOCUS_OUT, NOTIFICATION_WM_WINDOW_FOCUS_OUT]:

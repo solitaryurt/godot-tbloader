@@ -253,6 +253,31 @@ bool ray_triangle(vec3 origin, vec3 direction, vec3 a, vec3 b, vec3 c, double ma
 	return true;
 }
 
+double projected_segment_distance_squared(vec3 point, vec3 a, vec3 b, int hidden_axis) {
+	const int u = hidden_axis == 0 ? 1 : 0, v = hidden_axis == 2 ? 1 : 2;
+	const double ab_u = component(b, u) - component(a, u), ab_v = component(b, v) - component(a, v);
+	const double ap_u = component(point, u) - component(a, u), ap_v = component(point, v) - component(a, v);
+	const double length_squared = ab_u * ab_u + ab_v * ab_v;
+	const double t = length_squared > 0 ? std::clamp((ap_u * ab_u + ap_v * ab_v) / length_squared, 0.0, 1.0) : 0.0;
+	const double du = ap_u - ab_u * t, dv = ap_v - ab_v * t;
+	return du * du + dv * dv;
+}
+
+bool projected_face_contains(const LMEditorBrushGeometry &geometry, const LMEditorBrushFace &face, vec3 point, int hidden_axis) {
+	if (face.corner_count < 3) return false;
+	const int u = hidden_axis == 0 ? 1 : 0, v = hidden_axis == 2 ? 1 : 2;
+	bool inside = false;
+	for (uint32_t i = 0, previous = face.corner_count - 1; i < face.corner_count; previous = i++) {
+		const vec3 a = geometry.positions[geometry.corners[face.corner_begin + previous].position];
+		const vec3 b = geometry.positions[geometry.corners[face.corner_begin + i].position];
+		if (projected_segment_distance_squared(point, a, b, hidden_axis) <= 1e-18) return true;
+		const double ay = component(a, v), by = component(b, v), py = component(point, v);
+		if ((ay > py) != (by > py) && component(point, u) <
+				(component(b, u) - component(a, u)) * (py - ay) / (by - ay) + component(a, u)) inside = !inside;
+	}
+	return inside;
+}
+
 bool entity_owned(const LMEntity &entity) {
 	for (int i = 0; i < entity.property_count; ++i) {
 		if (!std::strcmp(entity.properties[i].key, "classname")) return std::strcmp(entity.properties[i].value, "worldspawn") != 0;
@@ -336,6 +361,65 @@ PackedInt64Array TBMapDocument::query_brushes_2d(int hidden_axis, Vector3 mins, 
 	}
 	std::sort(matches.begin(), matches.end(), [&](int a, int b) { return index.entries[a].source_order < index.entries[b].source_order; });
 	for (int match : matches) result.push_back(index.entries[match].brush_id);
+	return result;
+}
+
+Dictionary TBMapDocument::query_brush_2d_hit(int hidden_axis, Vector3 point, double tolerance, const PackedInt64Array &hidden_ids,
+		int filter_mask, const PackedInt64Array &selected_ids, bool prefer_selected) const {
+	Dictionary result;
+	if (hidden_axis < 0 || hidden_axis > 2 || !point.is_finite() || !std::isfinite(tolerance) || tolerance < 0 ||
+			filter_mask < 0 || (filter_mask & ~15)) return result;
+	const auto &index = get_spatial_index();
+	if (index.nodes.empty()) return result;
+	const vec3 query_point = native(point);
+	vec3 query_mins = query_point, query_maxs = query_point;
+	for (int axis = 0; axis < 3; ++axis) if (axis != hidden_axis) {
+		if (axis == 0) { query_mins.x -= tolerance; query_maxs.x += tolerance; }
+		else if (axis == 1) { query_mins.y -= tolerance; query_maxs.y += tolerance; }
+		else { query_mins.z -= tolerance; query_maxs.z += tolerance; }
+	}
+	std::unordered_set<int64_t> hidden_lookup, selected_lookup;
+	if (hidden_ids.size() > 8) { hidden_lookup.reserve(hidden_ids.size()); for (int64_t id : hidden_ids) hidden_lookup.insert(id); }
+	if (prefer_selected && selected_ids.size() > 8) { selected_lookup.reserve(selected_ids.size()); for (int64_t id : selected_ids) selected_lookup.insert(id); }
+	auto contains = [](const PackedInt64Array &ids, const std::unordered_set<int64_t> &lookup, int64_t id) {
+		if (!lookup.empty()) return lookup.count(id) != 0;
+		for (int i = 0; i < ids.size(); ++i) if (ids[i] == id) return true;
+		return false;
+	};
+	const double tolerance_squared = tolerance * tolerance;
+	int best = -1, best_selected = -1;
+	std::vector<int> stack;
+	stack.reserve(64);
+	stack.push_back(0);
+	while (!stack.empty()) {
+		const auto &node = index.nodes[stack.back()]; stack.pop_back();
+		if (!overlap_2d(node.bounds, query_mins, query_maxs, hidden_axis)) continue;
+		if (!node.count) { stack.push_back(node.left); stack.push_back(node.right); continue; }
+		for (int i = node.begin; i < node.begin + node.count; ++i) {
+			const int candidate = index.order[i]; const auto &entry = index.entries[candidate];
+			if (!overlap_2d(entry.bounds, query_mins, query_maxs, hidden_axis) || contains(hidden_ids, hidden_lookup, entry.brush_id) ||
+					((filter_mask & 1) && entry.owned) || !entry.geometry) continue;
+			bool all_faces_filtered = entry.brush->face_count > 0;
+			for (int f = 0; f < entry.brush->face_count; ++f) if (!(filter_mask & index.face_filters[entry.face_filter_begin + f])) {
+				all_faces_filtered = false; break;
+			}
+			if (all_faces_filtered) continue;
+			bool hit = false;
+			for (const auto &face : entry.geometry->faces) if (projected_face_contains(*entry.geometry, face, query_point, hidden_axis)) {
+				hit = true; break;
+			}
+			if (!hit) for (const auto &edge : entry.geometry->edges) if (projected_segment_distance_squared(query_point,
+					entry.geometry->positions[edge.a], entry.geometry->positions[edge.b], hidden_axis) < tolerance_squared) {
+				hit = true; break;
+			}
+			if (!hit) continue;
+			if (best < 0 || entry.source_order > index.entries[best].source_order) best = candidate;
+			if (prefer_selected && contains(selected_ids, selected_lookup, entry.brush_id) &&
+					(best_selected < 0 || entry.source_order > index.entries[best_selected].source_order)) best_selected = candidate;
+		}
+	}
+	const int selected = best_selected >= 0 ? best_selected : best;
+	if (selected >= 0) result["brush_id"] = index.entries[selected].brush_id;
 	return result;
 }
 
