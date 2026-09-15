@@ -1098,11 +1098,16 @@ func binding_journey(plugin: EditorPlugin) -> void:
 			for array_index in [Mesh.ARRAY_VERTEX, Mesh.ARRAY_NORMAL, Mesh.ARRAY_TANGENT, Mesh.ARRAY_TEX_UV, Mesh.ARRAY_TEX_UV2, Mesh.ARRAY_INDEX]:
 				checks.check(preview_arrays[array_index] == baked_arrays[array_index],
 					"built camera array %d matches bake mesh %d surface %d" % [array_index, mesh_index, surface])
+	var old_probe_volume := MockSteamAudioProbeVolume.new()
+	old_probe_volume.name = "SteamAudioProbeVolume"
+	loader.add_child(old_probe_volume)
 	var probe_volume := MockSteamAudioProbeVolume.new()
 	plugin.add_steam_audio_probe_volume(loader, probe_volume)
 	checks.check(probe_volume.get_parent() == loader.get_parent() and probe_volume.get_index() + 1 == loader.get_index()
 		and probe_volume.owner == root,
 		"Steam Audio probe volume is the sibling immediately above TBLoader with scene ownership")
+	checks.check(old_probe_volume.get_parent() == null and old_probe_volume.is_queued_for_deletion(),
+		"Steam Audio probe generation removes an existing volume before replacement")
 	var map_bounds: AABB = baked_meshes[0].global_transform * baked_meshes[0].mesh.get_aabb()
 	for mesh_index in range(1, baked_meshes.size()):
 		var mesh_instance: MeshInstance3D = baked_meshes[mesh_index]

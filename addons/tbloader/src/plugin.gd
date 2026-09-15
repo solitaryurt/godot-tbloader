@@ -277,11 +277,16 @@ func add_steam_audio_probe_volume(loader: Node, probe_volume: Node3D = null) -> 
 	if probe_parent == null:
 		push_warning("SteamAudioProbeVolume was not created because the TBLoader has no parent.")
 		return
+	var existing_probe := probe_parent.get_node_or_null("SteamAudioProbeVolume")
+	if existing_probe == null:
+		existing_probe = loader.get_node_or_null("SteamAudioProbeVolume")
+	if existing_probe != null and existing_probe != probe_volume:
+		existing_probe.get_parent().remove_child(existing_probe)
+		existing_probe.queue_free()
 	if probe_volume == null:
 		if not ClassDB.class_exists(&"SteamAudioProbeVolume"):
 			return
-		var existing := probe_parent.get_node_or_null("SteamAudioProbeVolume") as Node3D
-		probe_volume = existing if existing != null and existing.is_class("SteamAudioProbeVolume") else ClassDB.instantiate(&"SteamAudioProbeVolume") as Node3D
+		probe_volume = ClassDB.instantiate(&"SteamAudioProbeVolume") as Node3D
 		if probe_volume == null:
 			push_warning("SteamAudioProbeVolume could not be instantiated.")
 			return
