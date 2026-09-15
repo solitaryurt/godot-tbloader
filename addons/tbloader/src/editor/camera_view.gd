@@ -23,12 +23,21 @@ var preview_world_environment: WorldEnvironment
 var environment_key: Array = []
 var environment_resources: Array[Resource] = []
 var environment_dirty := true
+var inferred_scene_key: Array = []
+var inferred_scene: WeakRef = weakref(null)
+var inferred_loader: WeakRef = weakref(null)
 var built_appearance := false
 var built_preview_key := ""
 var built_preview_context_key := ""
 var built_preview_attempt_key := ""
 var built_preview_valid := false
 var built_appearance_button: Button
+var preview_sunlight_enabled := true
+var preview_environment_enabled := true
+var preview_sunlight_button: Button
+var preview_environment_button: Button
+var camera_grid_visible := true
+var camera_grid_button: Button
 var flying = false
 var rmb_down := false
 var rmb_was_flying := false
@@ -161,9 +170,54 @@ func _ready() -> void:
 	sync_scene_lighting(true)
 	hint = Label.new()
 	hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	hint.position = Vector2(34, 3)
+	hint.position = Vector2(124, 3)
 	add_child(hint)
 	update_hint()
+	var preview_controls: HBoxContainer = host.toolbar_group(self) if is_instance_valid(host) else HBoxContainer.new()
+	var preview_panel := preview_controls.get_parent() as PanelContainer
+	if preview_panel == null:
+		preview_panel = PanelContainer.new()
+		preview_panel.add_child(preview_controls)
+		add_child(preview_panel)
+	preview_panel.name = "CameraPreviewControls"
+	preview_panel.position = Vector2(31, 1)
+	preview_controls.add_theme_constant_override("separation", 0)
+	preview_sunlight_button = Button.new()
+	preview_sunlight_button.name = "PreviewSunlight"
+	preview_sunlight_button.custom_minimum_size = Vector2(28, 28)
+	preview_sunlight_button.icon = host.editor_icon("DirectionalLight3D") if is_instance_valid(host) else null
+	preview_sunlight_button.toggle_mode = true
+	preview_sunlight_button.button_pressed = true
+	preview_sunlight_button.tooltip_text = "Preview sunlight"
+	preview_sunlight_button.accessibility_name = "Preview sunlight"
+	preview_sunlight_button.theme_type_variation = "FlatButton"
+	preview_sunlight_button.toggled.connect(set_preview_sunlight)
+	preview_controls.add_child(preview_sunlight_button)
+	add_toggle_slash(preview_sunlight_button)
+	preview_environment_button = Button.new()
+	preview_environment_button.name = "PreviewWorldEnvironment"
+	preview_environment_button.custom_minimum_size = Vector2(28, 28)
+	preview_environment_button.icon = host.editor_icon("WorldEnvironment") if is_instance_valid(host) else null
+	preview_environment_button.toggle_mode = true
+	preview_environment_button.button_pressed = true
+	preview_environment_button.tooltip_text = "Preview WorldEnvironment"
+	preview_environment_button.accessibility_name = "Preview WorldEnvironment"
+	preview_environment_button.theme_type_variation = "FlatButton"
+	preview_environment_button.toggled.connect(set_preview_environment)
+	preview_controls.add_child(preview_environment_button)
+	add_toggle_slash(preview_environment_button)
+	camera_grid_button = Button.new()
+	camera_grid_button.name = "CameraGrid"
+	camera_grid_button.custom_minimum_size = Vector2(28, 28)
+	camera_grid_button.icon = host.custom_icon("grid_xy") if is_instance_valid(host) else null
+	camera_grid_button.toggle_mode = true
+	camera_grid_button.button_pressed = true
+	camera_grid_button.tooltip_text = "Show camera grid"
+	camera_grid_button.accessibility_name = "Show camera grid"
+	camera_grid_button.theme_type_variation = "FlatButton"
+	camera_grid_button.toggled.connect(set_camera_grid_visible)
+	preview_controls.add_child(camera_grid_button)
+	add_toggle_slash(camera_grid_button)
 	orientation_gizmo = OrientationGizmo.new()
 	orientation_gizmo.name = "CameraOrientation"
 	orientation_gizmo.allow_orbit = true
@@ -261,6 +315,9 @@ func get_camera_state() -> Dictionary:
 		"fly_speed": fly_speed,
 		"camera_fov": camera_fov,
 		"dolly_step": dolly_step,
+		"preview_sunlight": preview_sunlight_enabled,
+		"preview_environment": preview_environment_enabled,
+		"camera_grid_visible": camera_grid_visible,
 	}
 
 func apply_camera_state(state: Dictionary) -> void:
@@ -275,7 +332,53 @@ func apply_camera_state(state: Dictionary) -> void:
 		pitch = camera.rotation.x
 		yaw = camera.rotation.y
 		camera_transform_changed()
+	set_preview_sunlight(bool(state.get("preview_sunlight", preview_sunlight_enabled)))
+	set_preview_environment(bool(state.get("preview_environment", preview_environment_enabled)))
+	set_camera_grid_visible(bool(state.get("camera_grid_visible", camera_grid_visible)))
 	update_hint()
+
+func set_preview_sunlight(enabled: bool) -> void:
+	preview_sunlight_enabled = enabled
+	if preview_sunlight_button != null and preview_sunlight_button.button_pressed != enabled:
+		preview_sunlight_button.set_pressed_no_signal(enabled)
+	if preview_lights != null:
+		preview_lights.visible = enabled
+		if enabled:
+			sync_scene_lighting(true)
+
+func set_preview_environment(enabled: bool) -> void:
+	preview_environment_enabled = enabled
+	if preview_environment_button != null and preview_environment_button.button_pressed != enabled:
+		preview_environment_button.set_pressed_no_signal(enabled)
+	if preview_world_environment == null:
+		return
+	if enabled:
+		environment_dirty = true
+		sync_scene_environment(true)
+	else:
+		disconnect_environment_resources()
+		environment_key.clear()
+		environment_dirty = false
+		preview_world_environment.environment = null
+
+func set_camera_grid_visible(visible: bool) -> void:
+	camera_grid_visible = visible
+	if camera_grid_button != null and camera_grid_button.button_pressed != visible:
+		camera_grid_button.set_pressed_no_signal(visible)
+	if ground_grid != null:
+		ground_grid.visible = visible
+
+func add_toggle_slash(button: Button) -> void:
+	var slash := Line2D.new()
+	slash.name = "DisabledSlash"
+	slash.points = PackedVector2Array([Vector2(5, 23), Vector2(23, 5)])
+	slash.width = 2.0
+	slash.default_color = Color("df5f5f")
+	slash.antialiased = true
+	slash.visible = not button.button_pressed
+	slash.z_index = 1
+	button.add_child(slash)
+	button.toggled.connect(func(enabled: bool): slash.visible = not enabled)
 
 func update_hint() -> void:
 	if hint == null:
@@ -658,11 +761,46 @@ func apply_preview_material(instance: MeshInstance3D, material: Material, catego
 	# ShaderMaterial has no generic alpha parameter; GeometryInstance3D provides the fallback.
 	instance.transparency = 1.0 - host.preview_opacity(category) if category != "opaque" and not material is BaseMaterial3D else 0.0
 
+func preview_scene_context() -> Dictionary:
+	if host == null or host.session == null:
+		return {}
+	var root = host.session.scene.get_ref()
+	var loader = host.session.loader.get_ref()
+	if is_instance_valid(root) and is_instance_valid(loader) and (loader == root or root.is_ancestor_of(loader)):
+		return {"root": root, "loader": loader}
+	if is_instance_valid(root) and not is_instance_valid(loader):
+		return {"root": root, "loader": null}
+	root = EditorInterface.get_edited_scene_root()
+	var map_path: String = host.session.document.get_path()
+	var key: Array = [root.get_instance_id() if is_instance_valid(root) else 0, map_path]
+	if key == inferred_scene_key:
+		root = inferred_scene.get_ref()
+		loader = inferred_loader.get_ref()
+		return {"root": root, "loader": loader} if is_instance_valid(root) and is_instance_valid(loader) else {}
+	inferred_scene_key = key
+	inferred_scene = weakref(null)
+	inferred_loader = weakref(null)
+	if not is_instance_valid(root) or map_path.is_empty():
+		return {}
+	var candidates: Array[Node] = []
+	if root is TBLoader:
+		candidates.append(root)
+	for node in root.find_children("*", "", true, false):
+		if node is TBLoader:
+			candidates.append(node)
+	for candidate in candidates:
+		if host.same_path(candidate.map_resource, map_path):
+			inferred_scene = weakref(root)
+			inferred_loader = weakref(candidate)
+			return {"root": root, "loader": candidate}
+	return {}
+
 func scene_directional_lights() -> Array[DirectionalLight3D]:
 	var result: Array[DirectionalLight3D] = []
-	var root = host.session.scene.get_ref()
-	if not is_instance_valid(root):
+	var context := preview_scene_context()
+	if context.is_empty():
 		return result
+	var root: Node = context.root
 	if root is DirectionalLight3D:
 		result.append(root)
 	for node in root.find_children("*", "DirectionalLight3D", true, false):
@@ -687,20 +825,21 @@ func scene_world_environments(root: Node) -> Array[WorldEnvironment]:
 	return result
 
 func effective_scene_environment() -> Dictionary:
-	if host == null or host.session == null:
+	var scene_context := preview_scene_context()
+	if scene_context.is_empty():
 		return {}
-	var root = host.session.scene.get_ref()
-	var loader = host.session.loader.get_ref()
-	if not is_instance_valid(root) or not is_instance_valid(loader):
-		return {}
-	if loader != root and not root.is_ancestor_of(loader):
-		return {}
-	var world: World3D = loader.get_world_3d()
-	if world == null or world.environment == null:
-		return {}
-	for node in scene_world_environments(root):
-		if node.environment == world.environment:
-			return {"node": node, "environment": world.environment}
+	var root: Node = scene_context.root
+	var loader: Node = scene_context.loader
+	var world: World3D = loader.get_world_3d() if is_instance_valid(loader) else null
+	var environments := scene_world_environments(root)
+	if world != null and world.environment != null:
+		for node in environments:
+			if node.environment == world.environment:
+				return {"node": node, "environment": world.environment}
+	# Editor worlds do not always expose the scene environment through child nodes.
+	for node in environments:
+		if node.environment != null and node.is_inside_tree():
+			return {"node": node, "environment": node.environment}
 	return {}
 
 func resource_property(resource: Resource, property_name: StringName, fallback: Variant = null) -> Variant:
@@ -761,6 +900,8 @@ func environment_resource_changed() -> void:
 func sync_scene_environment(force := false) -> void:
 	if preview_world_environment == null:
 		return
+	if not preview_environment_enabled:
+		return
 	var context := effective_scene_environment()
 	var key := environment_signature(context)
 	if not force and not environment_dirty and key == environment_key:
@@ -772,15 +913,11 @@ func sync_scene_environment(force := false) -> void:
 		preview_world_environment.environment = studio_environment()
 		return
 	var source: Environment = context.environment
-	if source.background_mode != Environment.BG_SKY or source.sky == null:
+	var environment := source.duplicate(false) as Environment
+	if environment == null:
 		disconnect_environment_resources()
 		preview_world_environment.environment = studio_environment()
 		return
-	var environment := studio_environment()
-	for property_name in SKY_ENVIRONMENT_PROPERTIES:
-		var value = resource_property(source, property_name)
-		if value != null:
-			environment.set(property_name, value)
 	preview_world_environment.environment = environment
 	connect_environment_resources(source)
 
@@ -794,6 +931,8 @@ func copied_light_properties(light: DirectionalLight3D) -> Array:
 
 func sync_scene_lighting(force = false) -> void:
 	if preview_lights == null or host == null or host.session == null:
+		return
+	if not preview_sunlight_enabled:
 		return
 	var sources := scene_directional_lights()
 	var key: Array = []
@@ -1214,7 +1353,7 @@ func rebuild_cut_overlay() -> void:
 		marker.position = transform_map(point)
 		marker.material_override = material
 		root.add_child(marker)
-	var plane: Array[Vector3] = host.cut_plane(-1, camera_map_direction())
+	var plane: Array[Vector3] = host.cut_plane()
 	if plane.size() == 3:
 		var lines := ImmediateMesh.new()
 		lines.surface_begin(Mesh.PRIMITIVE_LINES, material)
@@ -1281,8 +1420,8 @@ func begin_camera_left(event: InputEventMouseButton) -> void:
 	if host.tool == "Cut":
 		var cut_hit := face_hit(event.position)
 		if not cut_hit.is_empty():
-			host.add_cut_point(cut_hit.position.snapped(Vector3.ONE * host.session.grid))
-			host.preview_clip(false, -1, camera_map_direction(), self)
+			host.add_cut_point(cut_hit.position.snapped(Vector3.ONE * host.session.grid), -1, camera_map_direction())
+			host.preview_clip(false, self)
 		return
 	if host.tool in ["Vertex", "Edge"]:
 		var component := camera_handle_hit(event.position, host.tool)

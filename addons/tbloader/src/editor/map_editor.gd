@@ -90,6 +90,7 @@ const RECOVERY_VERSION = 2
 var scan_delay = -1.0
 var fallback_entity_pane: Control
 var cut_points: Array[Vector3] = []
+var cut_plane_points: Array[Vector3] = []
 var cut_flip := false
 var mutation_preview_owner: WeakRef = weakref(null)
 var entity_menu: PopupMenu
@@ -417,44 +418,55 @@ func clear_mutation_preview(owner: Object = null) -> void:
 	for camera in cameras:
 		camera.clear_candidate_preview()
 
-func set_cut_points(value: Array) -> void:
+func set_cut_points(value: Array, hidden_axis := -1, camera_direction := Vector3.ZERO) -> void:
 	cut_points.assign(value)
+	rebuild_cut_plane(hidden_axis, camera_direction)
 	refresh_cut_views()
 
-func add_cut_point(point: Vector3) -> void:
-	if cut_points.size() >= 3:
+func add_cut_point(point: Vector3, hidden_axis := -1, camera_direction := Vector3.ZERO) -> void:
+	var max_points := 2 if hidden_axis >= 0 else 3
+	if cut_points.size() >= max_points:
 		cut_points.clear()
 	cut_points.append(point)
+	rebuild_cut_plane(hidden_axis, camera_direction)
 	refresh_cut_views()
 
 func clear_cut_state() -> void:
 	cut_points.clear()
+	cut_plane_points.clear()
 	cut_flip = false
 	clear_mutation_preview()
 	refresh_cut_views()
 
 func flip_clip() -> void:
+	if tool != "Cut" or cut_plane_points.size() != 3:
+		set_status("Place two or three clip points first.")
+		return
 	cut_flip = not cut_flip
-	var focus = get_viewport().gui_get_focus_owner()
-	if graphs.has(focus):
-		preview_clip(false, focus.orientation)
-	else:
-		preview_clip(false, -1, active_camera_direction())
+	preview_clip(false)
 	refresh_cut_views()
 	set_status("Clip side flipped")
 
-func cut_plane(hidden_axis := -1, camera_direction := Vector3.ZERO) -> Array[Vector3]:
+func rebuild_cut_plane(hidden_axis := -1, camera_direction := Vector3.ZERO) -> void:
+	cut_plane_points.clear()
 	if cut_points.size() < 2:
-		return []
+		return
 	var p := cut_points[0]
 	var q := cut_points[1]
 	var r := cut_points[2] if cut_points.size() > 2 else p
 	if cut_points.size() == 2:
 		var extent := maxf(p.distance_to(q), session.grid)
+		var direction := Vector3.ZERO
 		if hidden_axis >= 0:
-			r[hidden_axis] -= extent
+			direction[hidden_axis] = 1.0
 		else:
-			var direction := camera_direction.normalized()
+			var view_direction := camera_direction.normalized()
+			if not view_direction.is_zero_approx():
+				var dominant_axis := 0
+				for candidate in [1, 2]:
+					if absf(view_direction[candidate]) > absf(view_direction[dominant_axis]):
+						dominant_axis = candidate
+				direction[dominant_axis] = signf(view_direction[dominant_axis])
 			if direction.is_zero_approx() or (q - p).normalized().cross(direction).length_squared() < 0.0001:
 				var axis := 0
 				for candidate in [1, 2]:
@@ -462,20 +474,24 @@ func cut_plane(hidden_axis := -1, camera_direction := Vector3.ZERO) -> Array[Vec
 						axis = candidate
 				direction = Vector3.ZERO
 				direction[axis] = 1.0
-			r = p + direction * extent
-	return [p, q, r]
+		r = p - direction * extent
+	if (q - p).cross(r - p).length_squared() >= 0.00000001:
+		cut_plane_points.assign([p, q, r])
 
-func preview_clip(split: bool, hidden_axis := -1, camera_direction := Vector3.ZERO, owner: Object = null) -> bool:
-	var plane := cut_plane(hidden_axis, camera_direction)
+func cut_plane() -> Array[Vector3]:
+	return cut_plane_points.duplicate()
+
+func preview_clip(split: bool, owner: Object = null) -> bool:
+	var plane := cut_plane()
 	if plane.is_empty() or session.selected.is_empty():
 		clear_mutation_preview(owner)
 		return false
 	return broadcast_mutation_preview(session.document.preview_clip_brushes(session.selected,
 		plane[0], plane[1], plane[2], split, cut_flip), owner if owner != null else self)
 
-func apply_clip(split: bool, hidden_axis := -1, camera_direction := Vector3.ZERO) -> void:
-	var plane := cut_plane(hidden_axis, camera_direction)
-	if plane.is_empty():
+func apply_clip(split: bool) -> void:
+	var plane := cut_plane()
+	if tool != "Cut" or plane.is_empty():
 		set_status("Place two or three clip points first.")
 		return
 	var p := plane[0]
@@ -647,7 +663,9 @@ func workspace_state() -> Dictionary:
 		if pane.get_script() == Graph:
 			pane_state.merge({"orientation": pane.orientation, "origin": pane.origin, "zoom": pane.zoom, "view_states": pane.view_states})
 		elif pane.get_script() == Camera and pane.camera != null:
-			pane_state.merge({"camera_transform": pane.camera.transform, "camera_target": pane.orbit_target, "camera_distance": pane.orbit_distance})
+			pane_state.merge({"camera_transform": pane.camera.transform, "camera_target": pane.orbit_target, "camera_distance": pane.orbit_distance,
+				"preview_sunlight": pane.preview_sunlight_enabled, "preview_environment": pane.preview_environment_enabled,
+				"camera_grid_visible": pane.camera_grid_visible})
 		slots.append(pane_state)
 	return {
 		"layout": view_layout,
@@ -706,6 +724,9 @@ func restore_workspace_state(state: Dictionary) -> void:
 				pane.camera.transform = pane_state.camera_transform
 				pane.orbit_target = pane_state.get("camera_target", pane.orbit_target)
 				pane.orbit_distance = float(pane_state.get("camera_distance", pane.orbit_distance))
+				pane.set_preview_sunlight(bool(pane_state.get("preview_sunlight", pane.preview_sunlight_enabled)))
+				pane.set_preview_environment(bool(pane_state.get("preview_environment", pane.preview_environment_enabled)))
+				pane.set_camera_grid_visible(bool(pane_state.get("camera_grid_visible", pane.camera_grid_visible)))
 				pane.camera_transform_changed()
 	refresh()
 
@@ -897,6 +918,8 @@ func refresh_selection() -> void:
 		graph.queue_selection_redraw()
 	for camera in cameras:
 		camera.refresh_selection()
+	if tool == "Cut" and cut_plane_points.size() == 3:
+		preview_clip(false)
 	refresh_status()
 	refresh_uv()
 	sync_material_selection()
@@ -1004,7 +1027,7 @@ func route_key(event: InputEventKey, graph: Control) -> bool:
 			KEY_DELETE, KEY_BACKSPACE:
 				delete_selection()
 			KEY_X:
-				set_tool("Cut")
+				set_tool("Brush" if tool == "Cut" else "Cut")
 			KEY_Q:
 				set_tool("Brush")
 			KEY_R:
@@ -1021,8 +1044,7 @@ func route_key(event: InputEventKey, graph: Control) -> bool:
 			KEY_V:
 				set_tool("Vertex")
 			KEY_ENTER:
-				apply_clip(event.shift_pressed, graph.orientation if is_instance_valid(graph) else -1,
-					Vector3.ZERO if is_instance_valid(graph) else active_camera_direction())
+				apply_clip(event.shift_pressed)
 			KEY_BRACKETLEFT:
 				session.grid = maxf(0.125, session.grid / 2)
 				for view in graphs:

@@ -167,6 +167,39 @@ func run() -> void:
 	checks.check(ui.camera_view.find_children("BuiltAppearance", "Button", true, false).size() == 1
 		and ui.camera_view.built_appearance_button.toggle_mode and not ui.camera_view.built_appearance_button.button_pressed,
 		"camera exposes a local Built appearance toggle which defaults off")
+	checks.check(ui.camera_view.find_children("PreviewSunlight", "Button", true, false).size() == 1
+		and ui.camera_view.find_children("PreviewWorldEnvironment", "Button", true, false).size() == 1
+		and ui.camera_view.find_children("CameraGrid", "Button", true, false).size() == 1
+		and ui.camera_view.preview_sunlight_button.icon != null and ui.camera_view.preview_environment_button.icon != null
+		and ui.camera_view.camera_grid_button.icon != null and ui.camera_view.preview_sunlight_button.button_pressed
+		and ui.camera_view.preview_environment_button.button_pressed and ui.camera_view.camera_grid_button.button_pressed,
+		"camera titlebar exposes enabled sunlight, WorldEnvironment, and grid toggles")
+	checks.check(ui.camera_view.preview_sunlight_button.get_parent() == ui.camera_view.preview_environment_button.get_parent()
+		and ui.camera_view.preview_environment_button.get_parent() == ui.camera_view.camera_grid_button.get_parent()
+		and ui.camera_view.preview_sunlight_button.get_parent().get_parent().name == "CameraPreviewControls"
+		and ui.camera_view.preview_sunlight_button.get_parent().get_parent().position.x >= 30.0
+		and ui.camera_view.preview_sunlight_button.get_index() < ui.camera_view.preview_environment_button.get_index()
+		and ui.camera_view.preview_environment_button.get_index() < ui.camera_view.camera_grid_button.get_index(),
+		"camera preview toggles share a visual button group beside the pane camera button")
+	ui.camera_view.preview_sunlight_button.button_pressed = false
+	checks.check(not ui.camera_view.preview_lights.visible
+		and ui.camera_view.preview_sunlight_button.get_node("DisabledSlash").visible,
+		"disabled sunlight toggle hides preview lighting and displays a slash")
+	ui.camera_view.preview_sunlight_button.button_pressed = true
+	checks.check(ui.camera_view.preview_lights.visible
+		and not ui.camera_view.preview_sunlight_button.get_node("DisabledSlash").visible,
+		"enabled sunlight toggle restores preview lighting and removes its slash")
+	ui.camera_view.preview_environment_button.button_pressed = false
+	checks.check(ui.camera_view.preview_world_environment.environment == null
+		and ui.camera_view.preview_environment_button.get_node("DisabledSlash").visible,
+		"disabled WorldEnvironment toggle detaches the preview and displays a slash")
+	ui.camera_view.preview_environment_button.button_pressed = true
+	checks.check(ui.camera_view.preview_world_environment.environment != null, "WorldEnvironment toggle restores the preview environment")
+	ui.camera_view.camera_grid_button.button_pressed = false
+	checks.check(not ui.camera_view.ground_grid.visible and ui.camera_view.camera_grid_button.get_node("DisabledSlash").visible,
+		"disabled camera grid toggle hides the ground grid and displays a slash")
+	ui.camera_view.camera_grid_button.button_pressed = true
+	checks.check(ui.camera_view.ground_grid.visible, "camera grid toggle restores the ground grid")
 	checks.check(ui.camera_view.preview_world_environment.environment.background_mode == Environment.BG_COLOR,
 		"camera uses its studio environment when the active document has no bound scene sky")
 	checks.check(ui.camera_view.find_child("FrameSelection", true, false).icon != null and ui.graph_a.find_child("FrameSelection", true, false).icon != null,
@@ -894,6 +927,8 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	source_world_environment.environment.ambient_light_source = Environment.AMBIENT_SOURCE_BG
 	source_world_environment.environment.ambient_light_sky_contribution = 0.8
 	source_world_environment.environment.reflected_light_source = Environment.REFLECTION_SOURCE_BG
+	source_world_environment.environment.fog_enabled = true
+	source_world_environment.environment.fog_density = 0.0125
 	source.add_child(source_world_environment)
 	source_world_environment.owner = source
 	for name_value in ["BoundLoader", "OtherLoader"]:
@@ -935,6 +970,24 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	checks.check(preview_environment.ambient_light_source == Environment.AMBIENT_SOURCE_BG, "camera copies sky ambient-light source")
 	checks.check(is_equal_approx(preview_environment.ambient_light_sky_contribution, 0.8), "camera copies sky ambient contribution")
 	checks.check(preview_environment.reflected_light_source == Environment.REFLECTION_SOURCE_BG, "camera copies sky reflected-light source for PBR")
+	checks.check(preview_environment.fog_enabled and is_equal_approx(preview_environment.fog_density, 0.0125),
+		"camera copies the complete scene WorldEnvironment")
+	var bound_loader = ui.session.loader
+	var bound_scene = ui.session.scene
+	ui.session.loader = weakref(null)
+	ui.session.scene = weakref(null)
+	ui.camera_view.inferred_scene_key.clear()
+	var inferred_context: Dictionary = ui.camera_view.preview_scene_context()
+	checks.check(inferred_context.get("root") == root and inferred_context.get("loader") == loader,
+		"camera infers and caches its edited scene from the open map path before formal binding")
+	ui.session.loader = bound_loader
+	ui.session.scene = bound_scene
+	ui.camera_view.preview_environment_button.button_pressed = false
+	checks.check(ui.camera_view.preview_world_environment.environment == null,
+		"WorldEnvironment toggle detaches the camera preview environment")
+	ui.camera_view.preview_environment_button.button_pressed = true
+	checks.check(ui.camera_view.preview_world_environment.environment.sky == source_environment.sky,
+		"WorldEnvironment toggle restores the effective scene sky")
 	var preview_geometry_ids: Array = ui.camera_view.map_geometry.get_children().map(func(node): return node.get_instance_id())
 	ui.camera_view.environment_resource_changed()
 	ui.camera_view.sync_scene_environment()
@@ -2235,7 +2288,15 @@ func grid_draw_batch_regression() -> void:
 		"camera exposes deterministic offscreen candidate state and edge direction indicator")
 	ui.camera_view.clear_candidate_preview()
 	ui.set_tool("Cut")
-	ui.set_cut_points([Vector3.ZERO, Vector3(0, 32, 0)])
+	ui.set_cut_points([Vector3.ZERO, Vector3(0, 32, 0)], 2)
+	checks.check(ui.cut_plane() == [Vector3.ZERO, Vector3(0, 32, 0), Vector3(0, 0, -32)],
+		"two-point grid clip persists its synthesized plane")
+	ui.add_cut_point(Vector3(16, 16, 0), 2)
+	checks.check(ui.cut_points == [Vector3(16, 16, 0)] and ui.cut_plane().is_empty(),
+		"third grid click starts a new two-point clip line")
+	ui.set_cut_points([Vector3.ZERO, Vector3(32, 0, 0)], -1, Vector3(0.1, 0.9, 0.2))
+	checks.check(ui.cut_plane() == [Vector3.ZERO, Vector3(32, 0, 0), Vector3(0, -32, 0)],
+		"two-point camera clip persists a cardinalized view direction")
 	graph.clip_flip = true
 	checks.check(ui.graphs.all(func(item): return item.clip_points == ui.cut_points and item.clip_flip) and ui.camera_view.overlays.has_node("CutOverlay"),
 		"grid and camera panes share one cut point/flip state")

@@ -698,8 +698,8 @@ func begin_left(event: InputEventMouseButton) -> void:
 	shift_drag = event.shift_pressed
 	ctrl_drag = event.ctrl_pressed
 	if host.tool == "Cut":
-		host.add_cut_point(snap_point(anchor))
-		host.preview_clip(false, orientation, Vector3.ZERO, self)
+		host.add_cut_point(snap_point(anchor), orientation)
+		host.preview_clip(false, self)
 		return
 	if host.tool == "Rotate":
 		var id = hit_brush(start, not event.shift_pressed)
@@ -854,7 +854,7 @@ func box_select(end: Vector2) -> void:
 	host.session.select(ids, point_ids)
 
 func apply_clip(split: bool) -> void:
-	host.apply_clip(split, orientation)
+	host.apply_clip(split)
 
 func draw_component_preview(canvas: Control, component: Dictionary, movement: Vector3) -> void:
 	var brush: Dictionary = host.session.brush(component.brush_id)
