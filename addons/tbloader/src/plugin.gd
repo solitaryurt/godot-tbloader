@@ -304,6 +304,7 @@ func add_steam_audio_probe_volume(loader: Node, probe_volume: Node3D = null) -> 
 				break
 			ancestor = ancestor.get_parent()
 		if is_skybox:
+			mesh_instance.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
 			continue
 		var mesh_bounds: AABB = mesh_instance.global_transform * mesh_instance.mesh.get_aabb()
 		map_bounds = map_bounds.merge(mesh_bounds) if has_bounds else mesh_bounds

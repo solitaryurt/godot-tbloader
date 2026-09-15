@@ -1120,6 +1120,8 @@ func binding_journey(plugin: EditorPlugin) -> void:
 		"Steam Audio probe volume is the sibling immediately above TBLoader with scene ownership")
 	checks.check(old_probe_volume.get_parent() == null and old_probe_volume.is_queued_for_deletion(),
 		"Steam Audio probe generation removes an existing volume anywhere in the edited scene before replacement")
+	checks.check(skybox_mesh.gi_mode == GeometryInstance3D.GI_MODE_DISABLED,
+		"skybox meshes are excluded from GI")
 	var map_bounds: AABB = baked_meshes[0].global_transform * baked_meshes[0].mesh.get_aabb()
 	for mesh_index in range(1, baked_meshes.size()):
 		var mesh_instance: MeshInstance3D = baked_meshes[mesh_index]
