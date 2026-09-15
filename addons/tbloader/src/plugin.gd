@@ -273,10 +273,15 @@ func add_steam_audio_geometry(loader: Node) -> void:
 	add_steam_audio_probe_volume(loader)
 
 func add_steam_audio_probe_volume(loader: Node, probe_volume: Node3D = null) -> void:
+	var probe_parent := loader.get_parent()
+	if probe_parent == null:
+		push_warning("SteamAudioProbeVolume was not created because the TBLoader has no parent.")
+		return
 	if probe_volume == null:
 		if not ClassDB.class_exists(&"SteamAudioProbeVolume"):
 			return
-		probe_volume = ClassDB.instantiate(&"SteamAudioProbeVolume") as Node3D
+		var existing := probe_parent.get_node_or_null("SteamAudioProbeVolume") as Node3D
+		probe_volume = existing if existing != null and existing.is_class("SteamAudioProbeVolume") else ClassDB.instantiate(&"SteamAudioProbeVolume") as Node3D
 		if probe_volume == null:
 			push_warning("SteamAudioProbeVolume could not be instantiated.")
 			return
@@ -293,8 +298,12 @@ func add_steam_audio_probe_volume(loader: Node, probe_volume: Node3D = null) -> 
 		push_warning("SteamAudioProbeVolume was not created because the map has no mesh bounds.")
 		return
 	probe_volume.name = "SteamAudioProbeVolume"
-	loader.add_child(probe_volume)
-	probe_volume.owner = loader.owner if loader.owner != null else loader
+	if probe_volume.get_parent() != probe_parent:
+		probe_parent.add_child(probe_volume)
+	var loader_index := loader.get_index()
+	var probe_index := probe_volume.get_index()
+	probe_parent.move_child(probe_volume, loader_index - 1 if probe_index < loader_index else loader_index)
+	probe_volume.owner = loader.owner if loader.owner != null else probe_parent
 	probe_volume.global_transform = Transform3D(Basis.IDENTITY, map_bounds.get_center())
 	probe_volume.set("size", map_bounds.size)
 	probe_volume.set("spacing", 3.0)

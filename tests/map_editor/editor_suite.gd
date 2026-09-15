@@ -1100,8 +1100,9 @@ func binding_journey(plugin: EditorPlugin) -> void:
 					"built camera array %d matches bake mesh %d surface %d" % [array_index, mesh_index, surface])
 	var probe_volume := MockSteamAudioProbeVolume.new()
 	plugin.add_steam_audio_probe_volume(loader, probe_volume)
-	checks.check(probe_volume.get_parent() == loader and probe_volume.owner == root,
-		"Steam Audio probe volume is generated directly under the TBLoader with scene ownership")
+	checks.check(probe_volume.get_parent() == loader.get_parent() and probe_volume.get_index() + 1 == loader.get_index()
+		and probe_volume.owner == root,
+		"Steam Audio probe volume is the sibling immediately above TBLoader with scene ownership")
 	var map_bounds: AABB = baked_meshes[0].global_transform * baked_meshes[0].mesh.get_aabb()
 	for mesh_index in range(1, baked_meshes.size()):
 		var mesh_instance: MeshInstance3D = baked_meshes[mesh_index]
