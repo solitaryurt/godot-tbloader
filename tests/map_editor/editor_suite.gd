@@ -120,11 +120,12 @@ func run() -> void:
 	plugin.show_materials()
 	plugin.hide_bottom_panel()
 	checks.check(ui.slot_types == ["Camera", "Side Grid", "Top Grid", "Front Grid"] and ui.camera_view.get_parent() == ui.view_slots[0] and ui.graph_a.get_parent() == ui.view_slots[2] and not ui.is_ancestor_of(ui.material_workspace), "three-view workspace starts with per-slot camera and grid types")
-	checks.check(plugin.map_control.visible and plugin.map_control.get_child(0).text == "Build Meshes"
-		and plugin.map_control.get_child(2).text.is_empty() and plugin.map_control.get_child(2).icon != null
-		and plugin.map_control.get_child(2).tooltip_text == "Open Radiant Editor",
+	checks.check(plugin.map_control.visible and plugin.map_control.get_child_count() == 2
+		and plugin.map_control.get_child(0).text == "Build Meshes"
+		and plugin.map_control.get_child(1).text.is_empty() and plugin.map_control.get_child(1).icon != null
+		and plugin.map_control.get_child(1).tooltip_text == "Open Radiant Editor",
 		"spatial toolbar uses Build Meshes text and an accessible Radiant icon")
-	checks.check(plugin.map_control.get_child(0).disabled and plugin.map_control.get_child(2).disabled, "spatial loader actions are disabled without a selected TBLoader")
+	checks.check(plugin.map_control.get_child(0).disabled and plugin.map_control.get_child(1).disabled, "spatial loader actions are disabled without a selected TBLoader")
 	var map_toolbar: Control
 	for child in ui.get_children():
 		if child is HFlowContainer:
@@ -840,7 +841,7 @@ func run() -> void:
 	plugin.show_materials()
 	checks.check(plugin.materials_panel == shared_materials_panel and plugin.materials_grid.item_count == 1, "Radiant Map Materials opens the identical rich panel and content")
 	plugin.hide_bottom_panel()
-	checks.check(plugin.map_control.visible and plugin.map_control.get_child(0).disabled and plugin.map_control.get_child(2).disabled, "spatial toolbar remains visible but disabled without a loader selection")
+	checks.check(plugin.map_control.visible and plugin.map_control.get_child(0).disabled and plugin.map_control.get_child(1).disabled, "spatial toolbar remains visible but disabled without a loader selection")
 	# Explicit selection is separate from session binding.
 	var selection_session = ui.session
 	plugin._edit(loader)
@@ -982,7 +983,7 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	selection.clear()
 	selection.add_node(loader)
 	plugin.spatial_selection_changed()
-	checks.check(plugin.map_control.visible and plugin.editing_loader.get_ref() == loader and not plugin.map_control.get_child(0).disabled and not plugin.map_control.get_child(2).disabled, "spatial toolbar enables selected-loader actions promptly")
+	checks.check(plugin.map_control.visible and plugin.editing_loader.get_ref() == loader and not plugin.map_control.get_child(0).disabled and not plugin.map_control.get_child(1).disabled, "spatial toolbar enables selected-loader actions promptly")
 	checks.check(not ui.loader_actions.BindLoader.disabled, "Map Bind enables promptly for the selected TBLoader")
 	ui.bind_selected()
 	checks.check(ui.session.loader.get_ref() == loader and ui.valid_binding() and not ui.loader_actions.DetachLoader.disabled and not ui.loader_actions.UpdateLoaderPath.disabled and not ui.loader_actions.BuildMeshes.disabled and not ui.rebuild_on_save.disabled, "explicit Bind loads the document and enables bound actions")
@@ -1057,11 +1058,11 @@ func binding_journey(plugin: EditorPlugin) -> void:
 		"disabling Built appearance restores authoring geometry")
 	var bound_session = ui.session
 	var bound_session_count = ui.sessions.size()
-	plugin.map_control.get_child(2).pressed.emit()
+	plugin.map_control.get_child(1).pressed.emit()
 	checks.check(ui.session == bound_session and ui.sessions.size() == bound_session_count, "repeated Open in Map Editor activates the bound document without duplicating it")
 	selection.clear()
 	plugin.spatial_selection_changed()
-	checks.check(plugin.map_control.visible and plugin.map_control.get_child(0).disabled and plugin.map_control.get_child(2).disabled and ui.loader_actions.BindLoader.disabled, "clearing spatial selection disables selected-loader actions promptly")
+	checks.check(plugin.map_control.visible and plugin.map_control.get_child(0).disabled and plugin.map_control.get_child(1).disabled and ui.loader_actions.BindLoader.disabled, "clearing spatial selection disables selected-loader actions promptly")
 	selection.add_node(other)
 	plugin.spatial_selection_changed()
 	checks.check(ui.session.loader.get_ref() == loader and plugin.editing_loader.get_ref() == other, "second loader selection preserves explicit binding")
@@ -1100,14 +1101,16 @@ func binding_journey(plugin: EditorPlugin) -> void:
 					"built camera array %d matches bake mesh %d surface %d" % [array_index, mesh_index, surface])
 	var old_probe_volume := MockSteamAudioProbeVolume.new()
 	old_probe_volume.name = "SteamAudioProbeVolume"
-	loader.add_child(old_probe_volume)
+	var old_probe_branch := Node3D.new()
+	root.add_child(old_probe_branch)
+	old_probe_branch.add_child(old_probe_volume)
 	var probe_volume := MockSteamAudioProbeVolume.new()
 	plugin.add_steam_audio_probe_volume(loader, probe_volume)
 	checks.check(probe_volume.get_parent() == loader.get_parent() and probe_volume.get_index() + 1 == loader.get_index()
 		and probe_volume.owner == root,
 		"Steam Audio probe volume is the sibling immediately above TBLoader with scene ownership")
 	checks.check(old_probe_volume.get_parent() == null and old_probe_volume.is_queued_for_deletion(),
-		"Steam Audio probe generation removes an existing volume before replacement")
+		"Steam Audio probe generation removes an existing volume anywhere in the edited scene before replacement")
 	var map_bounds: AABB = baked_meshes[0].global_transform * baked_meshes[0].mesh.get_aabb()
 	for mesh_index in range(1, baked_meshes.size()):
 		var mesh_instance: MeshInstance3D = baked_meshes[mesh_index]

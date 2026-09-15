@@ -44,7 +44,7 @@ func _enter_tree():
 	inspector_plugin = TBLoaderInspector.new(self)
 	add_inspector_plugin(inspector_plugin)
 	materials_panel = create_materials_panel()
-	add_control_to_bottom_panel(materials_panel, "Map Materials")
+	materials_button = add_control_to_bottom_panel(materials_panel, "Map Materials")
 	uv_panel = map_editor.create_material_workspace()
 	add_control_to_bottom_panel(uv_panel, "UV")
 	entities_panel = create_entities_panel()
@@ -184,14 +184,8 @@ func create_map_control() -> Control:
 	button_build_meshes.connect("pressed", Callable(self, "build_meshes"))
 	spatial_actions.BuildMeshes = button_build_meshes
 
-	materials_button = Button.new()
-	materials_button.flat = true
-	materials_button.text = "Map Materials"
-	materials_button.connect("pressed", Callable(self, "show_materials"))
-
 	var ret = HBoxContainer.new()
 	ret.add_child(button_build_meshes)
-	ret.add_child(materials_button)
 	var open_button = Button.new()
 	open_button.flat = true
 	open_button.icon = get_editor_interface().get_base_control().get_theme_icon("GridMap", "EditorIcons")
@@ -211,7 +205,6 @@ func update_spatial_toolbar() -> void:
 	var has_loader: bool = is_instance_valid(loader) and loader is TBLoader and root != null and (root == loader or root.is_ancestor_of(loader))
 	spatial_actions.BuildMeshes.disabled = not has_loader
 	spatial_actions.OpenRadiantEditor.disabled = not has_loader
-	materials_button.disabled = not has_loader
 
 func open_in_map_editor(loader = null) -> void:
 	var target = loader if loader != null else editing_loader.get_ref()
@@ -277,12 +270,18 @@ func add_steam_audio_probe_volume(loader: Node, probe_volume: Node3D = null) -> 
 	if probe_parent == null:
 		push_warning("SteamAudioProbeVolume was not created because the TBLoader has no parent.")
 		return
-	var existing_probe := probe_parent.get_node_or_null("SteamAudioProbeVolume")
-	if existing_probe == null:
-		existing_probe = loader.get_node_or_null("SteamAudioProbeVolume")
-	if existing_probe != null and existing_probe != probe_volume:
-		existing_probe.get_parent().remove_child(existing_probe)
-		existing_probe.queue_free()
+	var scene_root := get_editor_interface().get_edited_scene_root()
+	if scene_root == null or (scene_root != loader and not scene_root.is_ancestor_of(loader)):
+		scene_root = probe_parent
+		while scene_root.get_parent() != null:
+			scene_root = scene_root.get_parent()
+	var scene_nodes: Array[Node] = [scene_root]
+	scene_nodes.append_array(scene_root.find_children("*", "", true, false))
+	for existing_probe in scene_nodes:
+		if existing_probe != probe_volume and (existing_probe.is_class("SteamAudioProbeVolume")
+				or existing_probe.name == "SteamAudioProbeVolume"):
+			existing_probe.get_parent().remove_child(existing_probe)
+			existing_probe.queue_free()
 	if probe_volume == null:
 		if not ClassDB.class_exists(&"SteamAudioProbeVolume"):
 			return
