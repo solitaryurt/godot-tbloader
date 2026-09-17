@@ -3,6 +3,8 @@ Made as an alternative to [Qodot](https://github.com/QodotPlugin/qodot-plugin), 
 same map parsing code using the original [libmap](https://github.com/QodotPlugin/libmap) and a
 modified [C++ port](https://github.com/EIRTeam/qodot/tree/4.0) of it.
 
+TBLoader also includes a Radiant-style `.map` editor built directly into Godot.
+
 # Why not Qodot?
 Qodot is great! It works really well. I initially made TBLoader because I wanted to try several
 different approaches to creating meshes, including creating a bunch of `CSGMesh3D` inside of
@@ -34,8 +36,8 @@ on Project -> Project Settings, and go to the Addons tab. Check the "Enable" box
 
 To build a level's geometry, create a `TBLoader` node in your scene hierarchy. In the properties of
 the node you can select where your `.map` file is located, plus some more useful settings. With the
-node still selected and the 3D view open, you will see a button `Build Meshes` in the toolbar the 3D
-view. Click that button to build the geometry.
+node selected, use `Build Meshes` in the 3D toolbar to build the geometry. The adjacent grid button
+opens the map in the Radiant editor.
 
 # TrenchBroom game config
 The `tb-gameconfig` folder contains a game configuration for this addon. This includes a simple FGD
@@ -97,9 +99,12 @@ $ zip archive.zip libtbloader.macos.universal.dylib
 $ xcrun notarytool submit --keychain-profile "Profile Name" --wait archive.zip
 ```
 
-# Map editor development
+# In-editor map editing
 
-Map editor development: see [the specification](MAP_EDITOR_PRD.md),
+The Map workspace supports brush, face, edge, vertex, clipping, prism, texture, UV, entity,
+undo/redo, built-preview, and scene-baking workflows. `.map` remains the editable source format.
+
+Development details: see [the specification](MAP_EDITOR_PRD.md),
 [implementation contract/progress](MAP_EDITOR_IMPLEMENTATION.md), and
 [first-party test harness](tests/map_editor/README.md).
 
