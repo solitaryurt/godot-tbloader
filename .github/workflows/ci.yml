@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  tests:
+    name: Native and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Native document tests (ASan + UBSan)
+        env:
+          CXX: clang++
+          TB_NATIVE_OUTPUT: ${{ runner.temp }}/tbloader-native-document
+        run: bash tests/map_editor/run_native_tests.sh
+
+      - name: Installer unit tests
+        run: python -m unittest discover -s tests/map_editor -p test_atomic_install.py -v
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-latest
+            command: scons platform=linux target=template_debug arch=x86_64 -j4 && scons platform=linux target=template_release arch=x86_64 -j4
+            artifact: addons/tbloader/bin/libtbloader.linux.*.so
+          - name: windows
+            os: windows-latest
+            command: scons platform=windows target=template_release arch=x86_64 -j4
+            artifact: addons/tbloader/bin/tbloader.windows.x86_64.dll
+          - name: macos
+            os: macos-latest
+            command: scons platform=macos target=template_release arch=universal -j4
+            artifact: addons/tbloader/bin/libtbloader.macos.universal.dylib
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install scons
+        run: python -m pip install scons
+
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build
+        shell: bash
+        run: ${{ matrix.command }}
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: tbloader-${{ matrix.name }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+
+  bundle:
+    name: Bundle addon
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all platform binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: generated-binaries
+          pattern: tbloader-*
+          merge-multiple: true
+
+      - name: Assemble addon
+        run: |
+          cp -rf generated-binaries/. addons/tbloader/bin/
+          rm -f addons/tbloader/bin/*.exp addons/tbloader/bin/*.lib addons/tbloader/bin/*.pdb
+          name="${GITHUB_REF_NAME//\//-}"
+          (cd addons && zip -r "../TBLoader-${name}.zip" tbloader)
+
+      - name: Upload addon zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: tbloader-addon-zip
+          path: TBLoader-*.zip
+          if-no-files-found: error
+
+  release:
+    name: Draft release
+    needs: bundle
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download addon zip
+        uses: actions/download-artifact@v4
+        with:
+          name: tbloader-addon-zip
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: TBLoader-*.zip

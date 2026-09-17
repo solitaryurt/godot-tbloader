@@ -25,10 +25,10 @@ static std::string fixture(const std::string &name) {
 }
 static std::string tetrahedron(const std::string &texture_prefix, int texture_base = -1) {
 	const char *planes[] = {
-		"( 0 0 0 ) ( 0 1 0 ) ( 1 0 0 ) ",
-		"( 0 0 0 ) ( 1 0 0 ) ( 0 0 1 ) ",
-		"( 0 0 0 ) ( 0 0 1 ) ( 0 1 0 ) ",
-		"( 1 0 0 ) ( 0 1 0 ) ( 0 0 1 ) "
+		"( 0 0 0 ) ( 1 0 0 ) ( 0 1 0 ) ",
+		"( 0 0 0 ) ( 0 0 1 ) ( 1 0 0 ) ",
+		"( 0 0 0 ) ( 0 1 0 ) ( 0 0 1 ) ",
+		"( 1 0 0 ) ( 0 0 1 ) ( 0 1 0 ) "
 	};
 	std::string result = "{\n";
 	for (int face = 0; face < 4; ++face) {
