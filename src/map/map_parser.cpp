@@ -6,6 +6,7 @@
 #include <charconv>
 #include <cmath>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <limits>

@@ -1,5 +1,6 @@
 #include "entity.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 bool LMEntity::has_property(const char* key)
