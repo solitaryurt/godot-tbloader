@@ -8,6 +8,7 @@
 #include "map_data.h"
 
 #include <memory>
+#include <vector>
 
 typedef struct LMSurface {
 	int vertex_count = 0;
@@ -20,6 +21,44 @@ typedef struct LMSurfaces {
 	int surface_count = 0;
 	LMSurface *surfaces = NULL;
 } LMSurfaces;
+
+struct LMEntitySurfacePrimitive {
+	bool is_patch = false;
+	int source_index = -1;
+};
+
+struct LMOwnedSurface {
+	std::vector<LMFaceVertex> vertices;
+	std::vector<int> indices;
+
+	LMSurface view();
+	void clear();
+};
+
+struct LMEntitySurfacePlanEntry {
+	LMEntitySurfacePrimitive primitive;
+	int primitive_ordinal = -1;
+	int texture_index = -1;
+	LMOwnedSurface surface;
+};
+
+// Owns entity geometry grouped by source primitive and texture. The plan is
+// gathered once; callers can combine all geometry in legacy order or only an
+// arbitrary primitive list without returning to LMMapData.
+class LMEntitySurfacePlan {
+	std::vector<std::vector<size_t>> texture_entries;
+	std::vector<std::vector<size_t>> brush_entries;
+	std::vector<std::vector<size_t>> patch_entries;
+
+public:
+	std::vector<LMEntitySurfacePlanEntry> entries;
+
+	bool build(const LMMapData &map_data, int entity_index);
+	bool smooth_normals_by_texture();
+	bool regenerate_tangents();
+	bool combine_texture(int texture_index, LMOwnedSurface &output) const;
+	bool combine_texture(int texture_index, const std::vector<LMEntitySurfacePrimitive> &primitives, LMOwnedSurface &output) const;
+};
 
 enum SURFACE_SPLIT_TYPE {
 	SST_NONE,

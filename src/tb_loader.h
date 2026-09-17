@@ -11,6 +11,7 @@
 using namespace godot;
 
 namespace godot { class TBMapDocument; }
+struct BuilderWorldspawnChunkSettings;
 
 class TBLoader : public Node3D
 {
@@ -104,6 +105,16 @@ public:
 	void set_material_texture_path(const String& texture_path);
 	String get_material_texture_path();
 
+	// Worldspawn Chunking
+	void set_worldspawn_chunking_enabled(bool enabled);
+	bool get_worldspawn_chunking_enabled() const;
+	void set_worldspawn_chunk_size(double size);
+	double get_worldspawn_chunk_size() const;
+	void set_worldspawn_chunk_triangles(int64_t triangles);
+	int64_t get_worldspawn_chunk_triangles() const;
+	void set_worldspawn_max_chunks(int64_t max_chunks);
+	int64_t get_worldspawn_max_chunks() const;
+
 	void clear();
 	void build_meshes();
 	Dictionary build_meshes_checked();
@@ -111,5 +122,11 @@ public:
 	Dictionary resolve_material(const String& token);
 
 private:
+	bool get_validated_worldspawn_chunk_settings(BuilderWorldspawnChunkSettings& settings, String& error) const;
+
 	bool m_building = false;
+	bool m_worldspawn_chunking_enabled = false;
+	double m_worldspawn_chunk_size = 24.0;
+	int64_t m_worldspawn_chunk_triangles = 15000;
+	int64_t m_worldspawn_max_chunks = 512;
 };

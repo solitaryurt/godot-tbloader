@@ -81,6 +81,7 @@ var changing_scene_tabs = false
 var changing_document_tabs = false
 var last_standalone: WeakRef = weakref(null)
 var last_bake_action: WeakRef = weakref(null)
+var last_bake_result: Dictionary = {}
 var discard_on_replace: RefCounted
 var history_total_budget = 128 * 1024 * 1024
 var history_session_budget = 64 * 1024 * 1024
@@ -816,6 +817,31 @@ func cancel_interaction() -> void:
 func set_status(text: String) -> void:
 	if notice != null:
 		notice.text = text
+
+func build_feedback(loader: Node, result: Dictionary, prefix: String) -> String:
+	if not bool(loader.get("worldspawn_chunking_enabled")):
+		return prefix
+	var metrics: Dictionary = result.get("value", {}).get("metrics", {})
+	if not metrics.has_all(["visual_chunk_count", "visual_triangle_count"]):
+		return prefix
+	var message := "%s Worldspawn: %d chunks, %d triangles." % [prefix,
+		int(metrics.visual_chunk_count), int(metrics.visual_triangle_count)]
+	var warnings: Array[String] = []
+	var oversized := int(metrics.get("oversized_item_count", 0))
+	var budget_merges := int(metrics.get("budget_merge_count", 0))
+	var forced_merges := int(metrics.get("forced_nonadjacent_merge_count", 0))
+	var unmet := int(metrics.get("chunks_with_unmet_soft_limits", 0))
+	if oversized > 0:
+		warnings.append("%d oversized item%s" % [oversized, "" if oversized == 1 else "s"])
+	if budget_merges > 0:
+		warnings.append("%d budget merge%s" % [budget_merges, "" if budget_merges == 1 else "s"])
+	if forced_merges > 0:
+		warnings.append("%d forced nonadjacent merge%s" % [forced_merges, "" if forced_merges == 1 else "s"])
+	if unmet > 0:
+		warnings.append("%d chunk%s exceed%s soft limits" % [unmet, "" if unmet == 1 else "s", "s" if unmet == 1 else ""])
+	if not warnings.is_empty():
+		message += " Warning: " + "; ".join(warnings) + "."
+	return message
 
 func sync_baked_state(origin: RefCounted) -> Dictionary:
 	var state: Dictionary = origin.get_meta(BAKED_STATE_META, {
@@ -1881,7 +1907,8 @@ func bake_origin(origin: RefCounted) -> bool:
 	if not commit_bake(loader, origin):
 		return false
 	refresh_status()
-	set_status("Map saved and meshes built successfully; save the Godot scene to persist generated nodes.")
+	set_status(build_feedback(loader, last_bake_result,
+		"Map saved and meshes built successfully; save the Godot scene to persist generated nodes."))
 	return true
 
 func commit_bake(loader: Node, origin: RefCounted = null) -> bool:
@@ -1898,6 +1925,7 @@ func commit_bake(loader: Node, origin: RefCounted = null) -> bool:
 		BakeAction.attach_children(loader, before, root)
 		before.free()
 		return false
+	last_bake_result = result
 	plugin.add_steam_audio_geometry(loader)
 	# The checked builder sees an intentionally empty loader, so account for a
 	# previous subtree when deciding whether this scene operation changed.
@@ -1924,7 +1952,7 @@ func commit_bake(loader: Node, origin: RefCounted = null) -> bool:
 		remember_baked_state(origin, token.after_text)
 	EditorInterface.mark_scene_as_unsaved()
 	plugin.refresh_materials()
-	set_status("Selected loader meshes built successfully; scene marked unsaved.")
+	set_status(build_feedback(loader, result, "Selected loader meshes built successfully; scene marked unsaved."))
 	return true
 
 func save_all(defer_bake = false) -> void:

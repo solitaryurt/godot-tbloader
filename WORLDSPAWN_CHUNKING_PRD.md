@@ -29,7 +29,7 @@ meshlets and substantially smaller than the whole map.
 
 Add optional deterministic spatial chunking for built worldspawn visual geometry.
 
-When enabled, a worldspawn container owns a bounded set of spatially coherent `MeshInstance3D`
+When enabled, the literal `worldspawn` container owns a bounded set of spatially coherent `MeshInstance3D`
 children. Godot can cull each child independently. Chunk construction preserves the visual output,
 material resolution, source geometry, lighting options, generated ownership, and transactional bake
 behavior of the existing builder.
@@ -60,7 +60,8 @@ portals, meshlets, streaming, or runtime visibility scripts.
 - Do not use `MultiMesh`; generated chunks contain unique geometry.
 - Do not replace `MeshInstance3D` nodes with direct `RenderingServer` RIDs before profiling proves the
   SceneTree layer is a material cost.
-- Do not change custom point or brush entity output in the first delivery.
+- Do not change `func_group`, `nocollision`, custom point, or custom brush entity output in the first
+  delivery.
 - Do not automatically configure or bake Godot `OccluderInstance3D` resources.
 - Do not promise that chunking improves every open or fully visible scene.
 
@@ -78,7 +79,8 @@ The relevant build path is:
 
 For the actual `worldspawn`, the container is named `Default Layer`. The visual mesh is currently
 named `entity_<entity index>_geometry`. `func_group` and common brush entities may use the same helper,
-but their behavior is outside the first chunking delivery.
+but their behavior is outside the first chunking delivery. The implementation must gate chunking on
+`classname == "worldspawn"`, not merely on entry through `build_worldspawn()`.
 
 The geometry cache already retains brush and patch boundaries in `LMEntityGeometry`. Partitioning
 must operate from that source structure rather than attempting to recover brushes from a globally
@@ -109,7 +111,7 @@ After a successful build, the result value and editor feedback should include:
 - worldspawn visual triangle count;
 - input brush and patch item counts;
 - final visual chunk count;
-- isolated oversized item count;
+- oversized input item count and the subset emitted as isolated singleton chunks;
 - total generated material surface count;
 - largest chunk extent and triangle count;
 - partition and total bake duration when timing is available.
@@ -124,7 +126,7 @@ The partitioner consumes visual geometry items, not Godot nodes.
 
 Each worldspawn brush becomes one item containing:
 
-- stable source entity and brush identity;
+- entity index, source primitive ordinal, primitive kind, and source brush/patch array index;
 - AABB over renderable vertices after skip and collision-only filtering;
 - visual triangle count;
 - set of visual material/texture IDs;
@@ -136,6 +138,10 @@ participate in visual partitioning.
 All item AABBs and partition calculations must use one coordinate space consistently. Public size
 configuration is in Godot units; implementation may partition in map space by multiplying thresholds
 by `inverse_scale`. Entity and loader transforms must not change membership.
+
+Document IDs may be retained as diagnostics, but disk bake currently reparses exported text and must
+not depend on those IDs being populated. Primitive ordinal and source array index are the v1 stable
+ordering keys.
 
 An item is oversized when any AABB extent exceeds `worldspawn_chunk_size` or its triangle count
 exceeds `worldspawn_chunk_triangles`. Oversized is a classification, not an error.
@@ -199,9 +205,10 @@ After top-down partitioning, merge sparse sibling or spatially adjacent chunks w
 - has acceptably low AABB inflation and overlap;
 - does not create excessive material surfaces.
 
-If output still exceeds `worldspawn_max_chunks`, repeatedly perform the lowest-cost adjacent merge
-until the budget is met. Budget merges may exceed soft size and triangle targets and must be counted
-in build diagnostics.
+If output still exceeds `worldspawn_max_chunks`, repeatedly perform the lowest-cost merge until the
+budget is met. The hard budget takes precedence over ordinary adjacency and oversized-isolation rules;
+any forced nonadjacent merge must be counted and reported in build diagnostics. Default partitioning
+must never merge distant oversized items when the hard budget does not require it.
 
 Do not merge nonadjacent chunks merely because they share a material.
 
@@ -212,7 +219,8 @@ For every final chunk:
 - Create one `ArrayMesh` and one `MeshInstance3D`.
 - Gather only items assigned to that chunk.
 - Group geometry by texture/material using the existing material resolution and filtering rules.
-- Preserve positions, indices, UVs, normals, tangents, colors, and future provenance attributes.
+- Preserve all currently emitted arrays: positions, indices, UVs, normals, and tangents. Colors and
+  generated-mesh provenance require separate data-model work if introduced later.
 - Preserve deterministic texture and surface ordering.
 - Apply the effective visual or skybox layer mask exactly as the unchunked path does.
 - Apply smoothing to every applicable chunk, not only the first child of the entity container.
@@ -262,9 +270,12 @@ chunk size is not automatically an appropriate physics broadphase partition size
   with identical visual surfaces and attributes.
 - Selection and picking must continue to resolve generated triangles to source entities, brushes, and
   faces where provenance is supported.
-- Entity-level smoothing properties must apply across all generated chunks. No smoothing calculation
-  may average vertices between spatially separate source geometry merely because they previously
-  shared one mesh.
+- Entity-level smoothing properties must apply across all generated chunks. Smoothing inputs must be
+  computed before partitioning, or from shared source adjacency, so chunk boundaries do not create
+  normal seams. The implementation must not merely smooth each finished chunk independently.
+- Per-chunk UV2 unwrap must be valid and deterministic for identical input and settings. Its packed
+  UV2 arrays are not required to match the legacy entity-wide unwrap because independent atlases
+  necessarily change island packing and may change vertex/index layout.
 - Direct edits to generated chunk nodes are not preserved across rebuilds.
 
 ## 12. Performance Requirements
@@ -314,12 +325,14 @@ alone.
   chunking is enabled.
 - Disabling chunking restores the existing single-mesh path.
 - Every renderable source triangle appears exactly once in chunked output.
-- Visual bounds, materials, UVs, normals, tangents, and render layers match unchunked output.
+- Visual bounds, materials, UV0, normals, tangents, and render layers match unchunked output. UV2 is
+  valid per chunk and matches built-preview output rather than the legacy global atlas layout.
 - Clip-only and skip geometry does not appear in visual chunks.
 - Collision shape geometry, categories, masks, and body types match unchunked output.
 - A large brush does not expand normal chunk bounds and remains isolated when no compact regional
   merge exists.
-- Nearby oversized brushes may merge; distant oversized brushes never enter one global chunk.
+- Nearby oversized brushes may merge; distant oversized brushes merge only when explicit hard-budget
+  enforcement requires a reported forced merge.
 - Chunk output remains at or below `worldspawn_max_chunks`.
 - UV2 unwrap and static GI mode apply to every eligible chunk.
 - Entity smoothing applies correctly to all chunks and never assumes child index zero is the only

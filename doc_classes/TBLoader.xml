@@ -80,5 +80,17 @@
 		<member name="texture_path" type="String" setter="set_texture_path" getter="get_texture_path" default="&quot;res://textures&quot;">
 			The path to use when looking up textures or materials.
 		</member>
+		<member name="worldspawn_chunk_size" type="float" setter="set_worldspawn_chunk_size" getter="get_worldspawn_chunk_size" default="24.0">
+			Soft target for the maximum extent of each worldspawn visual chunk, in Godot units. When chunking is enabled, this must convert to a finite positive map-space extent using [member map_inverse_scale]. Individual source primitives remain indivisible and may exceed this target.
+		</member>
+		<member name="worldspawn_chunk_triangles" type="int" setter="set_worldspawn_chunk_triangles" getter="get_worldspawn_chunk_triangles" default="15000">
+			Soft target for the number of visual triangles in each worldspawn chunk. This must be positive when chunking is enabled. Individual source primitives remain indivisible and may exceed this target.
+		</member>
+		<member name="worldspawn_chunking_enabled" type="bool" setter="set_worldspawn_chunking_enabled" getter="get_worldspawn_chunking_enabled" default="false">
+			If [code]true[/code], partitions visual geometry belonging to the literal [code]worldspawn[/code] entity into deterministic spatial chunks. Collision and other brush entity classes, including [code]func_group[/code], retain their existing construction.
+		</member>
+		<member name="worldspawn_max_chunks" type="int" setter="set_worldspawn_max_chunks" getter="get_worldspawn_max_chunks" default="512">
+			Hard maximum number of visual chunks generated for worldspawn. This must be positive when chunking is enabled; deterministic merges may exceed the soft size and triangle targets to satisfy this budget.
+		</member>
 	</members>
 </class>

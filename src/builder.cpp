@@ -16,6 +16,7 @@
 
 #include <tb_loader.h>
 #include <map_document.h>
+#include <worldspawn_partitioner.h>
 
 #include <map>
 #include <string>
@@ -24,9 +25,15 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
+#include <iomanip>
+#include <sstream>
+#include <tuple>
 #include <vector>
 
 namespace {
+void regenerate_tangents(Array& arrays);
+
 bool normalized_res_path(const String& value, std::vector<std::string>& components, bool reject_navigation)
 {
 	auto utf8 = value.utf8();
@@ -95,15 +102,16 @@ bool safe_classname(const String& classname)
 }
 }
 
-Builder::Builder(TBLoader* loader, Node3D* parent)
+Builder::Builder(TBLoader* loader, Node3D* parent, const BuilderWorldspawnChunkSettings& chunk_settings)
 {
 	m_loader = loader;
 	m_parent = parent ? parent : loader;
 	m_owner = parent ? parent : (loader->get_owner() ? loader->get_owner() : loader);
 	m_map = std::make_shared<LMMapData>();
+	m_worldspawn_chunk_settings = chunk_settings;
 }
 
-Builder::Builder(TBLoader* loader, Node3D* parent, std::shared_ptr<LMMapData> map) : Builder(loader, parent)
+Builder::Builder(TBLoader* loader, Node3D* parent, std::shared_ptr<LMMapData> map, const BuilderWorldspawnChunkSettings& chunk_settings) : Builder(loader, parent, chunk_settings)
 {
 	m_map = std::move(map);
 }
@@ -186,11 +194,30 @@ bool Builder::build_visual_map()
 		if (!m_error.is_empty()) return false;
 		if (!node) continue;
 		if (ent.has_property("name")) node->set_name(ent.get_property("name"));
-		if (node->get_child_count() > 0 && (ent.has_property("smooth") || ent.has_property("soft"))) {
-			smooth_mesh_shading(Object::cast_to<MeshInstance3D>(node->get_child(0)));
-		}
 	}
 	return true;
+}
+
+Dictionary Builder::get_build_metrics() const
+{
+	Dictionary metrics;
+	metrics["source_brush_item_count"] = m_metrics.worldspawn_source_brush_items;
+	metrics["source_patch_item_count"] = m_metrics.worldspawn_source_patch_items;
+	metrics["visual_triangle_count"] = m_metrics.worldspawn_visual_triangles;
+	metrics["visual_chunk_count"] = m_metrics.worldspawn_visual_chunks;
+	metrics["material_surface_count"] = m_metrics.worldspawn_material_surfaces;
+	metrics["largest_chunk_triangles"] = m_metrics.worldspawn_largest_chunk_triangles;
+	metrics["largest_chunk_extent"] = m_metrics.worldspawn_largest_chunk_extent;
+	metrics["collision_triangle_count"] = m_metrics.worldspawn_collision_triangles;
+	metrics["collision_shape_count"] = m_metrics.worldspawn_collision_shapes;
+	metrics["oversized_item_count"] = m_metrics.worldspawn_oversized_input_items;
+	metrics["isolated_oversized_item_count"] = m_metrics.worldspawn_isolated_oversized_items;
+	metrics["sparse_merge_count"] = m_metrics.worldspawn_sparse_merges;
+	metrics["budget_merge_count"] = m_metrics.worldspawn_budget_merges;
+	metrics["forced_nonadjacent_merge_count"] = m_metrics.worldspawn_forced_nonadjacent_merges;
+	metrics["chunks_with_unmet_soft_limits"] = m_metrics.worldspawn_chunks_with_unmet_soft_limits;
+	metrics["partition_duration_ms"] = m_metrics.worldspawn_partition_duration_ms;
+	return metrics;
 }
 
 Node* Builder::build_worldspawn(int idx, LMEntity& ent, bool collision)
@@ -238,6 +265,7 @@ Node* Builder::build_worldspawn(int idx, LMEntity& ent, bool collision)
 Node* Builder::build_entity(int idx, LMEntity& ent, const String& classname, std::map<String, int>& entity_class_count)
 {
 	Node* newEntityNode = nullptr;
+	bool built_custom = false;
 
 	UtilityFunctions::prints("Building entity ", idx, " of class ", classname);
 
@@ -282,6 +310,7 @@ Node* Builder::build_entity(int idx, LMEntity& ent, const String& classname, std
 		if (newEntityNode == nullptr) {
 			// Still no entity? We're building a custom one
 			newEntityNode = build_entity_custom(idx, ent, m_map->entity_geo[idx], classname, entity_class_count);
+			built_custom = true;
 		}
 	}
 
@@ -291,8 +320,8 @@ Node* Builder::build_entity(int idx, LMEntity& ent, const String& classname, std
 			newEntityNode->set_name(ent.get_property("name"));
 		}
 	}
-
-	if (newEntityNode && newEntityNode->get_child_count() > 0 && (ent.has_property("smooth") || ent.has_property("soft"))) {
+	if (built_custom && newEntityNode && ent.primitive_count == 0 &&
+			(ent.has_property("smooth") || ent.has_property("soft")) && newEntityNode->get_child_count() > 0) {
 		smooth_mesh_shading(Object::cast_to<MeshInstance3D>(newEntityNode->get_child(0)));
 	}
 
@@ -716,7 +745,6 @@ void Builder::add_surface_to_mesh(Ref<ArrayMesh>& mesh, LMSurface& surf)
 	arrays[Mesh::ARRAY_NORMAL] = normals;
 	arrays[Mesh::ARRAY_TEX_UV] = uvs;
 	arrays[Mesh::ARRAY_INDEX] = indices;
-
 	// Create mesh
 	int previous_count = mesh->get_surface_count();
 	mesh->add_surface_from_arrays(Mesh::PRIMITIVE_TRIANGLES, arrays);
@@ -737,141 +765,142 @@ bool check_texture(const std::string& texture_name, const std::string& substring
     return texture_upper.find(substring_upper) != std::string::npos;
 }
 
+namespace {
+constexpr char SURFACE_GRASS[] = "GRASS";
+constexpr char SURFACE_DIRT[] = "DIRT";
+constexpr char SURFACE_METAL[] = "METAL";
+constexpr char SURFACE_WOOD[] = "WOOD";
+constexpr char SURFACE_GLASS[] = "GLASS";
+constexpr char SURFACE_WINDOW[] = "WINDOW";
+constexpr char SURFACE_SAND[] = "SAND";
+constexpr char SURFACE_TILE[] = "TILE";
+constexpr char SURFACE_SNOW[] = "SNOW";
+constexpr char SURFACE_VENT[] = "VENT";
+constexpr char SURFACE_WATER[] = "WATER";
+constexpr char SURFACE_DEFAULT[] = "DEFAULT";
+constexpr char SURFACE_PLAYER_CLIP[] = "PLAYER_CLIP";
+constexpr char SURFACE_LADDER_CLIP[] = "LADDER_CLIP";
+constexpr char SURFACE_CUSHION_CLIP[] = "CUSHION_CLIP";
+constexpr char SURFACE_NO_WALL_JUMP[] = "NO_WALL_JUMP";
+
+constexpr const char *collision_surface_types[] = {
+	SURFACE_GRASS, SURFACE_DIRT, SURFACE_METAL, SURFACE_WOOD, SURFACE_GLASS, SURFACE_WINDOW,
+	SURFACE_SAND, SURFACE_TILE, SURFACE_SNOW, SURFACE_VENT, SURFACE_WATER
+};
+constexpr const char *collision_special_types[] = {
+	SURFACE_DEFAULT, SURFACE_PLAYER_CLIP, SURFACE_LADDER_CLIP, SURFACE_CUSHION_CLIP, SURFACE_NO_WALL_JUMP
+};
+}
+
 MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* parent, ColliderType coltype, ColliderShape colshape)
 {
-	// Create instance name based on entity idx
-	String instance_name = String("entity_{0}_geometry").format(Array::make(idx));
-
-	auto mesh_instance = memnew(MeshInstance3D());
-
-	parent->add_child(mesh_instance);
-
-	// Set the layers that the mesh instance will be rendered in
-	mesh_instance->set_layer_mask(m_loader->get_visual_layer_mask());
-
-	if (ent.has_property("skybox")) {
-		mesh_instance->set_layer_mask(m_loader->get_skybox_layer_mask());
+	const bool measure_worldspawn = !strcmp(ent.get_property("classname"), "worldspawn");
+	LMWorldspawnExtractionResult extraction;
+	if (measure_worldspawn) {
+		std::vector<int> visual_exclusions;
+		for (const String &name : {m_loader->get_skip_texture_name(), m_loader->get_clip_texture_name(),
+				m_loader->get_ladder_texture_name(), m_loader->get_cushion_texture_name(),
+				m_loader->get_no_wall_jump_texture_name()}) {
+			auto utf8 = name.utf8();
+			const int texture_index = m_map->map_data_find_texture(utf8.get_data());
+			if (texture_index >= 0) visual_exclusions.push_back(texture_index);
+		}
+		extraction = lm_extract_worldspawn_items(idx, ent, m_map->entity_geo[idx], visual_exclusions);
+		if (extraction) {
+			for (const auto &item : extraction.items) {
+				if (item.kind == LMWorldspawnPrimitiveKind::BRUSH) ++m_metrics.worldspawn_source_brush_items;
+				else ++m_metrics.worldspawn_source_patch_items;
+			}
+		}
 	}
 
+	const String instance_name = String("entity_{0}_geometry").format(Array::make(idx));
+	LMEntitySurfacePlan plan;
+	if (!plan.build(*m_map, idx)) {
+		m_error = "Unable to build entity surface plan";
+		return nullptr;
+	}
+	const bool smooth = ent.has_property("smooth") || ent.has_property("soft");
+	if (smooth && !plan.smooth_normals_by_texture()) {
+		m_error = "Unable to smooth entity surface plan";
+		return nullptr;
+	}
+	if (smooth && !plan.regenerate_tangents()) {
+		m_error = "Unable to regenerate entity surface tangents";
+		return nullptr;
+	}
+	MeshInstance3D *mesh_instance = nullptr;
+	if (measure_worldspawn && m_worldspawn_chunk_settings.enabled) {
+		if (!extraction) {
+			m_error = "Unable to extract worldspawn visual primitives";
+			return nullptr;
+		}
+		const auto partition_started = std::chrono::steady_clock::now();
+		const LMWorldspawnPartitionResult partition = lm_partition_worldspawn_items(extraction.items, m_worldspawn_chunk_settings.partition);
+		m_metrics.worldspawn_partition_duration_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - partition_started).count();
+		if (!partition) {
+			m_error = "Unable to partition worldspawn visual primitives";
+			return nullptr;
+		}
+		m_metrics.worldspawn_oversized_input_items += partition.oversized_item_count;
+		m_metrics.worldspawn_isolated_oversized_items += partition.isolated_oversized_item_count;
+		m_metrics.worldspawn_sparse_merges += partition.sparse_merge_count;
+		m_metrics.worldspawn_budget_merges += partition.budget_merge_count;
+		m_metrics.worldspawn_forced_nonadjacent_merges += partition.forced_nonadjacent_merge_count;
+		m_metrics.worldspawn_chunks_with_unmet_soft_limits += partition.chunks_with_unmet_soft_limits;
+		for (size_t chunk_index = 0; chunk_index < partition.chunks.size(); ++chunk_index) {
+			std::vector<LMEntitySurfacePrimitive> primitives;
+			primitives.reserve(partition.chunks[chunk_index].items.size());
+			for (const LMWorldspawnItem &item : partition.chunks[chunk_index].items) {
+				primitives.push_back({item.kind == LMWorldspawnPrimitiveKind::PATCH, item.source_index});
+			}
+			std::ostringstream ordinal;
+			ordinal << std::setw(4) << std::setfill('0') << chunk_index;
+			const String chunk_name = instance_name + String("_chunk_") + String::utf8(ordinal.str().c_str());
+			MeshInstance3D *chunk = build_entity_visual_mesh(ent, parent, plan, chunk_name, &primitives);
+			if (!mesh_instance) mesh_instance = chunk;
+			if (!m_error.is_empty()) return mesh_instance;
+		}
+	} else {
+		mesh_instance = build_entity_visual_mesh(ent, parent, plan, instance_name);
+		if (!m_error.is_empty()) return mesh_instance;
+	}
+	if (!build_entity_collisions(ent, parent, plan, instance_name, coltype, colshape)) return mesh_instance;
+	return mesh_instance;
+}
+
+MeshInstance3D* Builder::build_entity_visual_mesh(LMEntity& ent, Node3D* parent, const LMEntitySurfacePlan& plan, const String& instance_name,
+		const std::vector<LMEntitySurfacePrimitive>* primitives)
+{
+	auto mesh_instance = memnew(MeshInstance3D());
+	parent->add_child(mesh_instance);
+	mesh_instance->set_layer_mask(ent.has_property("skybox") ? m_loader->get_skybox_layer_mask() : m_loader->get_visual_layer_mask());
 	mesh_instance->set_owner(m_owner);
 	mesh_instance->set_name(instance_name);
-
-	// Create mesh
 	Ref<ArrayMesh> mesh = memnew(ArrayMesh());
-
-	// Create a map to store different types of collision meshes
-	// std::unordered_map<String, Ref<ArrayMesh>> collision_mesh_map;
-
-	std::map<String, Ref<ArrayMesh>> collision_mesh_map;
-
-	const String SURFACE_GRASS = "GRASS";
-	const String SURFACE_DIRT = "DIRT";
-	const String SURFACE_METAL = "METAL";
-	const String SURFACE_WOOD = "WOOD";
-	const String SURFACE_GLASS = "GLASS";
-	const String SURFACE_WINDOW = "WINDOW";
-	const String SURFACE_SAND = "SAND";
-	const String SURFACE_TILE = "TILE";
-	const String SURFACE_SNOW = "SNOW";
-	const String SURFACE_VENT = "VENT";
-	const String SURFACE_WATER = "WATER";
-
-	const String SURFACE_DEFAULT = "DEFAULT";
-	const String SURFACE_PLAYER_CLIP = "PLAYER_CLIP";
-	const String SURFACE_LADDER_CLIP = "LADDER_CLIP";
-	const String SURFACE_CUSHION_CLIP = "CUSHION_CLIP";
-	const String SURFACE_NO_WALL_JUMP = "NO_WALL_JUMP";
-
-	std::vector<String> collision_surface_types = {SURFACE_GRASS, SURFACE_DIRT, SURFACE_METAL, SURFACE_WOOD, SURFACE_GLASS, SURFACE_WINDOW, SURFACE_SAND, SURFACE_TILE, SURFACE_SNOW, SURFACE_VENT, SURFACE_WATER};
-	std::vector<String> collision_special_types = {SURFACE_DEFAULT, SURFACE_PLAYER_CLIP, SURFACE_LADDER_CLIP, SURFACE_CUSHION_CLIP, SURFACE_NO_WALL_JUMP};
-
-	const bool need_collision = coltype != ColliderType::None;
-	if (need_collision) {
-		for (auto& collision_type : collision_surface_types) {
-			collision_mesh_map.emplace(collision_type, memnew(ArrayMesh()));
-		}
-		for (auto& collision_type : collision_special_types) {
-			collision_mesh_map.emplace(collision_type, memnew(ArrayMesh()));
-		}
-	}
-
-	// Example usage: Assign the collision mesh to the map
-	// collision_mesh_map["GRASS"]->add_surface_from_arrays(...);
-
-	// Give mesh to mesh instance
 	mesh_instance->set_mesh(mesh);
+	int64_t visual_triangle_count = 0;
+	LMOwnedSurface owned_surface;
 
-	for (int i = 0; i < m_map->texture_count; i++) {
-		LMTextureData tex = m_map->textures[i];
-
-		// Create material
-		Ref<Material> material;
-
-		// Skip processing a surface when it's using the skip material
-		if (tex.name == m_loader->get_skip_texture_name()) {
-			continue;
+	for (int texture_index = 0; texture_index < m_map->texture_count; ++texture_index) {
+		const LMTextureData &tex = m_map->textures[texture_index];
+		if (tex.name == m_loader->get_skip_texture_name() || tex.name == m_loader->get_clip_texture_name() ||
+				tex.name == m_loader->get_ladder_texture_name() || tex.name == m_loader->get_cushion_texture_name() ||
+				tex.name == m_loader->get_no_wall_jump_texture_name()) continue;
+		const bool combined = primitives ? plan.combine_texture(texture_index, *primitives, owned_surface) : plan.combine_texture(texture_index, owned_surface);
+		if (!combined) {
+			m_error = "Unable to combine entity visual surface";
+			return mesh_instance;
 		}
-
-		// Attempt to load material
-		material = material_from_name(tex.name);
-
-		// Gather surfaces for this texture
-		LMSurfaceGatherer surf_gather(m_map);
-		surf_gather.surface_gatherer_set_entity_index_filter(idx);
-		surf_gather.surface_gatherer_set_texture_filter(tex.name);
-		surf_gather.surface_gatherer_run();
-
-		auto& surfs = surf_gather.out_surfaces;
-		if (surfs.surface_count == 0) {
-			continue;
-		}
-
-		for (int i = 0; i < surfs.surface_count; i++) {
-			auto& surf = surfs.surfaces[i];
-			if (surf.vertex_count == 0) {
-				continue;
-			}
-
-			// Add surface to collision mesh
-			// Skip if the texture specifies that we only want collision (invisible walls)
-			if (tex.name == m_loader->get_clip_texture_name()) {
-				if (need_collision) add_surface_to_mesh(collision_mesh_map[SURFACE_PLAYER_CLIP], surf);
-				continue;
-			} else if (tex.name == m_loader->get_ladder_texture_name()) {
-				if (need_collision) add_surface_to_mesh(collision_mesh_map[SURFACE_LADDER_CLIP], surf);
-				continue;
-			} else if (tex.name == m_loader->get_cushion_texture_name()) {
-				if (need_collision) add_surface_to_mesh(collision_mesh_map[SURFACE_CUSHION_CLIP], surf);
-				continue;
-			} else if (tex.name == m_loader->get_no_wall_jump_texture_name()) {
-				if (need_collision) add_surface_to_mesh(collision_mesh_map[SURFACE_NO_WALL_JUMP], surf);
-				continue;
-			} else if (need_collision) {
-				bool added = false;
-				for (const auto& collision_type : collision_surface_types) {
-					if (check_texture(tex.name, collision_type.utf8().get_data())) {
-						add_surface_to_mesh(collision_mesh_map[collision_type.utf8().get_data()], surf);
-						added = true;
-						break;
-					}
-				}
-				if (!added) {
-					add_surface_to_mesh(collision_mesh_map[SURFACE_DEFAULT], surf);
-				}
-			}
-
-			// Add surface to visual mesh
-			add_surface_to_mesh(mesh, surf);
-			if (!m_error.is_empty()) return mesh_instance;
-
-			// Give mesh material
-			if (material != nullptr) {
-				mesh->surface_set_material(mesh->get_surface_count() - 1, material);
-			}
-		}
+		LMSurface surface = owned_surface.view();
+		if (surface.vertex_count == 0) continue;
+		add_surface_to_mesh(mesh, surface);
+		if (!m_error.is_empty()) return mesh_instance;
+		visual_triangle_count += surface.index_count / 3;
+		Ref<Material> material = material_from_name(tex.name);
+		if (material != nullptr) mesh->surface_set_material(mesh->get_surface_count() - 1, material);
 	}
 
-	// Unwrap UV2's if needed
 	if (m_loader->m_lighting_unwrap_uv2 && mesh->get_surface_count() > 0) {
 		Transform3D transform = mesh_instance->get_transform();
 		for (Node3D* ancestor = parent; ancestor && ancestor != m_parent; ancestor = Object::cast_to<Node3D>(ancestor->get_parent())) {
@@ -884,52 +913,86 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 		}
 		mesh_instance->set_gi_mode(GeometryInstance3D::GI_MODE_STATIC);
 	}
-
-	// Create collisions if needed
-	// iterate the map and add the surfaces to the appropriate mesh
-	for (auto& [key, collision_mesh] : collision_mesh_map) {
-		if (collision_mesh->get_surface_count() > 0) {
-			switch (coltype) {
-			case ColliderType::Mesh:
-				add_collider_from_mesh(parent, collision_mesh, colshape, nullptr);
-				break;
-
-			case ColliderType::Static:
-				CollisionObject3D *container;
-				Color *debug_color = nullptr;
-				if (key == SURFACE_LADDER_CLIP || key == SURFACE_CUSHION_CLIP || key == SURFACE_NO_WALL_JUMP) {
-					container = memnew(Area3D());
-					auto container_area3d = Object::cast_to<Area3D>(container);
-					container_area3d->set_monitorable(true);
-					container_area3d->set_monitoring(false);
-					debug_color = memnew(Color(1.0, 1.0, 0.0, 0.5));
-				} else {
-					container = memnew(StaticBody3D());
-				}
-
-				container->set_name(String(mesh_instance->get_name()) + "_" + key + "_col");
-				if (key == SURFACE_PLAYER_CLIP) {
-					container->set_collision_layer(m_loader->get_clip_collision_layer_mask());
-				} else {
-					container->set_collision_layer(m_loader->get_collision_layer_mask());
-				}
-
-				parent->add_child(container, true);
-				container->set_owner(m_owner);
-				add_collider_from_mesh(container, collision_mesh, colshape, nullptr);
-				break;
-			}
-		}
-	}
-
-	// Remove the empty mesh instances if enabled
 	if (m_loader->m_skip_empty_meshes && mesh->get_surface_count() == 0) {
 		parent->remove_child(mesh_instance);
 		memdelete(mesh_instance);
 		return nullptr;
 	}
-
+	if (String(ent.get_property("classname")) == "worldspawn" && mesh->get_surface_count() > 0) {
+		m_metrics.worldspawn_visual_chunks++;
+		m_metrics.worldspawn_visual_triangles += visual_triangle_count;
+		m_metrics.worldspawn_material_surfaces += mesh->get_surface_count();
+		if (visual_triangle_count > m_metrics.worldspawn_largest_chunk_triangles) {
+			m_metrics.worldspawn_largest_chunk_triangles = visual_triangle_count;
+			m_metrics.worldspawn_largest_chunk_extent = mesh->get_aabb().size;
+		}
+	}
 	return mesh_instance;
+}
+
+bool Builder::build_entity_collisions(LMEntity& ent, Node3D* parent, const LMEntitySurfacePlan& plan, const String& instance_name, ColliderType coltype, ColliderShape colshape)
+{
+	if (coltype == ColliderType::None) return true;
+	std::map<String, Ref<ArrayMesh>> collision_mesh_map;
+	for (const char *type : collision_surface_types) collision_mesh_map.emplace(type, memnew(ArrayMesh()));
+	for (const char *type : collision_special_types) collision_mesh_map.emplace(type, memnew(ArrayMesh()));
+	const bool measure_worldspawn = String(ent.get_property("classname")) == "worldspawn";
+	LMOwnedSurface owned_surface;
+
+	for (int texture_index = 0; texture_index < m_map->texture_count; ++texture_index) {
+		const LMTextureData &tex = m_map->textures[texture_index];
+		if (tex.name == m_loader->get_skip_texture_name()) continue;
+		if (!plan.combine_texture(texture_index, owned_surface)) {
+			m_error = "Unable to combine entity collision surface";
+			return false;
+		}
+		LMSurface surface = owned_surface.view();
+		if (surface.vertex_count == 0) continue;
+		String collision_type;
+		if (tex.name == m_loader->get_clip_texture_name()) collision_type = SURFACE_PLAYER_CLIP;
+		else if (tex.name == m_loader->get_ladder_texture_name()) collision_type = SURFACE_LADDER_CLIP;
+		else if (tex.name == m_loader->get_cushion_texture_name()) collision_type = SURFACE_CUSHION_CLIP;
+		else if (tex.name == m_loader->get_no_wall_jump_texture_name()) collision_type = SURFACE_NO_WALL_JUMP;
+		else {
+			collision_type = SURFACE_DEFAULT;
+			for (const char *type : collision_surface_types) {
+				if (check_texture(tex.name, type)) {
+					collision_type = type;
+					break;
+				}
+			}
+		}
+		add_surface_to_mesh(collision_mesh_map[collision_type], surface);
+		if (!m_error.is_empty()) return false;
+		if (measure_worldspawn) m_metrics.worldspawn_collision_triangles += surface.index_count / 3;
+	}
+
+	for (auto& [key, collision_mesh] : collision_mesh_map) {
+		if (collision_mesh->get_surface_count() == 0) continue;
+		if (coltype == ColliderType::Mesh) {
+			add_collider_from_mesh(parent, collision_mesh, colshape, nullptr);
+			if (!m_error.is_empty()) return false;
+		} else if (coltype == ColliderType::Static) {
+			CollisionObject3D *container;
+			if (key == SURFACE_LADDER_CLIP || key == SURFACE_CUSHION_CLIP || key == SURFACE_NO_WALL_JUMP) {
+				container = memnew(Area3D());
+				auto area = Object::cast_to<Area3D>(container);
+				area->set_monitorable(true);
+				area->set_monitoring(false);
+				// Preserve the legacy default debug color; its custom color was never applied.
+			} else {
+				container = memnew(StaticBody3D());
+			}
+			container->set_name(instance_name + String("_") + key + String("_col"));
+			container->set_collision_layer(key == SURFACE_PLAYER_CLIP ? m_loader->get_clip_collision_layer_mask() : m_loader->get_collision_layer_mask());
+			parent->add_child(container, true);
+			container->set_owner(m_owner);
+			add_collider_from_mesh(container, collision_mesh, colshape, nullptr);
+			if (!m_error.is_empty()) return false;
+		}
+		if (measure_worldspawn) m_metrics.worldspawn_collision_shapes++;
+	}
+	return true;
 }
 
 void Builder::load_and_cache_map_textures()
@@ -1101,77 +1164,25 @@ void regenerate_tangents(Array& arrays)
 }
 }
 
-void Builder::smooth_mesh_shading(MeshInstance3D* mesh_instance) {
-    if (!mesh_instance || !mesh_instance->get_mesh().is_valid()) {
-        return;
-    }
-
-    Ref<Mesh> source_mesh = mesh_instance->get_mesh();
-    Ref<ArrayMesh> array_mesh = source_mesh;
-    if (array_mesh.is_null()) {
-        UtilityFunctions::push_error("Only ArrayMesh is supported.");
-        return;
-    }
-
-    // Create a new ArrayMesh to avoid modifying the original
-    Ref<ArrayMesh> new_mesh = memnew(ArrayMesh);
-
-    // Process each surface
-    for (int surface_idx = 0; surface_idx < array_mesh->get_surface_count(); surface_idx++) {
-        Array arrays = array_mesh->surface_get_arrays(surface_idx);
-        if (arrays.size() <= Mesh::ARRAY_NORMAL) {
-            continue;
-        }
-
-        PackedVector3Array vertices = arrays[Mesh::ARRAY_VERTEX];
-        PackedVector3Array normals = arrays[Mesh::ARRAY_NORMAL];
-
-        // Map to track unique vertices and their normals
-        std::map<Vector3, std::pair<Vector3, std::vector<int>>> vertex_data;
-
-        // First pass: collect all vertex data
-        for (int idx = 0; idx < vertices.size(); idx++) {
-            Vector3 vertex = vertices[idx];
-            Vector3 normal = normals[idx];
-
-            if (vertex_data.find(vertex) == vertex_data.end()) {
-                vertex_data[vertex] = std::make_pair(Vector3(), std::vector<int>());
-            }
-            vertex_data[vertex].first += normal;
-            vertex_data[vertex].second.push_back(idx);
-        }
-
-        // Second pass: average normals and apply
-        PackedVector3Array new_normals = normals.duplicate();
-        for (auto& pair : vertex_data) {
-            // Normalize the accumulated normal
-            Vector3 avg_normal = pair.second.first.normalized();
-
-            // Apply to all instances of this vertex
-            for (int idx : pair.second.second) {
-                new_normals.set(idx, avg_normal);
-            }
-        }
-
-        // Update the arrays with new normals
-        arrays[Mesh::ARRAY_NORMAL] = new_normals;
+void Builder::smooth_mesh_shading(MeshInstance3D* mesh_instance)
+{
+	if (!mesh_instance) return;
+	Ref<ArrayMesh> source_mesh = mesh_instance->get_mesh();
+	if (source_mesh.is_null()) return;
+	Ref<ArrayMesh> smoothed_mesh = memnew(ArrayMesh());
+	for (int surface_index = 0; surface_index < source_mesh->get_surface_count(); ++surface_index) {
+		Array arrays = source_mesh->surface_get_arrays(surface_index);
+		PackedVector3Array vertices = arrays[Mesh::ARRAY_VERTEX];
+		PackedVector3Array normals = arrays[Mesh::ARRAY_NORMAL];
+		if (vertices.size() != normals.size()) return;
+		std::map<Vector3, Vector3> normal_sums;
+		for (int64_t i = 0; i < vertices.size(); ++i) normal_sums[vertices[i]] += normals[i];
+		for (int64_t i = 0; i < vertices.size(); ++i) normals.set(i, normal_sums[vertices[i]].normalized());
+		arrays[Mesh::ARRAY_NORMAL] = normals;
 		regenerate_tangents(arrays);
-
-        // Add surface to new mesh
-        Dictionary format_info;
-        format_info["primitive"] = array_mesh->surface_get_format(surface_idx);
-        new_mesh->add_surface_from_arrays(
-            array_mesh->surface_get_primitive_type(surface_idx),
-            arrays,
-            Array(), // No blend shapes
-            format_info
-        );
-
-        // Copy surface material
-        new_mesh->surface_set_material(surface_idx, 
-            array_mesh->surface_get_material(surface_idx));
-    }
-
-    // Assign new mesh to the MeshInstance3D
-    mesh_instance->set_mesh(new_mesh);
+		smoothed_mesh->add_surface_from_arrays(source_mesh->surface_get_primitive_type(surface_index), arrays);
+		if (smoothed_mesh->get_surface_count() != surface_index + 1) return;
+		smoothed_mesh->surface_set_material(surface_index, source_mesh->surface_get_material(surface_index));
+	}
+	mesh_instance->set_mesh(smoothed_mesh);
 }

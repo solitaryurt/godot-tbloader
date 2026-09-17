@@ -9,6 +9,7 @@ timeout 900s scons platform=linux target=template_debug arch=x86_64 -j2
 python tests/map_editor/run_tests.py --godot "$GODOT_BIN" --suite document
 python tests/map_editor/run_tests.py --godot "$GODOT_BIN" --suite editor
 python tests/map_editor/current_editor_performance_runner.py --godot "$GODOT_BIN" --samples 31
+DISPLAY=:0 python tests/worldspawn_benchmark/renderer_runner.py --godot "$GODOT_BIN" --preflight
 python -m unittest discover -s tests/map_editor -p test_harness.py -v
 # Existing local X11/Xwayland display; no installation or system changes needed:
 DISPLAY=:0 python tests/map_editor/run_tests.py --godot "$GODOT_BIN" --suite ui
@@ -22,13 +23,16 @@ classic/Valve/flags/patch data, malformed/unsupported/UTF-8/limit errors, caller
 queries, stable IDs and epoch-bound snapshots, dirty baseline undo/redo, atomic-save
 failure cleanup, external changes/removal and path aliases. It also retains the real
 **TBLoader** cube bake, coordinate conversion/bounds, twelve triangles, finite UVs,
-normals, collision and imported texture checks, and adds empty-worldspawn bake.
+normals, collision and imported texture checks, and covers empty and chunked worldspawn
+bakes, policy metrics, stable rebuilds, patches, hidden/special geometry, smoothing,
+UV2/GI, materials, ownership, packing, and transactional failure retention.
 
 `editor` runs an actual `@tool EditorPlugin` inside `--editor`: real graph handlers,
 component groups, clip/flip/split, all 21 prism combinations, material/UV and entity
 editing, persistence, originating-session global history, background dirty refresh
 isolation, material-only camera chunk reuse, scene bake history, Bake on save default
-off, and addon disable/re-enable with released controls.
+off, chunked Built/bake appearance parity and feedback, and addon disable/re-enable
+with released controls.
 
 `ui` runs the editor acceptance with a display, adding rendered intermediate
 face/edge/vertex/split captures and a main-screen screenshot. It requires a display
@@ -44,7 +48,8 @@ Here X11 `:0` works; Wayland `wayland-1` produces engine GLES3 errors/crash.
 
 See [window-input protocol, results and timing limitations](window_input.md),
 [CURRENT-editor Tohunga performance and memory baseline](current_editor_performance.md),
-[native performance baseline](../../MAP_EDITOR_PERFORMANCE.md), and
+[native performance baseline](../../MAP_EDITOR_PERFORMANCE.md),
+[worldspawn renderer/native benchmark protocol](../worldspawn_benchmark/README.md), and
 [opening the actual Map tab / retained demo](../../MAP_EDITOR_UI_IMPLEMENTATION.md#open-the-actual-map-editor).
 P0/P1 functional implementation is delivered on the pinned Linux debug addon;
 P2, general three-point clipping, and the explicitly listed lifecycle/platform
@@ -96,17 +101,20 @@ python tests/map_editor/run_tests.py --godot "$GODOT_BIN" --suite document --pro
 The document suite also composes interleaved brush/patch input and malformed cases
 from these fixtures. Test file writes only target disposable `user://` paths.
 
-## Native ownership instrumentation
+## Native instrumentation
 
 From repository root, with Clang installed and `/tmp/opencode` available:
 
 ```bash
 timeout 180s bash tests/map_editor/run_native_tests.sh > /tmp/opencode/tbloader-phase1-native.log 2>&1
+timeout 180s bash tests/map_editor/run_native_tests.sh worldspawn
+timeout 180s bash tests/map_editor/run_native_tests.sh document
 rg 'error:|ERROR|runtime error|Assertion|PASS|SUMMARY' /tmp/opencode/tbloader-phase1-native.log
 ```
 
-The script compiles **production** parser/writer/model/geometry sources in standalone
-mode with ASan, UBSan and leak detection, then requires successful native assertions.
+The script runs both suites by default; `worldspawn` or `document` selects one. It
+compiles **production** parser/writer/model/geometry sources in standalone mode with
+ASan, UBSan and leak detection, then requires successful native assertions.
 There are no sanitizer suppressions or engine dependencies in this target. It checks
 field-by-field semantic equality, patch tessellation subdivisions, every fixture's
 truncation prefixes, a deterministic byte mutation corpus, repeated load/rebuild/

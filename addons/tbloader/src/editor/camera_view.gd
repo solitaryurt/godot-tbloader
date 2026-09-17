@@ -632,7 +632,7 @@ func visual_loader_signature(loader: Object) -> String:
 		var property_name: String = property.name
 		if not (property_name.begins_with("map_") or property_name.begins_with("lighting_")
 				or property_name.begins_with("option_") or property_name.begins_with("entity_")
-				or property_name.begins_with("texture_")):
+				or property_name.begins_with("texture_") or property_name.begins_with("worldspawn_")):
 			continue
 		var value = loader.get(property_name)
 		values.append([property_name, value.get_instance_id() if value is Object and is_instance_valid(value) else value])

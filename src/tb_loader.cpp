@@ -5,6 +5,7 @@
 
 #include <builder.h>
 #include <map_document.h>
+#include <chrono>
 #include <cmath>
 #include <vector>
 
@@ -59,6 +60,15 @@ void TBLoader::_bind_methods()
 	ClassDB::bind_method(D_METHOD("set_material_texture_path", "texture_path"), &TBLoader::set_material_texture_path);
 	ClassDB::bind_method(D_METHOD("get_material_texture_path"), &TBLoader::get_material_texture_path);
 
+	ClassDB::bind_method(D_METHOD("set_worldspawn_chunking_enabled", "enabled"), &TBLoader::set_worldspawn_chunking_enabled);
+	ClassDB::bind_method(D_METHOD("get_worldspawn_chunking_enabled"), &TBLoader::get_worldspawn_chunking_enabled);
+	ClassDB::bind_method(D_METHOD("set_worldspawn_chunk_size", "size"), &TBLoader::set_worldspawn_chunk_size);
+	ClassDB::bind_method(D_METHOD("get_worldspawn_chunk_size"), &TBLoader::get_worldspawn_chunk_size);
+	ClassDB::bind_method(D_METHOD("set_worldspawn_chunk_triangles", "triangles"), &TBLoader::set_worldspawn_chunk_triangles);
+	ClassDB::bind_method(D_METHOD("get_worldspawn_chunk_triangles"), &TBLoader::get_worldspawn_chunk_triangles);
+	ClassDB::bind_method(D_METHOD("set_worldspawn_max_chunks", "max_chunks"), &TBLoader::set_worldspawn_max_chunks);
+	ClassDB::bind_method(D_METHOD("get_worldspawn_max_chunks"), &TBLoader::get_worldspawn_max_chunks);
+
 	ClassDB::bind_method(D_METHOD("clear"), &TBLoader::clear);
 	ClassDB::bind_method(D_METHOD("build_meshes"), &TBLoader::build_meshes);
 	ClassDB::bind_method(D_METHOD("build_meshes_checked"), &TBLoader::build_meshes_checked);
@@ -97,6 +107,12 @@ void TBLoader::_bind_methods()
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "texture_path", PROPERTY_HINT_DIR, "Textures Path"), "set_texture_path", "get_texture_path");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "texture_material_template", PROPERTY_HINT_RESOURCE_TYPE, "Material"), "set_material_template", "get_material_template");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "texture_material_texture_path", PROPERTY_HINT_NONE, "Material Texture Property Path"), "set_material_texture_path", "get_material_texture_path");
+
+	ADD_GROUP("Worldspawn Chunking", "worldspawn_");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "worldspawn_chunking_enabled"), "set_worldspawn_chunking_enabled", "get_worldspawn_chunking_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "worldspawn_chunk_size", PROPERTY_HINT_RANGE, "0.001,1024,0.001,or_greater,suffix:m"), "set_worldspawn_chunk_size", "get_worldspawn_chunk_size");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "worldspawn_chunk_triangles", PROPERTY_HINT_RANGE, "1,1000000,1,or_greater"), "set_worldspawn_chunk_triangles", "get_worldspawn_chunk_triangles");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "worldspawn_max_chunks", PROPERTY_HINT_RANGE, "1,4096,1,or_greater"), "set_worldspawn_max_chunks", "get_worldspawn_max_chunks");
 }
 
 TBLoader::TBLoader()
@@ -105,6 +121,46 @@ TBLoader::TBLoader()
 
 TBLoader::~TBLoader()
 {
+}
+
+void TBLoader::set_worldspawn_chunking_enabled(bool enabled)
+{
+	m_worldspawn_chunking_enabled = enabled;
+}
+
+bool TBLoader::get_worldspawn_chunking_enabled() const
+{
+	return m_worldspawn_chunking_enabled;
+}
+
+void TBLoader::set_worldspawn_chunk_size(double size)
+{
+	m_worldspawn_chunk_size = size;
+}
+
+double TBLoader::get_worldspawn_chunk_size() const
+{
+	return m_worldspawn_chunk_size;
+}
+
+void TBLoader::set_worldspawn_chunk_triangles(int64_t triangles)
+{
+	m_worldspawn_chunk_triangles = triangles;
+}
+
+int64_t TBLoader::get_worldspawn_chunk_triangles() const
+{
+	return m_worldspawn_chunk_triangles;
+}
+
+void TBLoader::set_worldspawn_max_chunks(int64_t max_chunks)
+{
+	m_worldspawn_max_chunks = max_chunks;
+}
+
+int64_t TBLoader::get_worldspawn_max_chunks() const
+{
+	return m_worldspawn_max_chunks;
 }
 
 void TBLoader::set_map(const String& map)
@@ -332,6 +388,26 @@ String TBLoader::get_material_texture_path()
 	return m_material_texture_path;
 }
 
+bool TBLoader::get_validated_worldspawn_chunk_settings(BuilderWorldspawnChunkSettings& settings, String& error) const
+{
+	settings.enabled = m_worldspawn_chunking_enabled;
+	if (!settings.enabled) return true;
+
+	const double map_extent = m_worldspawn_chunk_size * static_cast<double>(m_inverse_scale);
+	if (!std::isfinite(m_worldspawn_chunk_size) || m_worldspawn_chunk_size <= 0.0 || !std::isfinite(map_extent) || map_extent <= 0.0) {
+		error = "Worldspawn chunk size must convert to a finite positive map-space extent";
+		return false;
+	}
+	if (m_worldspawn_chunk_triangles <= 0 || m_worldspawn_max_chunks <= 0) {
+		error = "Worldspawn chunk triangle target and maximum chunk count must be positive";
+		return false;
+	}
+	settings.partition.target_extent = map_extent;
+	settings.partition.target_triangles = m_worldspawn_chunk_triangles;
+	settings.partition.max_chunks = m_worldspawn_max_chunks;
+	return true;
+}
+
 void TBLoader::clear()
 {
 	while (get_child_count() > 0) {
@@ -373,9 +449,15 @@ Dictionary TBLoader::build_meshes_checked()
 	if (m_inverse_scale <= 0 || (m_lighting_unwrap_uv2 && (!std::isfinite(m_lighting_unwrap_texel_size) || m_lighting_unwrap_texel_size <= 0))) {
 		return build_failure("INVALID_ARGUMENT", "Inverse scale and lightmap texel size must be positive and finite", m_map_path, "build_meshes_checked");
 	}
+	BuilderWorldspawnChunkSettings chunk_settings;
+	String settings_error;
+	if (!get_validated_worldspawn_chunk_settings(chunk_settings, settings_error)) {
+		return build_failure("INVALID_ARGUMENT", settings_error, m_map_path, "build_meshes_checked");
+	}
 	m_building = true;
+	auto build_started = std::chrono::steady_clock::now();
 	auto staging = memnew(Node3D());
-	Builder builder(this, staging);
+	Builder builder(this, staging, chunk_settings);
 	Dictionary result = builder.load_map(m_map_path);
 	if (!bool(result["ok"])) {
 		Dictionary error = result["error"];
@@ -403,6 +485,9 @@ Dictionary TBLoader::build_meshes_checked()
 		Dictionary value;
 		value["path"] = m_map_path;
 		value["child_count"] = count;
+		Dictionary metrics = builder.get_build_metrics();
+		metrics["total_build_duration_ms"] = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - build_started).count();
+		value["metrics"] = metrics;
 		result["ok"] = true; result["changed"] = changed; result["value"] = value; result["error"] = Dictionary();
 	}
 	memdelete(staging);
@@ -419,9 +504,14 @@ Dictionary TBLoader::build_visual_preview_checked(const Ref<TBMapDocument>& docu
 	if (m_inverse_scale <= 0 || (m_lighting_unwrap_uv2 && (!std::isfinite(m_lighting_unwrap_texel_size) || m_lighting_unwrap_texel_size <= 0))) {
 		return build_failure("INVALID_ARGUMENT", "Inverse scale and lightmap texel size must be positive and finite", path, operation);
 	}
+	BuilderWorldspawnChunkSettings chunk_settings;
+	String settings_error;
+	if (!get_validated_worldspawn_chunk_settings(chunk_settings, settings_error)) {
+		return build_failure("INVALID_ARGUMENT", settings_error, path, operation);
+	}
 	m_building = true;
 	auto staging = memnew(Node3D());
-	Builder builder(this, staging, document->clone_map_for_build());
+	Builder builder(this, staging, document->clone_map_for_build(), chunk_settings);
 	Dictionary result;
 	if (!builder.prepare_map_data()) {
 		result = build_failure("RESOURCE_LOAD_FAILED", builder.m_error, path, operation);

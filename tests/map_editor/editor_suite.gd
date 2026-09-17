@@ -146,6 +146,25 @@ func run() -> void:
 	checks.check(ui.rebuild_on_save is Button and ui.rebuild_on_save.toggle_mode and ui.rebuild_on_save.icon != null and ui.rebuild_on_save.tooltip_text == "Build meshes on save", "Build meshes on save is a compact independent icon toggle")
 	checks.check(ui.loader_actions.BindLoader.disabled and ui.loader_actions.DetachLoader.disabled and ui.loader_actions.UpdateLoaderPath.disabled and ui.loader_actions.BuildMeshes.disabled and ui.rebuild_on_save.disabled, "unselected and unbound loader actions start disabled")
 	checks.check(ui.loader_actions.BuildMeshes.tooltip_text == "Build Meshes from saved map" and ui.loader_actions.BuildMeshes.accessibility_name == "Build Meshes from saved map", "map toolbar exposes Build Meshes terminology to tooltip and accessibility APIs")
+	var feedback_loader = ClassDB.instantiate("TBLoader")
+	var feedback_result := {"value": {"metrics": {"visual_chunk_count": 7, "visual_triangle_count": 321,
+		"oversized_item_count": 2, "isolated_oversized_item_count": 1, "budget_merge_count": 3,
+		"forced_nonadjacent_merge_count": 1, "chunks_with_unmet_soft_limits": 4}}}
+	checks.check(ui.build_feedback(feedback_loader, feedback_result, "Built.") == "Built.",
+		"disabled chunking keeps build feedback concise and unchanged")
+	feedback_loader.worldspawn_chunking_enabled = true
+	checks.check(ui.build_feedback(feedback_loader, feedback_result, "Built.") ==
+		"Built. Worldspawn: 7 chunks, 321 triangles. Warning: 2 oversized items; 3 budget merges; 1 forced nonadjacent merge; 4 chunks exceed soft limits.",
+		"enabled chunking reports spatial counts and every forced-policy warning")
+	feedback_result.value.metrics.oversized_item_count = 0
+	feedback_result.value.metrics.isolated_oversized_item_count = 0
+	feedback_result.value.metrics.budget_merge_count = 0
+	feedback_result.value.metrics.forced_nonadjacent_merge_count = 0
+	feedback_result.value.metrics.chunks_with_unmet_soft_limits = 0
+	checks.check(ui.build_feedback(feedback_loader, feedback_result, "Built.") ==
+		"Built. Worldspawn: 7 chunks, 321 triangles.",
+		"healthy chunking feedback omits an empty warning section")
+	feedback_loader.free()
 	checks.check(ui.view_layout == 3 and ui.visible_graphs().size() == 2 and not ui.view_slots[1].visible, "three-view layout changes visibility without changing pane types")
 	ui.apply_layout(2)
 	ui.set_slot_type(2, "Camera")
@@ -1021,6 +1040,8 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	checks.check(ui.camera_view.map_geometry.get_children().map(func(node): return node.get_instance_id()) == preview_geometry_ids,
 		"environment refresh leaves camera geometry untouched")
 	checks.check(loader.has_method("build_visual_preview_checked"), "native checked visual preview is available")
+	loader.worldspawn_chunking_enabled = true
+	loader.worldspawn_chunk_triangles = 12
 	ui.camera_view.set_built_appearance(true)
 	checks.check(ui.camera_view.built_preview_valid and ui.camera_view.built_geometry.visible and not ui.camera_view.map_geometry.visible,
 		"Built appearance atomically replaces authoring visuals after a successful build")
@@ -1037,6 +1058,15 @@ func binding_journey(plugin: EditorPlugin) -> void:
 				return false
 		return true), "Built appearance supplies tangent-space data for PBR materials")
 	var built_ids: Array = built_meshes.map(func(node): return node.get_instance_id())
+	var worldspawn_signature: String = ui.camera_view.visual_loader_signature(loader)
+	var worldspawn_preview_key: String = ui.camera_view.built_preview_key
+	loader.worldspawn_chunk_size += 1.0
+	ui.camera_view.refresh_built_appearance()
+	built_meshes = ui.camera_view.built_geometry.find_children("*", "MeshInstance3D", true, false)
+	built_ids = built_meshes.map(func(node): return node.get_instance_id())
+	checks.check(ui.camera_view.visual_loader_signature(loader) != worldspawn_signature
+		and ui.camera_view.built_preview_key != worldspawn_preview_key and ui.camera_view.built_preview_valid,
+		"worldspawn property changes invalidate and successfully rebuild Built appearance")
 	var invalid_preview: Dictionary = loader.build_visual_preview_checked(null, ui.camera_view.built_geometry)
 	checks.check(not invalid_preview.ok and invalid_preview.error.code == "INVALID_ARGUMENT"
 		and ui.camera_view.built_geometry.find_children("*", "MeshInstance3D", true, false).map(func(node): return node.get_instance_id()) == built_ids,
@@ -1080,6 +1110,9 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	ui.session.hide_selection(false)
 	var baked: bool = ui.bake()
 	checks.check(baked, "bound saved source checked bake succeeds: " + ui.notice.text)
+	checks.check(ui.notice.text.contains("Worldspawn:") and ui.notice.text.contains("chunks,")
+		and ui.notice.text.contains("triangles."),
+		"Map Editor bake surfaces successful spatial chunk metrics")
 	checks.check(not loader.has_node("PreviousOutput") and other.has_node("PreviousOutput"), "bake touches only bound loader")
 	checks.check(ui.session.baked_text == text() and ui.status.text.contains("meshes current"), "saved/build state independently reported")
 	checks.check(not loader.find_children("*", "MeshInstance3D", true, false).is_empty(), "real baked mesh output")
@@ -1205,6 +1238,7 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	plugin._edit(other)
 	plugin.build_meshes()
 	checks.check(not other.find_children("*", "MeshInstance3D", true, false).is_empty(), "legacy Build Meshes uses explicitly selected loader")
+	checks.check(not ui.notice.text.contains("Worldspawn:"), "spatial Build Meshes stays quiet about chunking when it is disabled")
 	checks.check(scene_history.undo(), "legacy Build Meshes also uses scene undo history")
 	checks.check(ui.open_path("res://journey-bound.map"), "standalone scene-switch fixture opens")
 	ui.detach()

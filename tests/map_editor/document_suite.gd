@@ -29,6 +29,9 @@ func run() -> void:
 	test_vertex_hull_metadata_and_degeneracy()
 	test_shallow_vertex_intersections()
 	await test_checked_bake()
+	test_collision_surface_plan()
+	await test_custom_point_smoothing()
+	await test_worldspawn_chunking()
 	# Preserve the real bake regression gate alongside native document assertions.
 	var loader = ClassDB.instantiate("TBLoader")
 	checks.check(loader is Node3D, "TBLoader inherits Node3D")
@@ -696,6 +699,15 @@ func write_text(path: String, text: String) -> void:
 		file.store_string(text)
 		file.close()
 
+func baked_visual_signature(loader: Node, pattern := "*") -> Array:
+	var signature: Array = []
+	for instance in loader.find_children(pattern, "MeshInstance3D", true, false):
+		var surfaces: Array = []
+		for surface in instance.mesh.get_surface_count():
+			surfaces.append([instance.mesh.surface_get_arrays(surface), instance.mesh.surface_get_material(surface)])
+		signature.append([loader.get_path_to(instance), instance.get_index(), instance.layers, instance.gi_mode, surfaces])
+	return signature
+
 func test_checked_bake() -> void:
 	var scene = Node3D.new()
 	scene.name = "BakeScene"
@@ -708,7 +720,14 @@ func test_checked_bake() -> void:
 	if not expect_ok(result, "checked initial bake"):
 		scene.free()
 		return
-	checks.check(result.changed and result.value == {"path": loader.map_resource, "child_count": 1}, "checked bake success value")
+	checks.check(result.changed and result.value.path == loader.map_resource and result.value.child_count == 1, "checked bake success value")
+	var metrics: Dictionary = result.value.metrics
+	checks.check(metrics.has_all(["source_brush_item_count", "source_patch_item_count", "visual_triangle_count", "visual_chunk_count", "material_surface_count", "largest_chunk_triangles", "largest_chunk_extent", "collision_triangle_count", "collision_shape_count", "oversized_item_count", "isolated_oversized_item_count", "sparse_merge_count", "budget_merge_count", "forced_nonadjacent_merge_count", "chunks_with_unmet_soft_limits", "partition_duration_ms", "total_build_duration_ms"]), "checked bake reports chunking baseline metrics")
+	checks.check(metrics.source_brush_item_count == 1 and metrics.source_patch_item_count == 0, "classic cube reports source geometry items")
+	checks.check(metrics.visual_triangle_count == 12 and metrics.visual_chunk_count == 1 and metrics.material_surface_count == 1, "classic cube reports one twelve-triangle visual chunk")
+	checks.check(metrics.largest_chunk_triangles == 12 and metrics.largest_chunk_extent is Vector3 and metrics.largest_chunk_extent.is_finite() and metrics.largest_chunk_extent != Vector3.ZERO, "classic cube reports finite visual chunk bounds")
+	checks.check(metrics.collision_triangle_count == 12 and metrics.collision_shape_count == 1, "classic cube reports collision baseline")
+	checks.check(metrics.oversized_item_count == 0 and metrics.isolated_oversized_item_count == 0 and metrics.partition_duration_ms == 0.0 and metrics.total_build_duration_ms >= 0.0, "unchunked bake reports zero partition work")
 	var old_children = loader.get_children()
 	var old_mesh = loader.find_children("*", "MeshInstance3D", true, false)[0]
 	var old_resource = old_mesh.mesh
@@ -740,6 +759,7 @@ func test_checked_bake() -> void:
 	loader.map_resource = "res://fixtures/classic_cube.map"
 	expect_ok(loader.build_meshes_checked(), "successful replacement after failed generation")
 	await process_frame
+
 	checks.check(not is_instance_valid(old_mesh), "successful replacement retires prior bake")
 	for generated in loader.find_children("*", "", true, false):
 		checks.check(generated.owner == scene, "generated mesh and collider owned by scene parent")
@@ -844,8 +864,404 @@ func test_checked_bake() -> void:
 	loader.map_resource = "res://fixtures/empty.map"
 	result = loader.build_meshes_checked()
 	checks.check(result.ok and result.changed and result.value.child_count == 0 and loader.get_child_count() == 0, "empty map commits empty bake")
+	metrics = result.value.metrics
+	checks.check(metrics.source_brush_item_count == 0 and metrics.source_patch_item_count == 0 and metrics.visual_triangle_count == 0 and metrics.visual_chunk_count == 0 and metrics.material_surface_count == 0 and metrics.collision_triangle_count == 0 and metrics.collision_shape_count == 0, "empty bake reports zero geometry metrics")
 	result = loader.build_meshes_checked()
 	checks.check(result.ok and not result.changed, "empty to empty bake reports no output change")
+	scene.free()
+	await process_frame
+
+func test_collision_surface_plan() -> void:
+	var document = ClassDB.instantiate("TBMapDocument")
+	var ordinary := ["grass", "dirt", "metal", "wood", "glass", "window", "sand", "tile", "snow", "vent", "water", "plain"]
+	var special := ["common/player_clip", "common/ladder_clip", "common/cushion_clip", "common/nowalljump_clip", "common/hint_skip"]
+	var x := 0.0
+	for category in ordinary:
+		expect_ok(document.create_cuboid(Vector3(x, 0, 0), Vector3(x + 8, 8, 8), "collision/" + category), "create collision category " + category)
+		x += 16
+	for texture in special:
+		expect_ok(document.create_cuboid(Vector3(x, 0, 0), Vector3(x + 8, 8, 8), texture), "create special collision category " + texture)
+		x += 16
+	expect_ok(document.save_map("user://collision-surface-plan.map"), "save collision surface plan fixture")
+
+	var loader = ClassDB.instantiate("TBLoader")
+	root.add_child(loader)
+	loader.lighting_unwrap_uv2 = false
+	loader.option_collision_layer_mask = 9
+	loader.option_clip_collision_layer_mask = 18
+	loader.map_resource = document.get_path()
+	var result: Dictionary = loader.build_meshes_checked()
+	if not expect_ok(result, "build all collision surface categories"):
+		loader.free()
+		return
+	var mesh_nodes: Array[Node] = loader.find_children("*", "MeshInstance3D", true, false)
+	checks.check(mesh_nodes.size() == 1 and mesh_nodes[0].name == "entity_0_geometry" and mesh_nodes[0].layers == 32 and mesh_nodes[0].mesh.get_surface_count() == ordinary.size(), "collision-only and skip textures are excluded from the legacy visual layer")
+	checks.check(result.value.metrics.visual_triangle_count == ordinary.size() * 12 and result.value.metrics.collision_triangle_count == (ordinary.size() + special.size() - 1) * 12, "visual and collision metrics classify every category once")
+
+	var expected_types := ["CUSHION_CLIP", "DEFAULT", "DIRT", "GLASS", "GRASS", "LADDER_CLIP", "METAL", "NO_WALL_JUMP", "PLAYER_CLIP", "SAND", "SNOW", "TILE", "VENT", "WATER", "WINDOW", "WOOD"]
+	var category_nodes: Array[Node] = []
+	for type in expected_types:
+		var nodes: Array[Node] = loader.find_children("entity_0_geometry_" + type + "_col", "CollisionObject3D", true, false)
+		if checks.check(nodes.size() == 1, "stable collision category name " + type):
+			var body: CollisionObject3D = nodes[0]
+			category_nodes.append(body)
+			var is_area: bool = type in ["CUSHION_CLIP", "LADDER_CLIP", "NO_WALL_JUMP"]
+			checks.check((body is Area3D) == is_area and (is_area or body is StaticBody3D), "legacy collision body class " + type)
+			if is_area:
+				checks.check(body.monitorable and not body.monitoring, "legacy special Area3D monitoring flags " + type)
+			checks.check(body.collision_layer == (18 if type == "PLAYER_CLIP" else 9), "legacy collision layer " + type)
+			checks.check(body.get_child_count() == 1 and body.get_child(0) is CollisionShape3D and body.get_child(0).shape is ConcavePolygonShape3D and body.get_child(0).shape.get_faces().size() == 36, "legacy concave collision array " + type)
+	checks.check(result.value.metrics.collision_shape_count == expected_types.size(), "one entity collision pass creates one shape per populated category")
+	var first_names := category_nodes.map(func(node): return node.name)
+	expect_ok(loader.build_meshes_checked(), "repeat collision category build")
+	var second_names: Array = loader.find_children("*_col", "CollisionObject3D", true, false).map(func(node): return node.name)
+	checks.check(second_names == first_names, "collision names and category order are stable across builds")
+
+	loader.option_collision = false
+	expect_ok(loader.build_meshes_checked(), "build with collision disabled")
+	checks.check(loader.find_children("*", "CollisionShape3D", true, false).is_empty() and loader.find_children("*", "MeshInstance3D", true, false).size() == 1, "collision-disabled bake retains visuals only")
+	var preview_target := Node3D.new()
+	root.add_child(preview_target)
+	loader.option_collision = true
+	expect_ok(loader.build_visual_preview_checked(document, preview_target), "build visual-only preview from shared surface plan")
+	var preview_meshes := preview_target.find_children("*", "MeshInstance3D", true, false)
+	checks.check(preview_meshes.size() == 1 and preview_meshes[0].mesh.get_surface_count() == ordinary.size() and preview_target.find_children("*", "CollisionShape3D", true, false).is_empty(), "visual preview excludes special surfaces and all collision nodes")
+	preview_target.free()
+
+	var custom_area := Area3D.new()
+	custom_area.name = "CollisionEntity"
+	var custom_scene := PackedScene.new()
+	checks.check(custom_scene.pack(custom_area) == OK and ResourceSaver.save(custom_scene, "res://collision_entity.tscn") == OK, "save custom Area3D collision fixture")
+	custom_area.free()
+	var cube := FileAccess.get_file_as_string("res://fixtures/classic_cube.map")
+	var entity_source := '{"classname" "worldspawn"}\n'
+	entity_source += cube.replace('"classname" "worldspawn"', '"classname" "func_group"')
+	entity_source += cube.replace('"classname" "worldspawn"', '"classname" "nocollision"')
+	entity_source += cube.replace('"classname" "worldspawn"', '"classname" "collision_entity"')
+	write_text("user://collision-entity-plan.map", entity_source)
+	loader.entity_path = "res://"
+	loader.map_resource = "user://collision-entity-plan.map"
+	expect_ok(loader.build_meshes_checked(), "build grouped, nocollision, and custom collision entities")
+	checks.check(loader.find_children("*", "MeshInstance3D", true, false).size() == 3, "func_group, nocollision, and custom brush entities retain visuals")
+	checks.check(loader.find_children("entity_1_geometry_DEFAULT_col", "StaticBody3D", true, false).size() == 1 and loader.find_children("entity_2_geometry_*_col", "CollisionObject3D", true, false).is_empty(), "func_group retains static collision while nocollision remains visual-only")
+	var custom_areas: Array[Node] = loader.find_children("CollisionEntity", "Area3D", true, false)
+	if checks.check(custom_areas.size() == 1, "custom Area3D brush entity instantiates"):
+		var custom_shapes: Array[Node] = custom_areas[0].find_children("*", "CollisionShape3D", false, false)
+		checks.check(custom_areas[0].find_children("entity_3_geometry", "MeshInstance3D", false, false).size() == 1 and custom_shapes.size() == 1 and custom_shapes[0].shape is ConvexPolygonShape3D, "ColliderType Mesh adds direct convex collision independently of visual naming")
+	loader.free()
+
+func test_custom_point_smoothing() -> void:
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = PackedVector3Array([Vector3.ZERO, Vector3.RIGHT, Vector3.FORWARD, Vector3.ZERO, Vector3.FORWARD, Vector3.UP])
+	arrays[Mesh.ARRAY_NORMAL] = PackedVector3Array([Vector3.UP, Vector3.UP, Vector3.UP, Vector3.RIGHT, Vector3.RIGHT, Vector3.RIGHT])
+	arrays[Mesh.ARRAY_TEX_UV] = PackedVector2Array([Vector2.ZERO, Vector2.RIGHT, Vector2.UP, Vector2.ZERO, Vector2.RIGHT, Vector2.UP])
+	arrays[Mesh.ARRAY_TANGENT] = PackedFloat32Array([1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1])
+	arrays[Mesh.ARRAY_INDEX] = PackedInt32Array([0, 1, 2, 3, 4, 5])
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	var entity_root := Node3D.new()
+	var mesh_child := MeshInstance3D.new()
+	mesh_child.name = "PointMesh"
+	mesh_child.mesh = mesh
+	entity_root.add_child(mesh_child)
+	mesh_child.owner = entity_root
+	var packed := PackedScene.new()
+	checks.check(packed.pack(entity_root) == OK and ResourceSaver.save(packed, "res://smooth_point.tscn") == OK, "save custom point smoothing fixture")
+	entity_root.free()
+	write_text("user://smooth-point.map", '{"classname" "worldspawn"}\n{"classname" "smooth_point" "soft" "1"}\n')
+	var loader = ClassDB.instantiate("TBLoader")
+	root.add_child(loader)
+	loader.entity_path = "res://"
+	loader.map_resource = "user://smooth-point.map"
+	loader.lighting_unwrap_uv2 = false
+	expect_ok(loader.build_meshes_checked(), "build custom point PackedScene with soft")
+	var children: Array[Node] = loader.find_children("PointMesh", "MeshInstance3D", true, false)
+	if checks.check(children.size() == 1, "custom point PackedScene retains first mesh child"):
+		var smoothed: PackedVector3Array = children[0].mesh.surface_get_arrays(0)[Mesh.ARRAY_NORMAL]
+		var expected := Vector3(1, 1, 0).normalized()
+		checks.check(smoothed[0].dot(expected) > 0.9999 and smoothed[3].dot(expected) > 0.9999, "custom point first mesh child preserves legacy soft smoothing")
+	loader.free()
+	await process_frame
+
+func test_worldspawn_chunking() -> void:
+	var defaults = ClassDB.instantiate("TBLoader")
+	checks.check(not defaults.worldspawn_chunking_enabled and defaults.worldspawn_chunk_size == 24.0
+		and defaults.worldspawn_chunk_triangles == 15000 and defaults.worldspawn_max_chunks == 512,
+		"worldspawn chunking public properties have compatibility-safe defaults")
+	checks.check(defaults.get_worldspawn_chunking_enabled() == defaults.worldspawn_chunking_enabled
+		and defaults.get_worldspawn_chunk_size() == defaults.worldspawn_chunk_size
+		and defaults.get_worldspawn_chunk_triangles() == defaults.worldspawn_chunk_triangles
+		and defaults.get_worldspawn_max_chunks() == defaults.worldspawn_max_chunks,
+		"worldspawn chunking documented getters expose property values")
+	var chunk_properties: Dictionary = {}
+	for property in defaults.get_property_list():
+		if String(property.name).begins_with("worldspawn_"):
+			chunk_properties[property.name] = property
+	checks.check(chunk_properties.keys().map(func(name): return String(name)) == ["worldspawn_chunking_enabled", "worldspawn_chunk_size", "worldspawn_chunk_triangles", "worldspawn_max_chunks"],
+		"Worldspawn Chunking inspector properties have stable order")
+	checks.check(chunk_properties.worldspawn_chunk_size.hint == PROPERTY_HINT_RANGE
+		and chunk_properties.worldspawn_chunk_triangles.hint == PROPERTY_HINT_RANGE
+		and chunk_properties.worldspawn_max_chunks.hint == PROPERTY_HINT_RANGE
+		and "or_greater" in chunk_properties.worldspawn_chunk_size.hint_string
+		and "or_greater" in chunk_properties.worldspawn_chunk_triangles.hint_string
+		and "or_greater" in chunk_properties.worldspawn_max_chunks.hint_string,
+		"worldspawn numeric inspector properties expose positive extensible ranges")
+	defaults.free()
+
+	var serialization_root := Node3D.new()
+	var serialized = ClassDB.instantiate("TBLoader")
+	serialization_root.add_child(serialized)
+	serialized.owner = serialization_root
+	serialized.worldspawn_chunking_enabled = true
+	serialized.worldspawn_chunk_size = 31.5
+	serialized.worldspawn_chunk_triangles = 2345
+	serialized.worldspawn_max_chunks = 123
+	var settings_scene := PackedScene.new()
+	checks.check(settings_scene.pack(serialization_root) == OK, "pack public worldspawn chunk settings")
+	var settings_copy = settings_scene.instantiate().get_child(0)
+	checks.check(settings_copy.worldspawn_chunking_enabled and settings_copy.worldspawn_chunk_size == 31.5
+		and settings_copy.worldspawn_chunk_triangles == 2345 and settings_copy.worldspawn_max_chunks == 123,
+		"public worldspawn chunk settings serialize through PackedScene")
+	settings_copy.get_parent().free()
+	serialization_root.free()
+
+	var document = ClassDB.instantiate("TBMapDocument")
+	var ids: Array[int] = []
+	for i in 3:
+		ids.append(document.create_cuboid(Vector3(i * 8, 0, 0), Vector3(i * 8 + 8, 8, 8), "chunk/order_a").value)
+	for id in ids:
+		var brush: Dictionary = document.get_draw_data().filter(func(item): return item.id == id)[0]
+		expect_ok(document.set_face_texture(id, 0, "chunk/order_b", brush.topology_revision), "make chunk primitive multi-material")
+	expect_ok(document.create_cuboid(Vector3(32, 0, 0), Vector3(40, 8, 8), "common/player_clip"), "create chunk collision-only primitive")
+	var source: String = document.export_text().value.replace('"classname" "worldspawn"', '"classname" "worldspawn"\n"smooth" "1"')
+	var cube: String = FileAccess.get_file_as_string("res://fixtures/classic_cube.map")
+	source += cube.replace('"classname" "worldspawn"', '"classname" "func_group"')
+	expect_ok(document.import_text(source), "prepare worldspawn chunk integration fixture")
+	expect_ok(document.save_map("user://worldspawn-chunks.map"), "save worldspawn chunk integration fixture")
+
+	var scene := Node3D.new()
+	root.add_child(scene)
+	var loader = ClassDB.instantiate("TBLoader")
+	loader.name = "ChunkedLoader"
+	scene.add_child(loader)
+	loader.owner = scene
+	loader.option_visual_layer_mask = 73
+	loader.map_resource = document.get_path()
+	var legacy: Dictionary = loader.build_meshes_checked()
+	if not expect_ok(legacy, "build legacy baseline before public worldspawn chunks"):
+		scene.free()
+		return
+	checks.check(loader.find_children("entity_0_geometry", "MeshInstance3D", true, false).size() == 1
+		and loader.find_children("entity_0_geometry_chunk_*", "MeshInstance3D", true, false).is_empty(),
+		"disabled chunking retains the legacy single-worldspawn hierarchy")
+	var legacy_triangles: int = legacy.value.metrics.visual_triangle_count
+	var legacy_material_triangles: Array[int] = []
+	var legacy_world: MeshInstance3D = loader.find_children("entity_0_geometry", "MeshInstance3D", true, false)[0]
+	for surface in legacy_world.mesh.get_surface_count(): legacy_material_triangles.append(legacy_world.mesh.surface_get_arrays(surface)[Mesh.ARRAY_INDEX].size() / 3)
+
+	loader.worldspawn_chunking_enabled = true
+	loader.worldspawn_chunk_size = 100.0
+	loader.worldspawn_chunk_triangles = 12
+	loader.worldspawn_max_chunks = 16
+	var chunked: Dictionary = loader.build_meshes_checked()
+	if not expect_ok(chunked, "build public worldspawn chunks"):
+		scene.free()
+		return
+	var chunks: Array[Node] = loader.find_children("entity_0_geometry_chunk_*", "MeshInstance3D", true, false)
+	checks.check(chunks.map(func(node): return node.name) == [&"entity_0_geometry_chunk_0000", &"entity_0_geometry_chunk_0001", &"entity_0_geometry_chunk_0002"], "chunk names and spatial child order are stable and zero padded")
+	var worldspawn_container: Node = loader.get_node("Default Layer")
+	checks.check(worldspawn_container.get_children().slice(0, 3) == chunks, "enabled worldspawn hierarchy owns ordered chunks under its legacy container")
+	checks.check(loader.find_children("entity_1_geometry", "MeshInstance3D", true, false).size() == 1 and loader.find_children("entity_1_geometry_chunk_*", "MeshInstance3D", true, false).is_empty(), "only literal classname worldspawn uses chunks and func_group remains unchanged")
+	var triangles := 0
+	var surfaces := 0
+	var material_triangles: Array[int] = [0, 0]
+	for chunk in chunks:
+		checks.check(chunk.mesh is ArrayMesh and chunk.layers == 73 and chunk.gi_mode == GeometryInstance3D.GI_MODE_STATIC and chunk.owner == scene, "each chunk preserves mesh type, visual layer, GI, and generated ownership")
+		surfaces += chunk.mesh.get_surface_count()
+		checks.check(chunk.mesh.get_surface_count() == 2, "each chunk preserves registered material surface order and filtering")
+		for surface in chunk.mesh.get_surface_count():
+			var arrays: Array = chunk.mesh.surface_get_arrays(surface)
+			triangles += arrays[Mesh.ARRAY_INDEX].size() / 3
+			material_triangles[surface] += arrays[Mesh.ARRAY_INDEX].size() / 3
+			checks.check(arrays[Mesh.ARRAY_VERTEX].size() == arrays[Mesh.ARRAY_NORMAL].size() and arrays[Mesh.ARRAY_TANGENT].size() == arrays[Mesh.ARRAY_VERTEX].size() * 4 and arrays[Mesh.ARRAY_TEX_UV].size() == arrays[Mesh.ARRAY_VERTEX].size() and not arrays[Mesh.ARRAY_TEX_UV2].is_empty(), "chunk retains vertex arrays and receives a per-chunk UV2 atlas")
+	checks.check(triangles == legacy_triangles and material_triangles == legacy_material_triangles and surfaces == 6 and chunked.value.metrics.visual_triangle_count == legacy_triangles and chunked.value.metrics.material_surface_count == surfaces, "chunking conserves worldspawn triangles and per-material assignments")
+	checks.check(chunked.value.metrics.visual_chunk_count == 3 and chunked.value.metrics.partition_duration_ms > 0.0 and chunked.value.metrics.oversized_item_count == 0 and chunked.value.metrics.isolated_oversized_item_count == 0 and chunked.value.metrics.sparse_merge_count == 0 and chunked.value.metrics.budget_merge_count == 0 and chunked.value.metrics.forced_nonadjacent_merge_count == 0 and chunked.value.metrics.chunks_with_unmet_soft_limits == 0, "chunk metrics distinguish oversized inputs from isolated outputs and include policy counts")
+	checks.check(loader.find_children("entity_0_geometry_DEFAULT_col", "StaticBody3D", true, false).size() == 1 and loader.find_children("entity_0_geometry_PLAYER_CLIP_col", "StaticBody3D", true, false).size() == 1 and loader.find_children("*chunk*_col", "CollisionObject3D", true, false).is_empty(), "collision is generated once with the legacy entity base name")
+	checks.check(chunked.value.metrics.collision_triangle_count == 48 and chunked.value.metrics.collision_shape_count == 2, "collision includes ordinary and collision-only primitives independently of visual chunks")
+	var first_signature := baked_visual_signature(loader, "entity_0_geometry_chunk_*")
+	expect_ok(loader.build_meshes_checked(), "repeat identical public worldspawn chunk build")
+	chunks.assign(loader.find_children("entity_0_geometry_chunk_*", "MeshInstance3D", true, false))
+	checks.check(baked_visual_signature(loader, "entity_0_geometry_chunk_*") == first_signature
+		and chunks.map(func(node): return node.name) == [&"entity_0_geometry_chunk_0000", &"entity_0_geometry_chunk_0001", &"entity_0_geometry_chunk_0002"],
+		"repeated chunk builds preserve names, child order, membership, arrays, surfaces, and materials")
+
+	var preview_target := Node3D.new()
+	root.add_child(preview_target)
+	var preview_result: Dictionary = loader.build_visual_preview_checked(document, preview_target)
+	checks.check(preview_result.ok, "built preview accepts the same public worldspawn chunk settings as scene bake")
+	var preview_chunks: Array[Node] = preview_target.find_children("entity_0_geometry_chunk_*", "MeshInstance3D", true, false)
+	checks.check(preview_chunks.map(func(node): return node.name) == chunks.map(func(node): return node.name)
+		and preview_target.find_children("entity_1_geometry", "MeshInstance3D", true, false).size() == 1,
+		"built preview and bake expose identical chunk and func_group hierarchy names")
+	if checks.check(preview_chunks.size() == chunks.size(), "built preview and bake produce the same chunk count"):
+		for i in chunks.size():
+			checks.check(preview_chunks[i].layers == chunks[i].layers and preview_chunks[i].gi_mode == chunks[i].gi_mode
+				and preview_chunks[i].mesh.get_surface_count() == chunks[i].mesh.get_surface_count(),
+				"built preview and bake share visual settings for chunk %d" % i)
+			for surface in chunks[i].mesh.get_surface_count():
+				checks.check(preview_chunks[i].mesh.surface_get_arrays(surface) == chunks[i].mesh.surface_get_arrays(surface)
+					and preview_chunks[i].mesh.surface_get_material(surface) == chunks[i].mesh.surface_get_material(surface),
+					"built preview and bake have identical surface arrays and materials for chunk %d surface %d" % [i, surface])
+	checks.check(preview_target.find_children("*", "CollisionShape3D", true, false).is_empty(), "built preview chunking remains collision-independent")
+
+	var shared_normals := 0
+	if chunks.size() >= 2:
+		for surface in chunks[0].mesh.get_surface_count():
+			var first := {}
+			var arrays: Array = chunks[0].mesh.surface_get_arrays(surface)
+			for i in arrays[Mesh.ARRAY_VERTEX].size(): first[arrays[Mesh.ARRAY_VERTEX][i]] = arrays[Mesh.ARRAY_NORMAL][i]
+			arrays = chunks[1].mesh.surface_get_arrays(surface)
+			for i in arrays[Mesh.ARRAY_VERTEX].size():
+				var vertex: Vector3 = arrays[Mesh.ARRAY_VERTEX][i]
+				if first.has(vertex):
+					checks.check(first[vertex].is_equal_approx(arrays[Mesh.ARRAY_NORMAL][i]), "entity-wide smoothing has no normal seam at a chunk boundary")
+					shared_normals += 1
+	checks.check(shared_normals > 0, "smoothing fixture shares vertices across chunk boundaries")
+
+	var phong_only_source: String = source.replace('"smooth" "1"', '"_phong" "1"')
+	write_text("user://internal-worldspawn-phong-only.map", phong_only_source)
+	loader.map_resource = "user://internal-worldspawn-phong-only.map"
+	loader.worldspawn_chunking_enabled = false
+	expect_ok(loader.build_meshes_checked(), "build phong-only source-normal baseline")
+	var phong_source_mesh: MeshInstance3D = loader.find_children("entity_0_geometry", "MeshInstance3D", true, false)[0]
+	var phong_source_arrays: Array[Array] = []
+	for surface in phong_source_mesh.mesh.get_surface_count(): phong_source_arrays.append(phong_source_mesh.mesh.surface_get_arrays(surface))
+	write_text("user://internal-worldspawn-phong-soft.map", phong_only_source.replace('"_phong" "1"', '"_phong" "1"\n"soft" "1"'))
+	loader.map_resource = "user://internal-worldspawn-phong-soft.map"
+	expect_ok(loader.build_meshes_checked(), "build legacy combined phong and soft output")
+	var phong_legacy: MeshInstance3D = loader.find_children("entity_0_geometry", "MeshInstance3D", true, false)[0]
+	var phong_arrays: Array[Array] = []
+	var combined_property_changed_normal := false
+	for surface in phong_legacy.mesh.get_surface_count():
+		var combined: Array = phong_legacy.mesh.surface_get_arrays(surface)
+		phong_arrays.append(combined)
+		var source_arrays: Array = phong_source_arrays[surface]
+		for i in mini(combined[Mesh.ARRAY_NORMAL].size(), source_arrays[Mesh.ARRAY_NORMAL].size()):
+			if not combined[Mesh.ARRAY_NORMAL][i].is_equal_approx(source_arrays[Mesh.ARRAY_NORMAL][i]): combined_property_changed_normal = true
+	checks.check(combined_property_changed_normal, "soft is applied after _phong source-normal generation on the legacy path")
+	loader.worldspawn_chunking_enabled = true
+	expect_ok(loader.build_meshes_checked(), "build chunked combined phong and soft output")
+	chunks = loader.find_children("entity_0_geometry_chunk_*", "MeshInstance3D", true, false)
+	var phong_matches := 0
+	for chunk in chunks:
+		for surface in chunk.mesh.get_surface_count():
+			var actual: Array = chunk.mesh.surface_get_arrays(surface)
+			var expected: Array = phong_arrays[surface]
+			for i in actual[Mesh.ARRAY_VERTEX].size():
+				var matched := false
+				for j in expected[Mesh.ARRAY_VERTEX].size():
+					if not actual[Mesh.ARRAY_VERTEX][i].is_equal_approx(expected[Mesh.ARRAY_VERTEX][j]) or not actual[Mesh.ARRAY_TEX_UV][i].is_equal_approx(expected[Mesh.ARRAY_TEX_UV][j]) or not actual[Mesh.ARRAY_NORMAL][i].is_equal_approx(expected[Mesh.ARRAY_NORMAL][j]): continue
+					var actual_tangent := Vector4(actual[Mesh.ARRAY_TANGENT][i * 4], actual[Mesh.ARRAY_TANGENT][i * 4 + 1], actual[Mesh.ARRAY_TANGENT][i * 4 + 2], actual[Mesh.ARRAY_TANGENT][i * 4 + 3])
+					var expected_tangent := Vector4(expected[Mesh.ARRAY_TANGENT][j * 4], expected[Mesh.ARRAY_TANGENT][j * 4 + 1], expected[Mesh.ARRAY_TANGENT][j * 4 + 2], expected[Mesh.ARRAY_TANGENT][j * 4 + 3])
+					if not actual_tangent.is_equal_approx(expected_tangent): continue
+					matched = true
+					phong_matches += 1
+					break
+				checks.check(matched, "chunked corner matches a complete legacy position/UV/normal/tangent tuple")
+	checks.check(phong_matches > 0, "chunked phong plus soft vertices match entity-wide legacy output")
+	var phong_shared_normals := 0
+	if chunks.size() >= 2:
+		for surface in chunks[0].mesh.get_surface_count():
+			var first: Array = chunks[0].mesh.surface_get_arrays(surface)
+			var second: Array = chunks[1].mesh.surface_get_arrays(surface)
+			for i in second[Mesh.ARRAY_VERTEX].size():
+				for j in first[Mesh.ARRAY_VERTEX].size():
+					if not second[Mesh.ARRAY_VERTEX][i].is_equal_approx(first[Mesh.ARRAY_VERTEX][j]) or not second[Mesh.ARRAY_TEX_UV][i].is_equal_approx(first[Mesh.ARRAY_TEX_UV][j]) or not first[Mesh.ARRAY_NORMAL][j].is_equal_approx(second[Mesh.ARRAY_NORMAL][i]): continue
+					var first_tangent := Vector4(first[Mesh.ARRAY_TANGENT][j * 4], first[Mesh.ARRAY_TANGENT][j * 4 + 1], first[Mesh.ARRAY_TANGENT][j * 4 + 2], first[Mesh.ARRAY_TANGENT][j * 4 + 3])
+					var second_tangent := Vector4(second[Mesh.ARRAY_TANGENT][i * 4], second[Mesh.ARRAY_TANGENT][i * 4 + 1], second[Mesh.ARRAY_TANGENT][i * 4 + 2], second[Mesh.ARRAY_TANGENT][i * 4 + 3])
+					if not first_tangent.is_equal_approx(second_tangent): continue
+					phong_shared_normals += 1
+					break
+	checks.check(phong_shared_normals > 0, "combined-property fixture shares smoothed vertices across chunks")
+
+	var patch_loader = ClassDB.instantiate("TBLoader")
+	patch_loader.name = "PatchLoader"
+	scene.add_child(patch_loader)
+	patch_loader.owner = scene
+	patch_loader.map_resource = "res://fixtures/patches.map"
+	patch_loader.worldspawn_chunking_enabled = true
+	patch_loader.worldspawn_chunk_size = 100.0
+	patch_loader.worldspawn_chunk_triangles = 1
+	patch_loader.worldspawn_max_chunks = 16
+	var patch_result: Dictionary = patch_loader.build_meshes_checked()
+	checks.check(patch_result.ok and patch_result.value.metrics.source_brush_item_count == 0
+		and patch_result.value.metrics.source_patch_item_count == 2
+		and patch_result.value.metrics.visual_triangle_count == 80,
+		"chunked patch-only worldspawn reports and preserves both tessellated patches")
+	var patch_chunks: Array[Node] = patch_loader.find_children("entity_0_geometry_chunk_*", "MeshInstance3D", true, false)
+	checks.check(patch_chunks.size() == patch_result.value.metrics.visual_chunk_count
+		and patch_chunks.all(func(node): return node.owner == scene and node.mesh.get_surface_count() == 1),
+		"chunked patch output uses owned disposable ArrayMesh children")
+
+	var hidden_source := cube.replace('"classname" "worldspawn"', '"classname" "worldspawn"\n"_tb_layer_hidden" "1"')
+	write_text("user://hidden-worldspawn-chunks.map", hidden_source)
+	var hidden_loader = ClassDB.instantiate("TBLoader")
+	hidden_loader.name = "HiddenLoader"
+	scene.add_child(hidden_loader)
+	hidden_loader.owner = scene
+	hidden_loader.map_resource = "user://hidden-worldspawn-chunks.map"
+	hidden_loader.worldspawn_chunking_enabled = true
+	hidden_loader.worldspawn_chunk_triangles = 1
+	expect_ok(hidden_loader.build_meshes_checked(), "build chunked hidden worldspawn")
+	checks.check(hidden_loader.find_children("*", "MeshInstance3D", true, false).is_empty(),
+		"enabled chunking respects hidden-layer exclusion")
+	hidden_loader.option_skip_hidden_layers = false
+	expect_ok(hidden_loader.build_meshes_checked(), "build visible hidden-layer worldspawn")
+	checks.check(not hidden_loader.find_children("entity_0_geometry_chunk_*", "MeshInstance3D", true, false).is_empty(),
+		"disabling hidden-layer exclusion restores chunk output")
+
+	var old_chunks := chunks.duplicate()
+	var old_resources := chunks.map(func(node): return node.mesh)
+	var old_preview_chunks := preview_target.find_children("entity_0_geometry_chunk_*", "MeshInstance3D", true, false)
+	var invalid_settings := [
+		["worldspawn_chunk_size", 0.0],
+		["worldspawn_chunk_size", NAN],
+		["worldspawn_chunk_size", 1.0e308],
+		["worldspawn_chunk_triangles", 0],
+		["worldspawn_max_chunks", -1],
+	]
+	for invalid in invalid_settings:
+		var previous = loader.get(invalid[0])
+		loader.set(invalid[0], invalid[1])
+		var failed: Dictionary = loader.build_meshes_checked()
+		checks.check(not failed.ok and failed.error.code == &"INVALID_ARGUMENT" and not failed.changed
+			and loader.find_children("entity_0_geometry_chunk_*", "MeshInstance3D", true, false) == old_chunks,
+			"invalid enabled %s transactionally retains baked chunks" % invalid[0])
+		var preview_failed: Dictionary = loader.build_visual_preview_checked(document, preview_target)
+		checks.check(not preview_failed.ok and preview_failed.error.code == &"INVALID_ARGUMENT" and not preview_failed.changed
+			and preview_target.find_children("entity_0_geometry_chunk_*", "MeshInstance3D", true, false) == old_preview_chunks,
+			"invalid enabled %s transactionally retains built preview" % invalid[0])
+		loader.set(invalid[0], previous)
+	for i in old_chunks.size(): checks.check(is_instance_valid(old_chunks[i]) and old_chunks[i].mesh == old_resources[i], "failed public chunk setting validation retains exact mesh resource")
+	for generated in loader.find_children("*", "", true, false):
+		checks.check(generated.owner == scene, "every generated chunk descendant retains scene ownership before packing")
+	var packed := PackedScene.new()
+	checks.check(packed.pack(scene) == OK, "pack publicly chunked scene")
+	var restored = packed.instantiate()
+	var restored_loader: Node = restored.get_node("ChunkedLoader")
+	checks.check(restored_loader.find_children("entity_0_geometry_chunk_*", "MeshInstance3D", true, false).size() == 3,
+		"packed scene preserves all owned chunks under their loader")
+	restored.free()
+	loader.worldspawn_chunking_enabled = false
+	loader.worldspawn_chunk_size = 0.0
+	loader.worldspawn_chunk_triangles = 0
+	loader.worldspawn_max_chunks = 0
+	checks.check(loader.build_meshes_checked().ok and loader.find_children("entity_0_geometry", "MeshInstance3D", true, false).size() == 1
+		and loader.find_children("entity_0_geometry_chunk_*", "MeshInstance3D", true, false).is_empty()
+		and loader.find_children("entity_1_geometry", "MeshInstance3D", true, false).size() == 1,
+		"disabled chunking ignores inactive thresholds and restores the complete legacy hierarchy")
+	preview_target.free()
 	scene.free()
 	await process_frame
 

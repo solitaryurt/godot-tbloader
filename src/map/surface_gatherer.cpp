@@ -1,6 +1,10 @@
 #include "surface_gatherer.h"
 
 #include <stdint.h>
+#include <cmath>
+#include <climits>
+#include <limits>
+#include <map>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,6 +14,236 @@
 #include "face.h"
 #include "map_data.h"
 #include "patch.h"
+
+namespace {
+struct PositionKey {
+	double x;
+	double y;
+	double z;
+
+	bool operator<(const PositionKey &other) const {
+		if (x != other.x) return x < other.x;
+		if (y != other.y) return y < other.y;
+		return z < other.z;
+	}
+};
+
+bool checked_append_sizes(const LMOwnedSurface &output, size_t vertex_count, size_t index_count) {
+	return output.vertices.size() <= static_cast<size_t>(INT_MAX) && vertex_count <= static_cast<size_t>(INT_MAX) - output.vertices.size() &&
+			output.indices.size() <= static_cast<size_t>(INT_MAX) && index_count <= static_cast<size_t>(INT_MAX) - output.indices.size() &&
+			vertex_count <= output.vertices.max_size() - output.vertices.size() &&
+			index_count <= output.indices.max_size() - output.indices.size();
+}
+
+bool append_geometry(LMOwnedSurface &output, const LMFaceVertex *vertices, int vertex_count, const int *indices, int index_count, const LMEntity &entity) {
+	if (vertex_count < 0 || index_count < 0 || (vertex_count > 0 && !vertices) || (index_count > 0 && !indices) ||
+			!checked_append_sizes(output, static_cast<size_t>(vertex_count), static_cast<size_t>(index_count))) return false;
+	const int index_offset = static_cast<int>(output.vertices.size());
+	for (int i = 0; i < index_count; ++i)
+		if (indices[i] < 0 || indices[i] >= vertex_count || indices[i] > INT_MAX - index_offset) return false;
+	output.vertices.reserve(output.vertices.size() + static_cast<size_t>(vertex_count));
+	output.indices.reserve(output.indices.size() + static_cast<size_t>(index_count));
+	for (int i = 0; i < vertex_count; ++i) {
+		LMFaceVertex vertex = vertices[i];
+		if (entity.spawn_type == EST_ENTITY || entity.spawn_type == EST_GROUP) vertex.vertex = vec3_sub(vertex.vertex, entity.center);
+		output.vertices.push_back(vertex);
+	}
+	for (int i = 0; i < index_count; ++i) output.indices.push_back(indices[i] + index_offset);
+	return true;
+}
+
+bool append_owned(LMOwnedSurface &output, const LMOwnedSurface &source) {
+	if (!checked_append_sizes(output, source.vertices.size(), source.indices.size())) return false;
+	const int index_offset = static_cast<int>(output.vertices.size());
+	for (int index : source.indices)
+		if (index < 0 || static_cast<size_t>(index) >= source.vertices.size() || index > INT_MAX - index_offset) return false;
+	output.vertices.insert(output.vertices.end(), source.vertices.begin(), source.vertices.end());
+	output.indices.reserve(output.indices.size() + source.indices.size());
+	for (int index : source.indices) output.indices.push_back(index + index_offset);
+	return true;
+}
+}
+
+LMSurface LMOwnedSurface::view() {
+	LMSurface result;
+	result.vertex_count = static_cast<int>(vertices.size());
+	result.vertices = vertices.empty() ? nullptr : vertices.data();
+	result.index_count = static_cast<int>(indices.size());
+	result.indices = indices.empty() ? nullptr : indices.data();
+	return result;
+}
+
+void LMOwnedSurface::clear() {
+	vertices.clear();
+	indices.clear();
+}
+
+bool LMEntitySurfacePlan::build(const LMMapData &map, int entity_index) {
+	entries.clear();
+	texture_entries.clear();
+	brush_entries.clear();
+	patch_entries.clear();
+	if (entity_index < 0 || entity_index >= map.entity_count || entity_index >= map.geometry_entity_count ||
+			map.entities == nullptr || map.entity_geo == nullptr || map.texture_count < 0) return false;
+	const LMEntity &entity = map.entities[entity_index];
+	const LMEntityGeometry &geometry = map.entity_geo[entity_index];
+	if (entity.primitive_count < 0 || entity.primitive_count != entity.brush_count + entity.patch_count ||
+			(entity.primitive_count > 0 && !entity.primitives) || entity.brush_count < 0 || entity.patch_count < 0 ||
+			geometry.brush_count != entity.brush_count || geometry.patch_count != entity.patch_count ||
+			(entity.brush_count > 0 && (!entity.brushes || !geometry.brushes)) ||
+			(entity.patch_count > 0 && (!entity.patches || !geometry.patches))) return false;
+
+	texture_entries.resize(map.texture_count);
+	brush_entries.resize(entity.brush_count);
+	patch_entries.resize(entity.patch_count);
+	std::vector<int> brush_ordinals(entity.brush_count, -1);
+	std::vector<int> patch_ordinals(entity.patch_count, -1);
+	for (int ordinal = 0; ordinal < entity.primitive_count; ++ordinal) {
+		const LMPrimitive primitive = entity.primitives[ordinal];
+		if (primitive.is_patch) {
+			if (primitive.index < 0 || primitive.index >= entity.patch_count || patch_ordinals[primitive.index] != -1) return false;
+			patch_ordinals[primitive.index] = ordinal;
+		} else {
+			if (primitive.index < 0 || primitive.index >= entity.brush_count || brush_ordinals[primitive.index] != -1) return false;
+			brush_ordinals[primitive.index] = ordinal;
+		}
+	}
+
+	auto entry_for = [&](bool is_patch, int source_index, int texture_index, int ordinal) -> LMEntitySurfacePlanEntry * {
+		if (texture_index < 0 || texture_index >= map.texture_count) return nullptr;
+		auto &primitive_entries = is_patch ? patch_entries[source_index] : brush_entries[source_index];
+		for (size_t entry_index : primitive_entries) {
+			if (entries[entry_index].texture_index == texture_index) return &entries[entry_index];
+		}
+		const size_t entry_index = entries.size();
+		entries.push_back({ { is_patch, source_index }, ordinal, texture_index, {} });
+		primitive_entries.push_back(entry_index);
+		texture_entries[texture_index].push_back(entry_index);
+		return &entries.back();
+	};
+
+	// Keep legacy surface array order: brush array order, then patch array order.
+	for (int brush_index = 0; brush_index < entity.brush_count; ++brush_index) {
+		const LMBrush &brush = entity.brushes[brush_index];
+		const LMBrushGeometry &brush_geometry = geometry.brushes[brush_index];
+		if (brush.face_count < 0 || brush_geometry.face_count != brush.face_count ||
+				(brush.face_count > 0 && (!brush.faces || !brush_geometry.faces))) return false;
+		for (int face_index = 0; face_index < brush.face_count; ++face_index) {
+			const LMFaceGeometry &face = brush_geometry.faces[face_index];
+			if (face.vertex_count < 3) continue;
+			const int64_t required_indices = (static_cast<int64_t>(face.vertex_count) - 2) * 3;
+			if (required_indices > INT_MAX || !face.vertices || !face.indices || face.index_count < required_indices) return false;
+			const int index_count = static_cast<int>(required_indices);
+			LMEntitySurfacePlanEntry *entry = entry_for(false, brush_index, brush.faces[face_index].texture_idx, brush_ordinals[brush_index]);
+			if (!entry) return false;
+			if (!append_geometry(entry->surface, face.vertices, face.vertex_count, face.indices, index_count, entity)) return false;
+		}
+	}
+	for (int patch_index = 0; patch_index < entity.patch_count; ++patch_index) {
+		const LMPatch &patch = entity.patches[patch_index];
+		const LMPatchGeometry &mesh = geometry.patches[patch_index];
+		if (mesh.vertex_count < 3) continue;
+		if (mesh.index_count < 0 || !mesh.vertices || (mesh.index_count > 0 && !mesh.indices)) return false;
+		LMEntitySurfacePlanEntry *entry = entry_for(true, patch_index, patch.texture_idx, patch_ordinals[patch_index]);
+		if (!entry) return false;
+		if (!append_geometry(entry->surface, mesh.vertices, mesh.vertex_count, mesh.indices, mesh.index_count, entity)) return false;
+	}
+	return true;
+}
+
+bool LMEntitySurfacePlan::regenerate_tangents() {
+	for (LMEntitySurfacePlanEntry &entry : entries) {
+		auto &surface = entry.surface;
+		if (surface.indices.size() % 3 != 0) return false;
+		std::vector<vec3> tangent_sums(surface.vertices.size(), {0, 0, 0});
+		std::vector<vec3> bitangent_sums(surface.vertices.size(), {0, 0, 0});
+		for (size_t i = 0; i < surface.indices.size(); i += 3) {
+			const int a = surface.indices[i], b = surface.indices[i + 1], c = surface.indices[i + 2];
+			if (a < 0 || b < 0 || c < 0 || static_cast<size_t>(a) >= surface.vertices.size() ||
+					static_cast<size_t>(b) >= surface.vertices.size() || static_cast<size_t>(c) >= surface.vertices.size()) return false;
+			const LMFaceVertex &va = surface.vertices[a], &vb = surface.vertices[b], &vc = surface.vertices[c];
+			const vec3 edge1 = vec3_sub(vb.vertex, va.vertex), edge2 = vec3_sub(vc.vertex, va.vertex);
+			const double du1 = vb.uv.u - va.uv.u, dv1 = vb.uv.v - va.uv.v;
+			const double du2 = vc.uv.u - va.uv.u, dv2 = vc.uv.v - va.uv.v;
+			const double determinant = du1 * dv2 - dv1 * du2;
+			if (!std::isfinite(determinant)) return false;
+			if (std::abs(determinant) < 1e-12) continue;
+			const vec3 tangent = vec3_div_double(vec3_sub(vec3_mul_double(edge1, dv2), vec3_mul_double(edge2, dv1)), determinant);
+			const vec3 bitangent = vec3_div_double(vec3_sub(vec3_mul_double(edge2, du1), vec3_mul_double(edge1, du2)), determinant);
+			for (int index : {a, b, c}) {
+				tangent_sums[index] = vec3_add(tangent_sums[index], tangent);
+				bitangent_sums[index] = vec3_add(bitangent_sums[index], bitangent);
+			}
+		}
+		for (size_t i = 0; i < surface.vertices.size(); ++i) {
+			LMFaceVertex &vertex = surface.vertices[i];
+			vec3 normal = vec3_normalize(vertex.normal);
+			vec3 tangent = vec3_sub(tangent_sums[i], vec3_mul_double(normal, vec3_dot(normal, tangent_sums[i])));
+			bool used_previous = false;
+			if (vec3_sqlen(tangent) < 1e-12) {
+				tangent = vec3_sub({vertex.tangent.x, vertex.tangent.y, vertex.tangent.z},
+						vec3_mul_double(normal, vec3_dot(normal, {vertex.tangent.x, vertex.tangent.y, vertex.tangent.z})));
+				used_previous = vec3_sqlen(tangent) >= 1e-12;
+			}
+			if (vec3_sqlen(tangent) < 1e-12) tangent = vec3_cross(normal, std::abs(normal.y) < 0.99 ? vec3{0, 1, 0} : vec3{1, 0, 0});
+			const double tangent_length = vec3_length(tangent);
+			if (!std::isfinite(tangent_length) || tangent_length <= 0.0) return false;
+			tangent = vec3_div_double(tangent, tangent_length);
+			const double handedness = used_previous && vec3_sqlen(bitangent_sums[i]) < 1e-12 ? vertex.tangent.w :
+					(vec3_dot(vec3_cross(normal, tangent), bitangent_sums[i]) < 0.0 ? -1.0 : 1.0);
+			if (!std::isfinite(tangent.x) || !std::isfinite(tangent.y) || !std::isfinite(tangent.z) || !std::isfinite(handedness)) return false;
+			vertex.tangent = {tangent.x, tangent.y, tangent.z, handedness};
+		}
+	}
+	return true;
+}
+
+bool LMEntitySurfacePlan::smooth_normals_by_texture() {
+	for (const auto &texture : texture_entries) {
+		std::map<PositionKey, vec3> normal_sums;
+		for (size_t entry_index : texture) {
+			if (entry_index >= entries.size()) return false;
+			for (const LMFaceVertex &vertex : entries[entry_index].surface.vertices) {
+				if (!std::isfinite(vertex.vertex.x) || !std::isfinite(vertex.vertex.y) || !std::isfinite(vertex.vertex.z) ||
+						!std::isfinite(vertex.normal.x) || !std::isfinite(vertex.normal.y) || !std::isfinite(vertex.normal.z)) return false;
+				PositionKey key{vertex.vertex.x, vertex.vertex.y, vertex.vertex.z};
+				auto found = normal_sums.find(key);
+				if (found == normal_sums.end()) normal_sums.emplace(key, vertex.normal);
+				else found->second = vec3_add(found->second, vertex.normal);
+			}
+		}
+		for (size_t entry_index : texture) {
+			for (LMFaceVertex &vertex : entries[entry_index].surface.vertices) {
+				const vec3 sum = normal_sums.at({vertex.vertex.x, vertex.vertex.y, vertex.vertex.z});
+				const double length = vec3_length(sum);
+				if (!std::isfinite(length) || length <= 0.0) return false;
+				vertex.normal = vec3_div_double(sum, length);
+			}
+		}
+	}
+	return true;
+}
+
+bool LMEntitySurfacePlan::combine_texture(int texture_index, LMOwnedSurface &output) const {
+	output.clear();
+	if (texture_index < 0 || texture_index >= static_cast<int>(texture_entries.size())) return false;
+	for (size_t entry_index : texture_entries[texture_index])
+		if (entry_index >= entries.size() || !append_owned(output, entries[entry_index].surface)) return false;
+	return true;
+}
+
+bool LMEntitySurfacePlan::combine_texture(int texture_index, const std::vector<LMEntitySurfacePrimitive> &primitives, LMOwnedSurface &output) const {
+	output.clear();
+	for (const LMEntitySurfacePrimitive &primitive : primitives) {
+		const auto &source_entries = primitive.is_patch ? patch_entries : brush_entries;
+		if (primitive.source_index < 0 || primitive.source_index >= static_cast<int>(source_entries.size())) return false;
+		for (size_t entry_index : source_entries[primitive.source_index]) {
+			if (entry_index >= entries.size()) return false;
+			if (entries[entry_index].texture_index == texture_index && !append_owned(output, entries[entry_index].surface)) return false;
+		}
+	}
+	return true;
+}
 
 void LMSurfaceGatherer::surface_gatherer_set_split_type(SURFACE_SPLIT_TYPE new_split_type) {
 	split_type = new_split_type;
