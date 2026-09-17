@@ -62,6 +62,15 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Cache SCons objects
+        uses: actions/cache@v4
+        with:
+          path: .scons_cache
+          key: ${{ runner.os }}-scons-${{ hashFiles('.gitmodules', 'SConstruct', 'godot-cpp/SConstruct') }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-scons-${{ hashFiles('.gitmodules', 'SConstruct', 'godot-cpp/SConstruct') }}-
+            ${{ runner.os }}-scons-
+
       - name: Install scons
         run: python -m pip install scons
 
@@ -73,6 +82,8 @@ jobs:
 
       - name: Build
         shell: bash
+        env:
+          SCONS_CACHE_DIR: .scons_cache
         run: ${{ matrix.command }}
 
       - name: Upload binaries

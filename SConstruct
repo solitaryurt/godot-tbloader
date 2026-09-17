@@ -2,6 +2,10 @@
 import os
 import sys
 
+cache_dir = os.environ.get("SCONS_CACHE_DIR")
+if cache_dir:
+    CacheDir(cache_dir)
+
 env = SConscript("godot-cpp/SConstruct")
 
 # For the reference:
