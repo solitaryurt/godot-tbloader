@@ -81,6 +81,12 @@ var ground_grid_rebuild_count := 0
 var candidate_mesh_upload_count := 0
 var candidate_hull_mesh: ArrayMesh
 var candidate_edge_mesh: ArrayMesh
+var candidate_triangle_buffer := PackedVector3Array()
+var candidate_edge_buffer := PackedVector3Array()
+var candidate_point_buffer := PackedVector3Array()
+var candidate_topology_key: Array = []
+var candidate_fast_path_hits := 0
+var candidate_slow_path_builds := 0
 var lighting_key: Array = []
 var lighting_initialized = false
 var lighting_sync_delay = 0.0
@@ -578,7 +584,9 @@ func render_counters() -> Dictionary:
 	return {"chunk_reuses": chunk_reuse_count, "chunk_mesh_uploads": chunk_mesh_upload_count,
 		"chunk_renderer_writes": chunk_renderer_write_count,
 		"ground_grid_rebuilds": ground_grid_rebuild_count,
-		"candidate_mesh_uploads": candidate_mesh_upload_count}
+		"candidate_mesh_uploads": candidate_mesh_upload_count,
+		"candidate_fast_paths": candidate_fast_path_hits,
+		"candidate_slow_paths": candidate_slow_path_builds}
 
 func reset_render_counters() -> void:
 	chunk_reuse_count = 0
@@ -586,6 +594,8 @@ func reset_render_counters() -> void:
 	chunk_renderer_write_count = 0
 	ground_grid_rebuild_count = 0
 	candidate_mesh_upload_count = 0
+	candidate_fast_path_hits = 0
+	candidate_slow_path_builds = 0
 
 func refresh_selection(force := false) -> void:
 	if core_overlays == null or not is_instance_valid(host) or host.session == null:
@@ -720,38 +730,102 @@ func update_candidate_mesh(names: Array[String], mesh: ArrayMesh, vertices: Pack
 	mesh.add_surface_from_arrays(primitive, arrays)
 	candidate_mesh_upload_count += 1
 
+func candidate_topology_signature(candidates: Array) -> Array:
+	var key: Array = [candidates.size()]
+	for brush in candidates:
+		var face_sizes: Array = []
+		for face in brush.get("faces", []):
+			var winding: PackedVector3Array = face.winding
+			face_sizes.append(winding.size())
+		var verts: PackedVector3Array = brush.get("vertices", PackedVector3Array())
+		var edgs: PackedVector3Array = brush.get("edges", PackedVector3Array())
+		key.append([brush.get("id", 0), brush.get("source_id", 0), verts.size(), edgs.size(), face_sizes])
+	return key
+
 func set_candidate_preview(candidates: Array) -> void:
 	if candidates.is_empty() or grid_move_preview == null:
 		clear_candidate_preview()
 		return
 	ensure_candidate_preview()
-	var triangles := PackedVector3Array()
-	var edges := PackedVector3Array()
-	var points := PackedVector3Array()
 	var scale_value := map_scale()
+	var topology := candidate_topology_signature(candidates)
+	var transform_only := topology == candidate_topology_key \
+		and candidate_triangle_buffer.size() > 0 \
+		and candidate_edge_buffer.size() > 0 \
+		and candidate_point_buffer.size() > 0
+	if transform_only:
+		# Verify retained buffer sizes still match; otherwise fall back to rebuild.
+		var expected_triangles := 0
+		var expected_edges := 0
+		var expected_points := 0
+		for brush in candidates:
+			var verts: PackedVector3Array = brush.get("vertices", PackedVector3Array())
+			var edgs: PackedVector3Array = brush.get("edges", PackedVector3Array())
+			expected_points += verts.size()
+			expected_edges += edgs.size()
+			for face in brush.get("faces", []):
+				var winding: PackedVector3Array = face.winding
+				if winding.size() >= 3:
+					expected_triangles += (winding.size() - 2) * 3
+		if expected_triangles != candidate_triangle_buffer.size() \
+				or expected_edges != candidate_edge_buffer.size() \
+				or expected_points != candidate_point_buffer.size():
+			transform_only = false
+	if transform_only:
+		candidate_fast_path_hits += 1
+	else:
+		candidate_slow_path_builds += 1
+		var triangle_total := 0
+		var edge_total := 0
+		var point_total := 0
+		for brush in candidates:
+			var verts: PackedVector3Array = brush.get("vertices", PackedVector3Array())
+			var edgs: PackedVector3Array = brush.get("edges", PackedVector3Array())
+			point_total += verts.size()
+			edge_total += edgs.size()
+			for face in brush.get("faces", []):
+				var winding: PackedVector3Array = face.winding
+				if winding.size() >= 3:
+					triangle_total += (winding.size() - 2) * 3
+		# resize retains capacity when shrinking or keeping size; grows once.
+		candidate_triangle_buffer.resize(triangle_total)
+		candidate_edge_buffer.resize(edge_total)
+		candidate_point_buffer.resize(point_total)
+		candidate_topology_key = topology
+	var triangle_cursor := 0
+	var edge_cursor := 0
+	var point_cursor := 0
 	for brush in candidates:
 		for point in brush.get("vertices", PackedVector3Array()):
-			points.append(transform_map_scaled(point, scale_value))
+			candidate_point_buffer[point_cursor] = transform_map_scaled(point, scale_value)
+			point_cursor += 1
 		for face in brush.get("faces", []):
 			var winding: PackedVector3Array = face.winding
 			for i in range(1, winding.size() - 1):
-				triangles.append(transform_map_scaled(winding[0], scale_value))
-				triangles.append(transform_map_scaled(winding[i], scale_value))
-				triangles.append(transform_map_scaled(winding[i + 1], scale_value))
+				candidate_triangle_buffer[triangle_cursor] = transform_map_scaled(winding[0], scale_value)
+				candidate_triangle_buffer[triangle_cursor + 1] = transform_map_scaled(winding[i], scale_value)
+				candidate_triangle_buffer[triangle_cursor + 2] = transform_map_scaled(winding[i + 1], scale_value)
+				triangle_cursor += 3
 		var brush_edges: PackedVector3Array = brush.get("edges", PackedVector3Array())
 		for point in brush_edges:
-			edges.append(transform_map_scaled(point, scale_value))
+			candidate_edge_buffer[edge_cursor] = transform_map_scaled(point, scale_value)
+			edge_cursor += 1
 	var loader = host.session.loader.get_ref()
 	var visual_layer: int = loader.option_visual_layer_mask if is_instance_valid(loader) else 1
-	update_candidate_mesh(["HiddenHulls", "VisibleHulls"], candidate_hull_mesh, triangles, Mesh.PRIMITIVE_TRIANGLES, visual_layer)
-	update_candidate_mesh(["HiddenEdges", "VisibleEdges"], candidate_edge_mesh, edges, Mesh.PRIMITIVE_LINES, visual_layer)
+	update_candidate_mesh(["HiddenHulls", "VisibleHulls"], candidate_hull_mesh, candidate_triangle_buffer, Mesh.PRIMITIVE_TRIANGLES, visual_layer)
+	update_candidate_mesh(["HiddenEdges", "VisibleEdges"], candidate_edge_mesh, candidate_edge_buffer, Mesh.PRIMITIVE_LINES, visual_layer)
 	grid_move_preview.visible = true
-	candidate_offscreen = not points.is_empty()
-	for point in points:
+	if camera == null or not is_visible_in_tree():
+		candidate_offscreen = false
+		if candidate_indicator != null:
+			candidate_indicator.hide()
+		return
+	candidate_offscreen = not candidate_point_buffer.is_empty()
+	for point in candidate_point_buffer:
 		if camera.is_position_in_frustum(point):
 			candidate_offscreen = false
 			break
-	update_candidate_indicator(points)
+	update_candidate_indicator(candidate_point_buffer)
 
 func update_candidate_indicator(points: PackedVector3Array) -> void:
 	if candidate_indicator == null:
@@ -777,6 +851,11 @@ func preview_grid_move(delta: Vector3) -> void:
 		return
 	grid_move_preview_pending = true
 	call_deferred("apply_grid_move_preview", grid_move_preview_generation)
+
+func broadcast_coalesced_preview(result: Dictionary) -> bool:
+	if is_instance_valid(host) and host.has_method("queue_mutation_preview"):
+		return host.queue_mutation_preview(result, self)
+	return host.broadcast_mutation_preview(result, self)
 
 func apply_grid_move_preview(generation: int) -> void:
 	if generation != grid_move_preview_generation:
@@ -1630,8 +1709,8 @@ func update_camera_gesture(position: Vector2) -> void:
 		var pivot_screen := camera.unproject_position(transform_map(camera_rotation_pivot))
 		if position.distance_to(pivot_screen) > 0.001:
 			camera_rotation_angle = snappedf(camera_rotation_start - (position - pivot_screen).angle(), deg_to_rad(15.0))
-		host.broadcast_mutation_preview(host.session.document.preview_rotate_brushes(host.session.selected,
-			camera_rotation_pivot, camera_rotation_axis, camera_rotation_angle), self)
+		broadcast_coalesced_preview(host.session.document.preview_rotate_brushes(host.session.selected,
+			camera_rotation_pivot, camera_rotation_axis, camera_rotation_angle))
 		return
 	if camera_gesture not in ["move", "component"]:
 		return
@@ -1644,7 +1723,7 @@ func update_camera_gesture(position: Vector2) -> void:
 		result = host.session.document.preview_translate_brushes(host.session.selected, camera_delta)
 	else:
 		result = host.session.document.preview_translate_components(host.session.components, camera_delta)
-	host.broadcast_mutation_preview(result, self)
+	broadcast_coalesced_preview(result)
 
 func paint_brush(hit: Dictionary) -> void:
 	if hit.is_empty():
@@ -1835,7 +1914,7 @@ func update_ctrl_resize(position: Vector2) -> void:
 	var distance := (alignment * ray_direction.dot(between) - ctrl_resize_normal.dot(between)) / denominator
 	distance = snappedf(distance, host.session.grid)
 	ctrl_resize_delta = ctrl_resize_normal * distance
-	host.broadcast_mutation_preview(host.session.document.preview_translate_components(ctrl_resize_components, ctrl_resize_delta), self)
+	broadcast_coalesced_preview(host.session.document.preview_translate_components(ctrl_resize_components, ctrl_resize_delta))
 
 func finish_ctrl_gesture() -> void:
 	if ctrl_gesture in ["paint_pending", "resize_pending", "click"]:

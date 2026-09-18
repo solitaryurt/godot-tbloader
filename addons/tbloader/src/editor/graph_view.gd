@@ -70,6 +70,13 @@ var static_edge_build_count := 0
 var static_edge_generation := -1
 var static_edge_point_count := 0
 var static_edge_sum := Vector2.ZERO
+var visible_query_token: Array = []
+var visible_query_cached: Dictionary = {}
+var visible_query_hits := 0
+var visible_query_misses := 0
+var sparse_edge_buffer := PackedVector2Array()
+var selection_edge_buffer := PackedVector2Array()
+var selection_mask_buffer := PackedVector2Array()
 var selection_redraw_count := 0
 var selection_mask_point_count := 0
 var camera_redraw_count := 0
@@ -151,7 +158,8 @@ func render_counters() -> Dictionary:
 		"dense_buffer_full_refreshes": dense_buffer_full_refreshes,
 		"dense_buffer_partial_refreshes": dense_buffer_partial_refreshes,
 		"dense_visible_buffers": dense_visible_buffer_count,
-		"dense_total_buffers": dense_render_layers.size()}
+		"dense_total_buffers": dense_render_layers.size(),
+		"visible_query_hits": visible_query_hits, "visible_query_misses": visible_query_misses}
 
 func static_edge_signature() -> Dictionary:
 	return {"generation": static_edge_generation, "points": static_edge_point_count, "sum": static_edge_sum}
@@ -167,6 +175,8 @@ func reset_render_counters() -> void:
 	selection_redraw_count = 0
 	selection_mask_point_count = 0
 	camera_redraw_count = 0
+	visible_query_hits = 0
+	visible_query_misses = 0
 
 func _notification(what: int) -> void:
 	if what in [NOTIFICATION_APPLICATION_FOCUS_OUT, NOTIFICATION_WM_WINDOW_FOCUS_OUT]:
@@ -324,7 +334,10 @@ func cancel() -> void:
 
 func preview_result(result: Dictionary) -> void:
 	if is_instance_valid(host):
-		host.broadcast_mutation_preview(result, self)
+		if host.has_method("queue_mutation_preview"):
+			host.queue_mutation_preview(result, self)
+		else:
+			host.broadcast_mutation_preview(result, self)
 
 func update_exact_preview() -> void:
 	if host.session.selected.is_empty():
@@ -481,6 +494,7 @@ func clear_dense_edge_cache() -> void:
 	static_edge_generation = -1
 	static_edge_point_count = 0
 	static_edge_sum = Vector2.ZERO
+	invalidate_visible_query()
 	clear_dense_render_layers()
 
 func clear_dense_render_layers() -> void:
@@ -1064,6 +1078,25 @@ func visible_query() -> Dictionary:
 	var ids: PackedInt64Array = host.session.document.query_brushes_2d(orientation, query_p.min(query_q), query_p.max(query_q))
 	return {"rect": visible_rect, "ids": ids, "dense": ids.size() > DENSE_EDGE_THRESHOLD}
 
+func visible_query_draw_token() -> Array:
+	return [host.session.document.get_instance_id(), host.session.document.get_state_generation(),
+		host.session.visibility_generation, orientation, origin, zoom, size]
+
+func cached_visible_query() -> Dictionary:
+	var token := visible_query_draw_token()
+	if not visible_query_cached.is_empty() and visible_query_token == token:
+		visible_query_hits += 1
+		return visible_query_cached
+	visible_query_misses += 1
+	var result := visible_query()
+	visible_query_token = token
+	visible_query_cached = result
+	return result
+
+func invalidate_visible_query() -> void:
+	visible_query_token = []
+	visible_query_cached = {}
+
 func draw_static_layer(canvas: Control) -> void:
 	canvas.draw_rect(Rect2(Vector2.ZERO, size), Color("20252d"))
 	var a = axes()
@@ -1085,13 +1118,15 @@ func draw_static_layer(canvas: Control) -> void:
 			canvas.draw_line(project(p), project(q), color, 1.0, true)
 			v += step
 	draw_origin_compass(canvas)
-	var query := visible_query()
+	var query := cached_visible_query()
 	if query.dense:
 		draw_dense_edges(canvas, query.ids)
 		return
 	hide_dense_render_layers()
-	var base_edges := PackedVector2Array()
-	static_edge_sum = Vector2.ZERO
+	# Reuse the sparse buffer across draws: size once, then fill by index so
+	# capacity is retained instead of reallocating per edge append.
+	var visible_sparse: Array = []
+	var total := 0
 	for id in query.ids:
 		var brush: Dictionary = host.session.brush(id)
 		if not host.session.brush_visible(brush):
@@ -1099,21 +1134,31 @@ func draw_static_layer(canvas: Control) -> void:
 		var projected_bounds := Rect2(project(brush.aabb_min), project(brush.aabb_max) - project(brush.aabb_min)).abs()
 		if not query.rect.intersects(projected_bounds):
 			continue
+		visible_sparse.append(brush)
+		total += brush.edges.size()
+	sparse_edge_buffer.resize(total)
+	static_edge_sum = Vector2.ZERO
+	var cursor := 0
+	for brush in visible_sparse:
 		for i in range(0, brush.edges.size(), 2):
-			base_edges.append(project(brush.edges[i]))
-			base_edges.append(project(brush.edges[i + 1]))
+			var p2 := project(brush.edges[i])
+			var q2 := project(brush.edges[i + 1])
+			sparse_edge_buffer[cursor] = p2
+			sparse_edge_buffer[cursor + 1] = q2
+			cursor += 2
 			static_edge_sum += map_edge_point(brush.edges[i]) + map_edge_point(brush.edges[i + 1])
 	static_edge_generation = host.session.document.get_state_generation()
-	static_edge_point_count = base_edges.size()
+	static_edge_point_count = sparse_edge_buffer.size()
 	static_edge_build_count += 1
-	if not base_edges.is_empty():
-		canvas.draw_multiline(base_edges, Color("9eb2c7"), 1, true)
+	if not sparse_edge_buffer.is_empty():
+		canvas.draw_multiline(sparse_edge_buffer, Color("9eb2c7"), 1, true)
 
 func draw_selection_layer(canvas: Control) -> void:
-	var query := visible_query()
-	var selected_edges := PackedVector2Array()
-	var original_edges := PackedVector2Array()
+	var query := cached_visible_query()
 	var visible_brushes: Array = []
+	var selected_total := 0
+	var mask_total := 0
+	var need_mask: bool = gesture in ["move", "rotate"]
 	for id in host.session.selected:
 		var brush: Dictionary = host.session.brush(id)
 		if not host.session.brush_visible(brush):
@@ -1122,18 +1167,31 @@ func draw_selection_layer(canvas: Control) -> void:
 		if not query.dense and not query.rect.intersects(projected_bounds):
 			continue
 		visible_brushes.append(brush)
+		selected_total += brush.edges.size()
+		if need_mask:
+			mask_total += brush.edges.size()
+	# Reuse selection buffers across draws; resize retains capacity.
+	selection_edge_buffer.resize(selected_total)
+	selection_mask_buffer.resize(mask_total)
+	var selected_cursor := 0
+	var mask_cursor := 0
+	for brush in visible_brushes:
 		var offset = delta if gesture == "move" else Vector3.ZERO
 		for i in range(0, brush.edges.size(), 2):
 			var p: Vector3 = brush.edges[i] + offset
 			var q: Vector3 = brush.edges[i + 1] + offset
-			if gesture in ["move", "rotate"]:
-				original_edges.append(map_edge_point(brush.edges[i]) if query.dense else project(brush.edges[i]))
-				original_edges.append(map_edge_point(brush.edges[i + 1]) if query.dense else project(brush.edges[i + 1]))
+			if need_mask:
+				selection_mask_buffer[mask_cursor] = map_edge_point(brush.edges[i]) if query.dense else project(brush.edges[i])
+				selection_mask_buffer[mask_cursor + 1] = map_edge_point(brush.edges[i + 1]) if query.dense else project(brush.edges[i + 1])
+				mask_cursor += 2
 			if gesture == "rotate":
 				p = rotate_point(p, rotation_angle)
 				q = rotate_point(q, rotation_angle)
-			selected_edges.append(map_edge_point(p) if query.dense else project(p))
-			selected_edges.append(map_edge_point(q) if query.dense else project(q))
+			selection_edge_buffer[selected_cursor] = map_edge_point(p) if query.dense else project(p)
+			selection_edge_buffer[selected_cursor + 1] = map_edge_point(q) if query.dense else project(q)
+			selected_cursor += 2
+	var selected_edges := selection_edge_buffer
+	var original_edges := selection_mask_buffer
 	if query.dense and not selected_edges.is_empty():
 		var a := axes()
 		var canvas_origin: Vector2 = size * 0.5 + Vector2(-origin[a.x], origin[a.y]) * zoom

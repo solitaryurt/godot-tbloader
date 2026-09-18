@@ -151,6 +151,21 @@ struct LMEditorBrushBuildResult {
 LMEditorBrushBuildResult lm_build_editor_brush_geometry(const LMBrush &brush, const LMEditorBrushBuildContext &context);
 bool lm_validate_editor_brush_geometry(const LMBrush &brush, const LMEditorBrushGeometry &geometry);
 
+struct LMEditorBrushTranslateResult {
+	LMEditorBrushBuildStatus status = LMEditorBrushBuildStatus::OK;
+	LMEditorBrushGeometry geometry;
+	explicit operator bool() const { return status == LMEditorBrushBuildStatus::OK; }
+};
+
+// Rigid-translation fast path for POSITIONS-only edits (no TOPOLOGY change).
+// Shifts cached positions/face-centers/bounds by delta, recomputes corner UVs
+// from the updated source faces, and keeps face spans/corner topology/edges
+// shared via copy-on-write. Performs only cheap finite/bounds checks; callers
+// must guarantee a pure translation (all plane points shifted by delta) with
+// unit plane normals (|n|-1 <= 1e-9) and fall back to a full build otherwise.
+LMEditorBrushTranslateResult lm_translate_editor_brush_geometry(const LMBrush &brush,
+		const LMEditorBrushGeometry &source, vec3 delta, const LMEditorBrushBuildContext &context);
+
 struct LMEditorBrushUVUpdateResult {
 	LMEditorBrushBuildStatus status = LMEditorBrushBuildStatus::OK;
 	std::shared_ptr<const LMEditorBrushGeometry> geometry;

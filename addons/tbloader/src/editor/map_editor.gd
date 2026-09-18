@@ -96,6 +96,12 @@ var cut_points: Array[Vector3] = []
 var cut_plane_points: Array[Vector3] = []
 var cut_flip := false
 var mutation_preview_owner: WeakRef = weakref(null)
+var mutation_preview_generation := 0
+var mutation_preview_pending := false
+var mutation_preview_queued: Dictionary = {}
+var mutation_preview_queued_owner: WeakRef = weakref(null)
+var mutation_preview_coalesced := 0
+var mutation_preview_flushes := 0
 var entity_menu: PopupMenu
 var entity_menu_actions: Dictionary = {}
 var entity_menu_session: WeakRef = weakref(null)
@@ -404,6 +410,12 @@ func apply_dense_translation(movement: Vector3) -> void:
 		graph.apply_dense_translation(movement)
 
 func broadcast_mutation_preview(result: Dictionary, owner: Object) -> bool:
+	# A synchronous broadcast supersedes any coalesced gesture preview still
+	# waiting for its deferred dispatch; drop the stale queue first.
+	mutation_preview_generation += 1
+	mutation_preview_pending = false
+	mutation_preview_queued = {}
+	mutation_preview_queued_owner = weakref(null)
 	if not result.get("ok", false):
 		clear_mutation_preview(owner)
 		session.report(result)
@@ -413,10 +425,57 @@ func broadcast_mutation_preview(result: Dictionary, owner: Object) -> bool:
 		camera.set_candidate_preview(result.get("value", []))
 	return true
 
+func queue_mutation_preview(result: Dictionary, owner: Object) -> bool:
+	# High-frequency gesture path: keep only the latest preview and dispatch
+	# once per frame, mirroring camera preview_grid_move's deferred pattern.
+	if not result.get("ok", false):
+		mutation_preview_queued = {}
+		mutation_preview_queued_owner = weakref(null)
+		return broadcast_mutation_preview(result, owner)
+	mutation_preview_queued = result
+	mutation_preview_queued_owner = weakref(owner)
+	mutation_preview_coalesced += 1
+	if mutation_preview_pending:
+		return true
+	mutation_preview_pending = true
+	call_deferred("_flush_mutation_preview", mutation_preview_generation)
+	return true
+
+func _flush_mutation_preview(generation: int) -> void:
+	if generation != mutation_preview_generation:
+		return
+	mutation_preview_pending = false
+	if mutation_preview_queued.is_empty():
+		return
+	var result: Dictionary = mutation_preview_queued
+	mutation_preview_queued = {}
+	var owner: Object = mutation_preview_queued_owner.get_ref()
+	mutation_preview_queued_owner = weakref(null)
+	mutation_preview_flushes += 1
+	# Flush through the synchronous worker without re-invalidating the queue:
+	# the pending state was already consumed above.
+	if not result.get("ok", false):
+		clear_mutation_preview(owner)
+		session.report(result)
+		return
+	mutation_preview_owner = weakref(owner)
+	for camera in cameras:
+		camera.set_candidate_preview(result.get("value", []))
+
+func flush_mutation_preview_now() -> bool:
+	if not mutation_preview_pending or mutation_preview_queued.is_empty():
+		return false
+	_flush_mutation_preview(mutation_preview_generation)
+	return true
+
 func clear_mutation_preview(owner: Object = null) -> void:
 	var current = mutation_preview_owner.get_ref()
 	if owner != null and current != null and current != owner:
 		return
+	mutation_preview_generation += 1
+	mutation_preview_pending = false
+	mutation_preview_queued = {}
+	mutation_preview_queued_owner = weakref(null)
 	mutation_preview_owner = weakref(null)
 	for camera in cameras:
 		camera.clear_candidate_preview()

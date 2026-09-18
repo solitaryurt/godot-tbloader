@@ -78,30 +78,34 @@ size_t LMMapData::retained_bytes() const {
 std::shared_ptr<LMMapData> LMMapData::source_clone() const {
 	auto result = std::make_shared<LMMapData>();
 	result->entity_count = entity_count;
-	result->entities = static_cast<LMEntity *>(calloc(entity_count, sizeof(LMEntity)));
+	// All elements are fully overwritten below (target = source per entity),
+	// so skip calloc zeroing; no behavior change.
+	result->entities = entity_count ? static_cast<LMEntity *>(malloc(size_t(entity_count) * sizeof(LMEntity))) : nullptr;
 	for (int e = 0; e < entity_count; ++e) {
 		const auto &source = entities[e];
 		auto &target = result->entities[e];
 		target = source;
 		target.primitives = clone_array(source.primitives, source.primitive_count);
-		target.properties = static_cast<LMProperty *>(calloc(source.property_count, sizeof(LMProperty)));
+		// LMProperty is {key, value}; both are assigned per element below.
+		target.properties = source.property_count ? static_cast<LMProperty *>(malloc(size_t(source.property_count) * sizeof(LMProperty))) : nullptr;
 		for (int p = 0; p < source.property_count; ++p) {
 			target.properties[p].key = clone_string(source.properties[p].key);
 			target.properties[p].value = clone_string(source.properties[p].value);
 		}
-		target.brushes = static_cast<LMBrush *>(calloc(source.brush_count, sizeof(LMBrush)));
+		// Each brush/patch slot is overwritten from source before use.
+		target.brushes = source.brush_count ? static_cast<LMBrush *>(malloc(size_t(source.brush_count) * sizeof(LMBrush))) : nullptr;
 		for (int b = 0; b < source.brush_count; ++b) {
 			target.brushes[b] = source.brushes[b];
 			target.brushes[b].faces = clone_array(source.brushes[b].faces, source.brushes[b].face_count);
 		}
-		target.patches = static_cast<LMPatch *>(calloc(source.patch_count, sizeof(LMPatch)));
+		target.patches = source.patch_count ? static_cast<LMPatch *>(malloc(size_t(source.patch_count) * sizeof(LMPatch))) : nullptr;
 		for (int p = 0; p < source.patch_count; ++p) {
 			target.patches[p] = source.patches[p];
 			target.patches[p].control_points = clone_array(source.patches[p].control_points, source.patches[p].width * source.patches[p].height);
 		}
 	}
 	result->texture_count = texture_count;
-	result->textures = static_cast<LMTextureData *>(calloc(texture_count, sizeof(LMTextureData)));
+	result->textures = texture_count ? static_cast<LMTextureData *>(malloc(size_t(texture_count) * sizeof(LMTextureData))) : nullptr;
 	for (int t = 0; t < texture_count; ++t) {
 		result->textures[t] = textures[t];
 		result->textures[t].name = clone_string(textures[t].name);

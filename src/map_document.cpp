@@ -214,6 +214,9 @@ Dictionary TBMapDocument::prepare(const std::string &text, std::shared_ptr<LMMap
 Dictionary TBMapDocument::build_base_editor_geometry(LMMapData &data, const Dictionary &sizes, std::shared_ptr<const TBMapDocumentState::BaseEditorGeometry> &out, const StringName &operation, const String &error_path) const {
 	const auto build_begin = std::chrono::steady_clock::now();
 	auto store = std::make_shared<TBMapDocumentState::BaseEditorGeometry>();
+	size_t total_brushes = 0;
+	for (int e = 0; e < data.entity_count; ++e) total_brushes += size_t(data.entities[e].brush_count);
+	if (total_brushes) store->brushes.reserve(total_brushes);
 	std::vector<LMEditorTextureSize> dimensions(data.texture_count);
 	for (int t = 0; t < data.texture_count; ++t) {
 		const Vector2i size = sizes.get(String::utf8(data.textures[t].name), Vector2i(1, 1));
@@ -321,6 +324,9 @@ Dictionary TBMapDocument::update_texture_context_geometry(const LMMapData &data,
 
 void TBMapDocument::assign_ids(LMMapData &candidate) {
 	issued_ids.clear();
+	size_t total_ids = 0;
+	for (int i = 0; i < candidate.entity_count; ++i) total_ids += size_t(1) + size_t(candidate.entities[i].primitive_count);
+	if (total_ids) issued_ids.reserve(total_ids);
 	for (int i = 0; i < candidate.entity_count; ++i) {
 		auto &e = candidate.entities[i];
 		e.id = next_id++; issued_ids[e.id] = 'e';
@@ -335,6 +341,9 @@ void TBMapDocument::assign_ids(LMMapData &candidate) {
 }
 void TBMapDocument::rebuild_live_index() {
 	live_ids.clear();
+	size_t total_ids = 0;
+	for (int e = 0; e < map->entity_count; ++e) total_ids += size_t(1) + size_t(map->entities[e].primitive_count);
+	if (total_ids) live_ids.reserve(total_ids);
 	for (int e = 0; e < map->entity_count; ++e) {
 		const auto &entity = map->entities[e];
 		live_ids[entity.id] = {'e', e, -1, -1};
@@ -367,15 +376,23 @@ void TBMapDocument::commit(std::shared_ptr<LMMapData> candidate, std::shared_ptr
 }
 void TBMapDocument::commit(std::shared_ptr<LMMapData> candidate, std::shared_ptr<const TBMapDocumentState::BaseEditorGeometry> geometry, std::shared_ptr<const std::string> text, bool was_dirty) {
 	const int64_t before_generation = state_generation;
-	std::set<int64_t> old_brush_ids, new_brush_ids;
+	size_t old_count = 0, new_count = 0;
+	if (map) for (int e = 0; e < map->entity_count; ++e) old_count += size_t(map->entities[e].brush_count);
+	for (int e = 0; e < candidate->entity_count; ++e) new_count += size_t(candidate->entities[e].brush_count);
+	std::unordered_set<int64_t> old_brush_ids, new_brush_ids;
+	if (old_count) old_brush_ids.reserve(old_count * 2 + 1);
+	if (new_count) new_brush_ids.reserve(new_count * 2 + 1);
 	if (map) for (int e = 0; e < map->entity_count; ++e) for (int b = 0; b < map->entities[e].brush_count; ++b) old_brush_ids.insert(map->entities[e].brushes[b].id);
-	for (int e = 0; e < candidate->entity_count; ++e) for (int b = 0; b < candidate->entities[e].brush_count; ++b) new_brush_ids.insert(candidate->entities[e].brushes[b].id);
 	// Structural commits always reset derived roots; local transactions own the
 	// only cache-compatible generation transitions.
 	clear_spatial_caches();
 	clear_preview_caches();
 	++topology;
-	for (int i = 0; i < candidate->entity_count; ++i) for (int b = 0; b < candidate->entities[i].brush_count; ++b) candidate->entities[i].brushes[b].topology_revision = topology;
+	// Fuse the new-id collection with the mandatory topology stamp: single pass.
+	for (int i = 0; i < candidate->entity_count; ++i) for (int b = 0; b < candidate->entities[i].brush_count; ++b) {
+		new_brush_ids.insert(candidate->entities[i].brushes[b].id);
+		candidate->entities[i].brushes[b].topology_revision = topology;
+	}
 	map = std::move(candidate);
 	base_geometry = std::move(geometry);
 	clear_editor_state();
@@ -385,8 +402,10 @@ void TBMapDocument::commit(std::shared_ptr<LMMapData> candidate, std::shared_ptr
 	state_generation = ++next_state_generation;
 	last_change = {}; last_change.before_generation = before_generation; last_change.generation = state_generation; last_change.domains = LMEditorBrushDirtyDomain::ALL;
 	last_change.reset = true;
-	for (int64_t id : new_brush_ids) if (!old_brush_ids.count(id)) last_change.added_ids.push_back(id);
-	for (int64_t id : old_brush_ids) if (!new_brush_ids.count(id)) last_change.removed_ids.push_back(id);
+	last_change.added_ids.reserve(new_count);
+	last_change.removed_ids.reserve(old_count);
+	for (int64_t id : new_brush_ids) if (old_brush_ids.find(id) == old_brush_ids.end()) last_change.added_ids.push_back(id);
+	for (int64_t id : old_brush_ids) if (new_brush_ids.find(id) == new_brush_ids.end()) last_change.removed_ids.push_back(id);
 	++revision;
 	emit_signal("map_changed", revision);
 	if (was_dirty != is_dirty()) emit_signal("dirty_changed", is_dirty());

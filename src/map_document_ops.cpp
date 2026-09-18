@@ -11,9 +11,12 @@
 #include <chrono>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <set>
+#include <unordered_map>
 
 using namespace godot;
 namespace {
@@ -132,8 +135,64 @@ std::string origin_text(Vector3 v) {
 }
 std::string brush_source_text(const std::vector<LMFace> &faces, const std::vector<std::string> &materials) {
 	std::string out;
+	out.reserve(faces.size() * 256);
 	for (size_t f = 0; f < faces.size(); ++f) out += lm_write_face(faces[f], materials[f]);
 	return out;
+}
+// Binary dirty check: lm_write_face (map_writer.cpp face_to) serializes only
+// plane_points (9 doubles), the texture string, is_valve_uv + the active UV
+// branch, uv_extra (3 doubles) and surface_flags. It never reads
+// texture_idx, plane_normal/plane_dist, or the inactive UV branch. number()
+// uses to_chars general with max_digits10, which is round-trip exact and
+// injective for finite doubles and distinguishes -0 ("-0" vs "0"), matching
+// bitwise equality. All serialized doubles here are finite (parser rejects
+// non-finite, mutations validate finite bounds/scales), so bitwise field
+// equality on exactly the serialized fields is equivalent to text equality.
+// texture_idx is ignored on both sides: base copies remap it to f and drafts
+// remap after the dirty check, but the writer takes texture from materials.
+inline bool double_bits_equal(double a, double b) {
+	uint64_t ua = 0, ub = 0;
+	static_assert(sizeof(double) == sizeof(uint64_t));
+	std::memcpy(&ua, &a, sizeof(double));
+	std::memcpy(&ub, &b, sizeof(double));
+	return ua == ub;
+}
+inline bool vec3_bits_equal(const vec3 &a, const vec3 &b) {
+	return double_bits_equal(a.x, b.x) && double_bits_equal(a.y, b.y) && double_bits_equal(a.z, b.z);
+}
+bool face_source_equal(const LMFace &a, const LMFace &b) {
+	if (!vec3_bits_equal(a.plane_points.v0, b.plane_points.v0)) return false;
+	if (!vec3_bits_equal(a.plane_points.v1, b.plane_points.v1)) return false;
+	if (!vec3_bits_equal(a.plane_points.v2, b.plane_points.v2)) return false;
+	if (a.is_valve_uv != b.is_valve_uv) return false;
+	if (a.is_valve_uv) {
+		if (!vec3_bits_equal(a.uv_valve.u.axis, b.uv_valve.u.axis)) return false;
+		if (!double_bits_equal(a.uv_valve.u.offset, b.uv_valve.u.offset)) return false;
+		if (!vec3_bits_equal(a.uv_valve.v.axis, b.uv_valve.v.axis)) return false;
+		if (!double_bits_equal(a.uv_valve.v.offset, b.uv_valve.v.offset)) return false;
+	} else {
+		if (!double_bits_equal(a.uv_standard.u, b.uv_standard.u)) return false;
+		if (!double_bits_equal(a.uv_standard.v, b.uv_standard.v)) return false;
+	}
+	if (!double_bits_equal(a.uv_extra.rot, b.uv_extra.rot)) return false;
+	if (!double_bits_equal(a.uv_extra.scale_x, b.uv_extra.scale_x)) return false;
+	if (!double_bits_equal(a.uv_extra.scale_y, b.uv_extra.scale_y)) return false;
+	if (a.surface_flags.specified != b.surface_flags.specified) return false;
+	if (a.surface_flags.specified) {
+		if (a.surface_flags.contents != b.surface_flags.contents) return false;
+		if (a.surface_flags.surface != b.surface_flags.surface) return false;
+		if (a.surface_flags.value != b.surface_flags.value) return false;
+	}
+	return true;
+}
+bool brush_source_equal(const std::vector<LMFace> &a_faces, const std::vector<std::string> &a_materials,
+		const std::vector<LMFace> &b_faces, const std::vector<std::string> &b_materials) {
+	if (a_faces.size() != b_faces.size() || a_materials.size() != b_materials.size() || a_faces.size() != a_materials.size()) return false;
+	for (size_t f = 0; f < a_faces.size(); ++f) {
+		if (a_materials[f] != b_materials[f]) return false;
+		if (!face_source_equal(a_faces[f], b_faces[f])) return false;
+	}
+	return true;
 }
 LMBrushTopology compact_topology(const LMEditorBrushGeometry &geometry) {
 	LMBrushTopology out; out.vertices.assign(geometry.positions.begin(), geometry.positions.end()); out.mins = geometry.mins; out.maxs = geometry.maxs;
@@ -180,6 +239,22 @@ Array candidate_draw_data(const LMMapData &candidate, const Dictionary &sources,
 		entry["edge_vertex_indices"] = edge_indices; entry["faces"] = faces; out.push_back(entry);
 	}
 	return out;
+}
+// Drag-preview fast path: fragment text bounds without serializing numbers.
+// Lower uses minimal "0" numbers; upper allows 32 chars per number plus quote
+// escapes. Epairs are identical in before/after for drag mutations and cancel
+// in the delta, so only brush faces and per-brush overhead are bounded here.
+bool preview_fragments_have_patch(const LMMapEdit &edit) {
+	for (const auto &e : edit.entities) for (const auto &p : e.primitives) if (p.patch) return true;
+	return false;
+}
+void preview_fragment_face_bounds(const LMMapEdit &edit, size_t &lower, size_t &upper) {
+	lower = 0; upper = 0;
+	for (const auto &e : edit.entities) for (const auto &p : e.primitives) {
+		if (p.patch) continue;
+		lower += 4; upper += 4;
+		for (const auto &f : p.faces) { lower += f.texture.size() + 40; upper += f.texture.size() * 2 + 800; }
+	}
 }
 }
 
@@ -257,29 +332,128 @@ void TBMapDocument::stage_preview_brushes(const PackedInt64Array &ids, LMMapEdit
 
 Dictionary TBMapDocument::preview_fragments(const LMMapEdit &before, const LMMapEdit &after, const StringName &operation, const Dictionary &sources) const {
 	if (after.entities.empty()) return success(false, Array());
-	const std::string old_text = before.text(), new_text = after.text();
-	const size_t current_text_size = size_t(int64_t(canonical->size()) + (editor ? editor->canonical_size_delta : 0));
-	if (new_text.size() > old_text.size() && new_text.size() - old_text.size() > LMMapParser::MAX_TEXT_BYTES - current_text_size)
-		return failure("LIMIT_EXCEEDED", "Canonical map exceeds 16 MiB", operation, path);
 	const size_t old_work = edit_geometry_work(before), new_work = edit_geometry_work(after);
 	if (new_work > old_work) {
 		const size_t current_work = map_geometry_work(*map);
 		if (current_work >= 8000000 || new_work - old_work > 8000000 - current_work)
 			return failure("LIMIT_EXCEEDED", "Geometry work budget exceeded", operation, path);
 	}
-	std::shared_ptr<LMMapData> candidate;
-	Dictionary result = prepare(new_text, candidate, operation, path); if (!bool(result["ok"])) return result;
-	for (int e = 0; e < candidate->entity_count; ++e) {
-		candidate->entities[e].id = after.entities[e].id;
-		for (int k = 0; k < candidate->entities[e].primitive_count; ++k) {
-			const auto &ref = candidate->entities[e].primitives[k];
-			if (ref.is_patch) candidate->entities[e].patches[ref.index].id = after.entities[e].primitives[k].id;
-			else candidate->entities[e].brushes[ref.index].id = after.entities[e].primitives[k].id;
+	const size_t current_text_size = size_t(int64_t(canonical->size()) + (editor ? editor->canonical_size_delta : 0));
+	// Preserve LIMIT_EXCEEDED parity without serializing numbers on the hot path.
+	// Patches keep the exact slow path; brush fragments use cheap face bounds and
+	// fall back to exact serialization only when the upper bound could exceed 16 MiB.
+	if (preview_fragments_have_patch(before) || preview_fragments_have_patch(after)) {
+		const std::string old_text = before.text(), new_text = after.text();
+		if (new_text.size() > old_text.size() && new_text.size() - old_text.size() > LMMapParser::MAX_TEXT_BYTES - current_text_size)
+			return failure("LIMIT_EXCEEDED", "Canonical map exceeds 16 MiB", operation, path);
+		std::shared_ptr<LMMapData> candidate;
+		Dictionary result = prepare(new_text, candidate, operation, path); if (!bool(result["ok"])) return result;
+		for (int e = 0; e < candidate->entity_count; ++e) {
+			candidate->entities[e].id = after.entities[e].id;
+			for (int k = 0; k < candidate->entities[e].primitive_count; ++k) {
+				const auto &ref = candidate->entities[e].primitives[k];
+				if (ref.is_patch) candidate->entities[e].patches[ref.index].id = after.entities[e].primitives[k].id;
+				else candidate->entities[e].brushes[ref.index].id = after.entities[e].primitives[k].id;
+			}
+		}
+		std::shared_ptr<const TBMapDocumentState::BaseEditorGeometry> geometry;
+		result = build_base_editor_geometry(*candidate, texture_sizes, geometry, operation, path); if (!bool(result["ok"])) return result;
+		return success(false, candidate_draw_data(*candidate, sources, geometry->brushes));
+	}
+	{
+		size_t old_lower = 0, old_upper_ignored = 0, new_lower_ignored = 0, new_upper = 0;
+		preview_fragment_face_bounds(before, old_lower, old_upper_ignored);
+		preview_fragment_face_bounds(after, new_lower_ignored, new_upper);
+		if (new_upper > old_lower) {
+			const size_t delta_upper = new_upper - old_lower;
+			if (current_text_size + delta_upper < current_text_size || current_text_size + delta_upper > LMMapParser::MAX_TEXT_BYTES) {
+				const std::string old_text = before.text(), new_text = after.text();
+				if (new_text.size() > old_text.size() && new_text.size() - old_text.size() > LMMapParser::MAX_TEXT_BYTES - current_text_size)
+					return failure("LIMIT_EXCEEDED", "Canonical map exceeds 16 MiB", operation, path);
+			}
 		}
 	}
-	std::shared_ptr<const TBMapDocumentState::BaseEditorGeometry> geometry;
-	result = build_base_editor_geometry(*candidate, texture_sizes, geometry, operation, path); if (!bool(result["ok"])) return result;
-	return success(false, candidate_draw_data(*candidate, sources, geometry->brushes));
+	// Direct drag-preview path: recompute supporting planes exactly like the
+	// parser (same cross-product order and degenerate threshold), then run the
+	// compact builder per staged brush. No text serialize/parse round-trip;
+	// prepare() remains the commit-time validator, so canonical output is unchanged.
+	// Fixtures reuse one material across faces: resolve each unique material
+	// through Godot once per preview instead of once per face.
+	std::unordered_map<std::string, LMEditorTextureSize> preview_size_cache;
+	Array out;
+	for (const auto &entity : after.entities) {
+		for (const auto &primitive : entity.primitives) {
+			if (primitive.patch) return failure("UNSUPPORTED_SYNTAX", "Patch preview is unsupported", operation, path);
+			const int64_t brush_id = primitive.id;
+			if (!sources.has(brush_id)) continue;
+			const size_t face_count = primitive.faces.size();
+			if (face_count > 64) return failure("LIMIT_EXCEEDED", "Brush exceeds 64 faces", operation, path);
+			if (face_count < 4) return failure("INVALID_GEOMETRY", "Brush requires at least four planes", operation, path);
+			std::vector<LMFace> faces; faces.reserve(face_count);
+			std::vector<std::string> materials; materials.reserve(face_count);
+			for (const auto &edit_face : primitive.faces) {
+				if (edit_face.texture.size() > 65536) return failure("LIMIT_EXCEEDED", "Token exceeds 64 KiB", operation, path);
+				LMFace face = edit_face.plane;
+				const vec3 points[3] = {face.plane_points.v0, face.plane_points.v1, face.plane_points.v2};
+				for (const vec3 &point : points) {
+					if (!std::isfinite(point.x) || !std::isfinite(point.y) || !std::isfinite(point.z))
+						return failure("INVALID_GEOMETRY", "Brush must be a finite, closed solid with nonempty faces", operation, path);
+					if (std::abs(point.x) > 1e9 || std::abs(point.y) > 1e9 || std::abs(point.z) > 1e9)
+						return failure("LIMIT_EXCEEDED", "Numeric magnitude exceeds 1e9", operation, path);
+				}
+				const vec3 n = vec3_cross(vec3_sub(face.plane_points.v2, face.plane_points.v1), vec3_sub(face.plane_points.v1, face.plane_points.v0));
+				if (!(vec3_dot(n, n) >= 1e-18)) return failure("INVALID_GEOMETRY", "Degenerate face plane", operation, path);
+				face.plane_normal = vec3_normalize(n);
+				if (!std::isfinite(face.plane_normal.x) || !std::isfinite(face.plane_normal.y) || !std::isfinite(face.plane_normal.z))
+					return failure("INVALID_GEOMETRY", "Brush must be a finite, closed solid with nonempty faces", operation, path);
+				face.plane_dist = vec3_dot(face.plane_normal, face.plane_points.v0);
+				if (!std::isfinite(face.plane_dist)) return failure("INVALID_GEOMETRY", "Brush must be a finite, closed solid with nonempty faces", operation, path);
+				if (std::abs(face.uv_extra.scale_x) < 1e-9 || std::abs(face.uv_extra.scale_y) < 1e-9)
+					return failure("INVALID_GEOMETRY", "Texture scale is zero or too small", operation, path);
+				if (face.is_valve_uv && (vec3_dot(face.uv_valve.u.axis, face.uv_valve.u.axis) < 1e-18 || vec3_dot(face.uv_valve.v.axis, face.uv_valve.v.axis) < 1e-18))
+					return failure("INVALID_GEOMETRY", "Zero Valve projection axis", operation, path);
+				faces.push_back(face);
+				materials.push_back(edit_face.texture);
+			}
+			LMBrush brush{};
+			brush.id = brush_id;
+			brush.face_count = static_cast<int>(faces.size());
+			brush.faces = faces.data();
+			std::vector<LMEditorTextureSize> sizes(faces.size());
+			for (size_t f = 0; f < faces.size(); ++f) {
+				faces[f].texture_idx = static_cast<int>(f);
+				auto cached = preview_size_cache.find(materials[f]);
+				if (cached == preview_size_cache.end()) {
+					Vector2i size = texture_sizes.get(String::utf8(materials[f].c_str()), Vector2i(1, 1));
+					if (size.x <= 0 || size.y <= 0) size = Vector2i(1, 1);
+					cached = preview_size_cache.emplace(materials[f], LMEditorTextureSize{size.x, size.y}).first;
+				}
+				sizes[f] = cached->second;
+			}
+			const LMEditorBrushBuildContext context{sizes.data(), sizes.size()};
+			auto built = lm_build_editor_brush_geometry(brush, context);
+			if (!built || !lm_validate_editor_brush_geometry(brush, built.geometry))
+				return failure("INVALID_GEOMETRY", "Brush must be a finite, closed solid with nonempty faces", operation, path);
+			const auto &geometry = built.geometry;
+			Dictionary entry; Array draw_faces; PackedVector3Array vertices, edges; PackedInt32Array edge_indices;
+			for (const auto &point : geometry.positions) vertices.push_back(vector(point));
+			for (const auto &edge : geometry.edges) {
+				edge_indices.push_back(edge.a); edge_indices.push_back(edge.b);
+				edges.push_back(vector(geometry.positions[edge.a])); edges.push_back(vector(geometry.positions[edge.b]));
+			}
+			for (int f = 0; f < brush.face_count; ++f) {
+				const auto &gface = geometry.faces[f]; Dictionary data; PackedVector3Array winding; PackedInt32Array indices;
+				for (uint32_t v = 0; v < gface.corner_count; ++v) { const auto &corner = geometry.corners[gface.corner_begin + v]; winding.push_back(vector(geometry.positions[corner.position])); indices.push_back(corner.position); }
+				data["index"] = f; data["winding"] = winding; data["vertex_indices"] = indices;
+				data["center"] = vector(gface.center); data["normal"] = vector(faces[f].plane_normal);
+				data["texture"] = String::utf8(materials[f].c_str()); draw_faces.push_back(data);
+			}
+			entry["id"] = brush_id; entry["source_id"] = sources[brush_id]; entry["entity_id"] = entity.id;
+			entry["aabb_min"] = vector(geometry.mins); entry["aabb_max"] = vector(geometry.maxs); entry["vertices"] = vertices; entry["edges"] = edges;
+			entry["edge_vertex_indices"] = edge_indices; entry["faces"] = draw_faces; out.push_back(entry);
+		}
+	}
+	return success(false, out);
 }
 Dictionary TBMapDocument::check_brushes(const PackedInt64Array &ids, const StringName &operation) const {
 	for (int64_t id : ids) if (!live_location(id, 'b')) {
@@ -361,7 +535,7 @@ Dictionary TBMapDocument::translate_brushes(const PackedInt64Array &ids, Vector3
 Dictionary TBMapDocument::local_brush_transaction(const std::vector<int64_t> &ids, const StringName &operation, LMEditorBrushDirtyDomain domains, const LocalBrushMutation &mutation) {
 	last_document_change.unref();
 	last_operation = {}; last_operation.operation = operation; translation_counter_scope = false;
-	std::vector<LocalBrushDraft> drafts; drafts.reserve(ids.size()); std::vector<std::string> before;
+	std::vector<LocalBrushDraft> drafts; drafts.reserve(ids.size());
 	std::vector<std::shared_ptr<const EditorState::BrushRecord>> before_records; before_records.reserve(ids.size());
 	std::vector<std::shared_ptr<const EditorState::BrushRecord>> base_records; base_records.reserve(ids.size());
 	for (int64_t id : ids) {
@@ -369,7 +543,7 @@ Dictionary TBMapDocument::local_brush_transaction(const std::vector<int64_t> &id
 		LocalBrushDraft draft; draft.id = id; draft.entity = location->entity; draft.index = location->index; draft.brush = source;
 		draft.faces.assign(source.faces, source.faces + source.face_count); draft.materials.reserve(source.face_count);
 		for (int f = 0; f < source.face_count; ++f) draft.materials.push_back(current_face_texture(location->entity, location->index, f));
-		draft.brush.faces = draft.faces.data(); before.push_back(brush_source_text(draft.faces, draft.materials));
+		draft.brush.faces = draft.faces.data();
 		auto existing = editor ? editor->brushes.find(id) : decltype(editor->brushes.find(id)){};
 		const LMBrush &base = map->entities[location->entity].brushes[location->index];
 		std::vector<LMFace> base_faces(base.faces, base.faces + base.face_count); std::vector<std::string> base_materials;
@@ -382,31 +556,116 @@ Dictionary TBMapDocument::local_brush_transaction(const std::vector<int64_t> &id
 	}
 	Dictionary applied = mutation(drafts); if (!bool(applied["ok"])) return applied;
 	auto next = std::make_shared<EditorState>(); if (editor) next->brushes = editor->brushes;
-	int64_t size_delta = editor ? editor->canonical_size_delta : 0; std::vector<int64_t> changed;
+	int64_t size_delta = editor ? editor->canonical_size_delta : 0; std::vector<int64_t> changed; changed.reserve(drafts.size());
+	// Fixture uses one shared texture, and maps in general reuse materials across
+	// faces: resolve each unique material name through Godot once per commit
+	// instead of once per face (String::utf8 + Dictionary::get per face).
+	std::unordered_map<std::string, LMEditorTextureSize> texture_size_cache;
 	for (size_t i = 0; i < drafts.size(); ++i) {
 		auto &draft = drafts[i]; if (draft.faces.size() != draft.materials.size()) return failure("INVALID_GEOMETRY", "Brush source metadata is inconsistent", operation, path);
-		if ((domains & (LMEditorBrushDirtyDomain::POSITIONS | LMEditorBrushDirtyDomain::TOPOLOGY)) != LMEditorBrushDirtyDomain::NONE) for (auto &face : draft.faces) {
-			const vec3 normal = vec3_cross(vec3_sub(face.plane_points.v2, face.plane_points.v1), vec3_sub(face.plane_points.v1, face.plane_points.v0));
-			face.plane_normal = vec3_normalize(normal); face.plane_dist = vec3_dot(face.plane_normal, face.plane_points.v0);
+		const bool topology_dirty = (domains & LMEditorBrushDirtyDomain::TOPOLOGY) != LMEditorBrushDirtyDomain::NONE;
+		const bool positions_dirty = (domains & LMEditorBrushDirtyDomain::POSITIONS) != LMEditorBrushDirtyDomain::NONE;
+		vec3 translate_delta{0, 0, 0};
+		bool is_pure_translate = false;
+		if (topology_dirty) {
+			for (auto &face : draft.faces) {
+				const vec3 normal = vec3_cross(vec3_sub(face.plane_points.v2, face.plane_points.v1), vec3_sub(face.plane_points.v1, face.plane_points.v0));
+				face.plane_normal = vec3_normalize(normal); face.plane_dist = vec3_dot(face.plane_normal, face.plane_points.v0);
+			}
+		} else if (positions_dirty) {
+			// POSITIONS-only: rigid translates keep plane normals exact and shift
+			// plane_dist analytically (dist += dot(n, delta)). Infer the uniform
+			// delta from plane points; anything else (e.g. rotation) or a
+			// drifted normal (|n|-1 > 1e-9) re-canonicalizes from points and
+			// takes the full F^3 path below.
+			const auto &before_faces = before_records[i]->faces;
+			if (!before_faces.empty() && before_faces.size() == draft.faces.size()) {
+				vec3 candidate = vec3_sub(draft.faces[0].plane_points.v0, before_faces[0].plane_points.v0);
+				if (std::isfinite(candidate.x) && std::isfinite(candidate.y) && std::isfinite(candidate.z)) {
+					bool uniform = true;
+					for (size_t f = 0; f < draft.faces.size() && uniform; ++f) {
+						const auto &after_points = draft.faces[f].plane_points;
+						const auto &before_points = before_faces[f].plane_points;
+						auto matches = [&](vec3 after, vec3 before) {
+							return after.x == before.x + candidate.x && after.y == before.y + candidate.y && after.z == before.z + candidate.z;
+						};
+						if (!matches(after_points.v0, before_points.v0) || !matches(after_points.v1, before_points.v1) ||
+								!matches(after_points.v2, before_points.v2)) {
+							uniform = false;
+						}
+					}
+					if (uniform) {
+						bool drifted = false;
+						for (const auto &face : draft.faces) {
+							const double length = vec3_length(face.plane_normal);
+							if (!std::isfinite(length) || std::abs(length - 1.0) > 1e-9) { drifted = true; break; }
+						}
+						if (!drifted) {
+							is_pure_translate = true;
+							translate_delta = candidate;
+							for (auto &face : draft.faces) face.plane_dist += vec3_dot(face.plane_normal, candidate);
+						}
+					}
+				}
+			}
+			if (!is_pure_translate) {
+				for (auto &face : draft.faces) {
+					const vec3 normal = vec3_cross(vec3_sub(face.plane_points.v2, face.plane_points.v1), vec3_sub(face.plane_points.v1, face.plane_points.v0));
+					face.plane_normal = vec3_normalize(normal); face.plane_dist = vec3_dot(face.plane_normal, face.plane_points.v0);
+				}
+			}
 		}
-		const std::string after = brush_source_text(draft.faces, draft.materials); if (after == before[i]) continue;
-		size_delta += int64_t(after.size()) - int64_t(before[i].size()); changed.push_back(draft.id);
+		// Binary dirty gate: skip 17-digit to_chars serialization when nothing
+		// affecting canonical text changed. Text/size is materialized lazily
+		// below only when binary says changed.
+		if (brush_source_equal(draft.faces, draft.materials, before_records[i]->faces, before_records[i]->materials)) continue;
+		const std::string before_text = brush_source_text(before_records[i]->faces, before_records[i]->materials);
+		const std::string after_text = brush_source_text(draft.faces, draft.materials);
+		if (after_text == before_text) continue;
+		size_delta += int64_t(after_text.size()) - int64_t(before_text.size()); changed.push_back(draft.id);
 		std::vector<LMEditorTextureSize> sizes(draft.faces.size());
 		for (size_t f = 0; f < draft.faces.size(); ++f) {
-			draft.faces[f].texture_idx = f; Vector2i size = texture_sizes.get(String::utf8(draft.materials[f].c_str()), Vector2i());
-			if (size.x <= 0 || size.y <= 0) size = Vector2i(1, 1);
-			sizes[f] = {size.x, size.y};
+			draft.faces[f].texture_idx = f;
+			auto cached = texture_size_cache.find(draft.materials[f]);
+			if (cached == texture_size_cache.end()) {
+				Vector2i size = texture_sizes.get(String::utf8(draft.materials[f].c_str()), Vector2i());
+				if (size.x <= 0 || size.y <= 0) size = Vector2i(1, 1);
+				cached = texture_size_cache.emplace(draft.materials[f], LMEditorTextureSize{size.x, size.y}).first;
+			}
+			sizes[f] = cached->second;
 		}
 		draft.brush.face_count = draft.faces.size(); draft.brush.faces = draft.faces.data();
+		if (is_pure_translate) {
+			const auto &source_geometry = before_records[i]->geometry;
+			if (source_geometry && source_geometry->faces.size() == draft.faces.size() && !source_geometry->positions.empty()) {
+				const LMEditorBrushBuildContext fast_context{sizes.data(), sizes.size()};
+				auto fast = lm_translate_editor_brush_geometry(draft.brush, *source_geometry, translate_delta, fast_context);
+				if (fast) {
+					draft.brush.center = vec3_add(before_records[i]->brush.center, translate_delta);
+					++last_operation.brush_builds;
+					if (brush_source_equal(draft.faces, draft.materials, base_records[i]->faces, base_records[i]->materials) &&
+							(domains & LMEditorBrushDirtyDomain::TOPOLOGY) == LMEditorBrushDirtyDomain::NONE) next->brushes.erase(draft.id);
+					else {
+						const uint64_t generation = editor && editor->brushes.count(draft.id) ? editor->brushes.at(draft.id)->source_generation + 1 : 1;
+						next->brushes[draft.id] = std::make_shared<const EditorState::BrushRecord>(draft.brush, std::move(draft.faces), std::move(draft.materials), std::move(fast.geometry), generation);
+					}
+					continue;
+				}
+			}
+		}
 		const LMEditorBrushBuildContext context{sizes.data(), sizes.size()}; auto built = lm_build_editor_brush_geometry(draft.brush, context); ++last_operation.brush_builds; ++last_operation.compact_full_builds;
 		if (!built || !lm_validate_editor_brush_geometry(draft.brush, built.geometry)) return failure("INVALID_GEOMETRY", "Brush must be a finite, closed solid with nonempty faces", operation, path);
 		draft.brush.center = {}; size_t corners = 0;
 		for (const auto &face : built.geometry.faces) for (uint32_t v = 0; v < face.corner_count; ++v) { draft.brush.center = vec3_add(draft.brush.center, built.geometry.positions[built.geometry.corners[face.corner_begin + v].position]); ++corners; }
 		if (corners) draft.brush.center = vec3_div_double(draft.brush.center, corners);
-		const LMBrush &base = map->entities[draft.entity].brushes[draft.index]; std::vector<LMFace> base_faces(base.faces, base.faces + base.face_count); std::vector<std::string> base_materials;
-		for (int f = 0; f < base.face_count; ++f) base_materials.emplace_back(map->textures[base.faces[f].texture_idx].name);
 		if ((domains & LMEditorBrushDirtyDomain::TOPOLOGY) != LMEditorBrushDirtyDomain::NONE) draft.brush.topology_revision = topology + 1;
-		if (after == brush_source_text(base_faces, base_materials) &&
+		// Reuse the base source captured above: base_records[i] owns the base
+		// faces/materials, so the erase-vs-keep test needs no second copy and
+		// no text serialization. Binary equality here is equivalent to text
+		// equality per face_source_equal (writer ignores texture_idx,
+		// plane_normal/dist and the inactive UV branch); remapped indices
+		// compare exactly like a fresh copy. Output and behavior are unchanged.
+		if (brush_source_equal(draft.faces, draft.materials, base_records[i]->faces, base_records[i]->materials) &&
 				(domains & LMEditorBrushDirtyDomain::TOPOLOGY) == LMEditorBrushDirtyDomain::NONE) next->brushes.erase(draft.id);
 		else {
 			const uint64_t generation = editor && editor->brushes.count(draft.id) ? editor->brushes.at(draft.id)->source_generation + 1 : 1;

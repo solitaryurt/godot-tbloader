@@ -29,6 +29,13 @@ constexpr size_t MAX_EDITOR_BRUSH_CORNERS = 4096;
 bool finite(vec3 value) {
 	return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
 }
+
+// Thread-local F^3 scratch reused across builds with clear-not-free. Capacity
+// is retained between brushes; each build clears without shrinking so the
+// 256-brush blockout workload avoids repeated allocation.
+thread_local std::vector<std::vector<BuildCorner>> t_windings;
+thread_local std::vector<vec3> t_unique_positions;
+thread_local std::vector<std::pair<uint32_t, uint32_t>> t_unique_edges;
 }
 
 struct LMEditorBrushCorners::Store {
@@ -158,7 +165,13 @@ static LMEditorBrushBuildResult build_editor_brush_geometry(const LMBrush &brush
 	if (brush.face_count > MAX_EDITOR_BRUSH_FACES) return failure(LMEditorBrushBuildStatus::LIMIT_EXCEEDED);
 	if (static_cast<uint64_t>(brush.face_count) > std::numeric_limits<uint32_t>::max()) return failure(LMEditorBrushBuildStatus::LIMIT_EXCEEDED);
 
-	std::vector<std::vector<BuildCorner>> windings(static_cast<size_t>(brush.face_count));
+	for (auto &winding : t_windings) winding.clear();
+	t_windings.resize(static_cast<size_t>(brush.face_count));
+	t_unique_positions.clear();
+	t_unique_edges.clear();
+	auto &windings = t_windings;
+	auto &unique_positions = t_unique_positions;
+	auto &unique_edges = t_unique_edges;
 	size_t generated_corner_count = 0;
 	for (int f = 0; f < brush.face_count; ++f) {
 		const LMFace &face = brush.faces[f];
@@ -228,7 +241,6 @@ static LMEditorBrushBuildResult build_editor_brush_geometry(const LMBrush &brush
 		corner_count += winding.size();
 	}
 	if (corner_count > std::numeric_limits<uint32_t>::max()) return failure(LMEditorBrushBuildStatus::LIMIT_EXCEEDED);
-	std::vector<vec3> unique_positions;
 	unique_positions.reserve(corner_count);
 	for (auto &winding : windings) for (auto &corner : winding) {
 		uint32_t index = 0;
@@ -240,7 +252,6 @@ static LMEditorBrushBuildResult build_editor_brush_geometry(const LMBrush &brush
 		corner.topology_position = index;
 	}
 
-	std::vector<std::pair<uint32_t, uint32_t>> unique_edges;
 	unique_edges.reserve(corner_count);
 	for (const auto &winding : windings) for (size_t i = 0; i < winding.size(); ++i) {
 		uint32_t a = winding[i].topology_position, b = winding[(i + 1) % winding.size()].topology_position;
@@ -298,6 +309,87 @@ static LMEditorBrushBuildResult build_editor_brush_geometry(const LMBrush &brush
 LMEditorBrushBuildResult lm_build_editor_brush_geometry(const LMBrush &brush, const LMEditorBrushBuildContext &context) {
 	build_count.fetch_add(1, std::memory_order_relaxed);
 	return build_editor_brush_geometry(brush, context);
+}
+
+LMEditorBrushTranslateResult lm_translate_editor_brush_geometry(const LMBrush &brush,
+		const LMEditorBrushGeometry &source, vec3 delta, const LMEditorBrushBuildContext &context) {
+	LMEditorBrushTranslateResult out;
+	auto fail = [&](LMEditorBrushBuildStatus status) {
+		out.status = status;
+		return out;
+	};
+	if (brush.face_count <= 0 || !brush.faces) return fail(LMEditorBrushBuildStatus::INVALID_FACE_STORAGE);
+	if (brush.face_count > MAX_EDITOR_BRUSH_FACES) return fail(LMEditorBrushBuildStatus::LIMIT_EXCEEDED);
+	if (static_cast<size_t>(brush.face_count) != source.faces.size()) return fail(LMEditorBrushBuildStatus::SOURCE_TOKEN_MISMATCH);
+	if (source.positions.empty() || !source.has_bounds) return fail(LMEditorBrushBuildStatus::SOURCE_TOKEN_MISMATCH);
+	if (!finite(delta) || !finite(source.mins) || !finite(source.maxs)) return fail(LMEditorBrushBuildStatus::NONFINITE_SOURCE);
+	// Shallow copy shares faces/corners-topology/edges storage via copy-on-write.
+	// Positions/faces/corners detach on first write; edges stay shared.
+	LMEditorBrushGeometry moved = source;
+	moved.brush_id = brush.id;
+	for (size_t i = 0; i < moved.positions.size(); ++i) {
+		const vec3 next = vec3_add(source.positions[i], delta);
+		if (!finite(next) || std::abs(next.x) > 1e9 || std::abs(next.y) > 1e9 || std::abs(next.z) > 1e9) {
+			return fail(LMEditorBrushBuildStatus::NONFINITE_SOURCE);
+		}
+		moved.positions[i] = next;
+	}
+	const vec3 next_mins = vec3_add(source.mins, delta);
+	const vec3 next_maxs = vec3_add(source.maxs, delta);
+	if (!finite(next_mins) || !finite(next_maxs) || std::abs(next_mins.x) > 1e9 || std::abs(next_mins.y) > 1e9 ||
+			std::abs(next_mins.z) > 1e9 || std::abs(next_maxs.x) > 1e9 || std::abs(next_maxs.y) > 1e9 ||
+			std::abs(next_maxs.z) > 1e9) {
+		return fail(LMEditorBrushBuildStatus::NONFINITE_SOURCE);
+	}
+	moved.mins = next_mins;
+	moved.maxs = next_maxs;
+	for (int f = 0; f < brush.face_count; ++f) {
+		if (!valid_face(brush.faces[f])) return fail(LMEditorBrushBuildStatus::NONFINITE_SOURCE);
+		const int texture = brush.faces[f].texture_idx;
+		if (texture < 0 || static_cast<size_t>(texture) >= context.texture_count || !context.textures ||
+				context.textures[texture].width <= 0 || context.textures[texture].height <= 0) {
+			return fail(LMEditorBrushBuildStatus::INVALID_TEXTURE_CONTEXT);
+		}
+		const auto &source_face = source.faces[f];
+		auto &face = moved.faces[f];
+		if (source_face.corner_begin > source.corners.size() ||
+				source_face.corner_count > source.corners.size() - source_face.corner_begin) {
+			return fail(LMEditorBrushBuildStatus::SOURCE_TOKEN_MISMATCH);
+		}
+		if (source_face.corner_count == 0) {
+			// Redundant/non-contributing plane: full builds keep a zero center.
+			face.center = {};
+			face.plane_normal = brush.faces[f].plane_normal;
+			face.texture_idx = brush.faces[f].texture_idx;
+			continue;
+		}
+		const vec3 next_center = vec3_add(source_face.center, delta);
+		if (!finite(next_center)) return fail(LMEditorBrushBuildStatus::NONFINITE_SOURCE);
+		face.center = next_center;
+		face.plane_normal = brush.faces[f].plane_normal;
+		face.texture_idx = brush.faces[f].texture_idx;
+	}
+	for (int f = 0; f < brush.face_count; ++f) {
+		const uint32_t begin = moved.faces[f].corner_begin;
+		const uint32_t count = moved.faces[f].corner_count;
+		if (count == 0) continue;
+		if (begin > moved.corners.size() || count > moved.corners.size() - begin) {
+			return fail(LMEditorBrushBuildStatus::SOURCE_TOKEN_MISMATCH);
+		}
+		const int texture = brush.faces[f].texture_idx;
+		for (uint32_t v = 0; v < count; ++v) {
+			const uint32_t corner_index = begin + v;
+			const uint32_t position = moved.corners[corner_index].position;
+			if (position >= moved.positions.size()) return fail(LMEditorBrushBuildStatus::SOURCE_TOKEN_MISMATCH);
+			const LMVertexUV uv = face_uv(moved.positions[position], brush.faces[f], context.textures[texture]);
+			if (!std::isfinite(uv.u) || !std::isfinite(uv.v) || std::abs(uv.u) > 1e9 || std::abs(uv.v) > 1e9) {
+				return fail(LMEditorBrushBuildStatus::NONFINITE_SOURCE);
+			}
+			moved.corners[corner_index].uv = uv;
+		}
+	}
+	out.geometry = std::move(moved);
+	return out;
 }
 
 LMEditorBrushUVUpdateResult lm_update_editor_brush_uvs(const LMBrush &brush,
