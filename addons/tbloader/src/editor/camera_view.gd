@@ -45,6 +45,8 @@ var preview_sunlight_button: Button
 var preview_environment_button: Button
 var camera_grid_visible := true
 var camera_grid_button: Button
+var radiant_camera_behavior := false
+var godot_navigation := ""
 var flying = false
 var rmb_down := false
 var rmb_was_flying := false
@@ -323,6 +325,7 @@ func _sync_suspension(force_suspended := false) -> void:
 
 func cancel_interaction() -> void:
 	cancel_gesture()
+	godot_navigation = ""
 	stop_fly()
 
 func cancel_gesture() -> void:
@@ -421,10 +424,22 @@ func update_hint() -> void:
 	if hint == null:
 		return
 	var fps := Engine.get_frames_per_second()
-	if flying:
+	if flying and radiant_camera_behavior:
 		hint.text = "FLY • %.0f FPS • speed %.1f • FOV %.0f° • WASD / Q E • mouse look • wheel/pinch zoom • RMB drag pan • RMB click / Esc exit" % [float(fps), float(fly_speed), float(camera_fov)]
+	elif flying:
+		hint.text = "%.0f FPS • speed %.1f • FOV %.0f° • WASD / Q E • mouse look • wheel changes speed • release RMB to exit" % [float(fps), float(fly_speed), float(camera_fov)]
+	elif not radiant_camera_behavior:
+		hint.text = "%.0f FPS • MMB orbit • Shift+MMB pan • Ctrl+MMB dolly • wheel zoom • hold RMB freelook" % float(fps)
 	else:
 		hint.text = "%.0f FPS • wheel/pinch/scroll dolly %.3f • Ctrl+wheel step • RMB click fly • RMB drag pan" % [float(fps), float(dolly_step)]
+
+func set_radiant_camera_behavior(enabled: bool) -> void:
+	if radiant_camera_behavior == enabled:
+		update_hint()
+		return
+	cancel_interaction()
+	radiant_camera_behavior = enabled
+	update_hint()
 
 func handle_camera_wheel(event: InputEventMouseButton) -> bool:
 	if not event.pressed or event.button_index not in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]:
@@ -432,7 +447,7 @@ func handle_camera_wheel(event: InputEventMouseButton) -> bool:
 	var upward := event.button_index == MOUSE_BUTTON_WHEEL_UP
 	var feedback: String
 	if flying:
-		if event.ctrl_pressed:
+		if radiant_camera_behavior and event.ctrl_pressed:
 			camera_fov = clampf(camera_fov + (-CAMERA_FOV_STEP if upward else CAMERA_FOV_STEP), MIN_CAMERA_FOV, MAX_CAMERA_FOV)
 			if camera != null:
 				camera.fov = camera_fov
@@ -440,16 +455,19 @@ func handle_camera_wheel(event: InputEventMouseButton) -> bool:
 		else:
 			fly_speed = clampf(fly_speed * (FLY_SPEED_FACTOR if upward else 1.0 / FLY_SPEED_FACTOR), MIN_FLY_SPEED, MAX_FLY_SPEED)
 			feedback = "Camera fly speed: %.1f" % fly_speed
-	elif event.ctrl_pressed:
+	elif radiant_camera_behavior and event.ctrl_pressed:
 		dolly_step = clampf(dolly_step * (DOLLY_STEP_FACTOR if upward else 1.0 / DOLLY_STEP_FACTOR), MIN_DOLLY_STEP, MAX_DOLLY_STEP)
 		feedback = "Camera dolly step: %.3f" % dolly_step
-	else:
+	elif radiant_camera_behavior:
 		var movement := -camera.global_basis.z * dolly_step * (1.0 if upward else -1.0)
 		camera.global_position += movement
 		orbit_target += movement
 		orbit_distance = maxf(camera.global_position.distance_to(orbit_target), 0.01)
 		camera_transform_changed()
 		feedback = "Camera dolly: %.3f" % dolly_step
+	else:
+		godot_zoom(0.9 if upward else 1.1)
+		feedback = "Camera zoom"
 	update_hint()
 	if is_instance_valid(host) and host.has_method("set_status"):
 		host.set_status(feedback)
@@ -460,11 +478,14 @@ func zoom_camera(factor: float) -> void:
 	# moves toward the orbit target, matching a wheel-up dolly.
 	if camera == null or not is_finite(factor) or factor <= 0.0 or is_equal_approx(factor, 1.0):
 		return
-	var movement := -camera.global_basis.z * dolly_step * (factor - 1.0)
-	camera.global_position += movement
-	orbit_target += movement
-	orbit_distance = maxf(camera.global_position.distance_to(orbit_target), 0.01)
-	camera_transform_changed()
+	if radiant_camera_behavior:
+		var movement := -camera.global_basis.z * dolly_step * (factor - 1.0)
+		camera.global_position += movement
+		orbit_target += movement
+		orbit_distance = maxf(camera.global_position.distance_to(orbit_target), 0.01)
+		camera_transform_changed()
+	else:
+		godot_zoom(1.0 / factor)
 	update_hint()
 	if is_instance_valid(host) and host.has_method("set_status"):
 		host.set_status("Camera zoom: %.3f" % factor)
@@ -476,6 +497,16 @@ func handle_trackpad_zoom(event: InputEventPanGesture) -> void:
 	if is_zero_approx(steps):
 		return
 	zoom_camera(pow(TRACKPAD_ZOOM_FACTOR, steps))
+
+func godot_zoom(factor: float) -> void:
+	factor = clampf(factor, 0.01, 100.0)
+	var offset: Vector3 = camera.global_position - orbit_target
+	if offset.is_zero_approx():
+		offset = camera.global_basis.z * maxf(orbit_distance, 0.01)
+	offset *= factor
+	orbit_distance = clampf(offset.length(), 0.01, camera.far * 0.5)
+	camera.global_position = orbit_target + offset.normalized() * orbit_distance
+	camera_transform_changed()
 
 func transform_map(point: Vector3) -> Vector3:
 	return transform_map_scaled(point, map_scale())
@@ -1800,6 +1831,13 @@ func _gui_input(event: InputEvent) -> void:
 		elif event.button_index == MOUSE_BUTTON_RIGHT:
 			finish_rmb()
 			accept_event()
+		elif not radiant_camera_behavior and event.button_index == MOUSE_BUTTON_MIDDLE:
+			if event.pressed:
+				cancel_gesture()
+				godot_navigation = "dolly" if event.ctrl_pressed else ("pan" if event.shift_pressed else "orbit")
+			else:
+				godot_navigation = ""
+			accept_event()
 		elif event.button_index == MOUSE_BUTTON_LEFT:
 			if event.pressed:
 				if event.ctrl_pressed:
@@ -1820,6 +1858,9 @@ func _gui_input(event: InputEvent) -> void:
 		# macOS trackpad two-finger scroll drives the same dolly as the wheel.
 		handle_trackpad_zoom(event)
 		accept_event()
+	elif event is InputEventMouseMotion and godot_navigation != "":
+		update_godot_navigation(event.relative)
+		accept_event()
 	elif event is InputEventMouseMotion and ctrl_gesture != "":
 		update_ctrl_gesture(event.position)
 		accept_event()
@@ -1827,8 +1868,9 @@ func _gui_input(event: InputEvent) -> void:
 		update_camera_gesture(event.position)
 		accept_event()
 	elif event is InputEventKey:
-		if event.pressed and event.keycode == KEY_ESCAPE and (ctrl_gesture != "" or camera_gesture != ""):
+		if event.pressed and event.keycode == KEY_ESCAPE and (ctrl_gesture != "" or camera_gesture != "" or godot_navigation != ""):
 			cancel_gesture()
+			godot_navigation = ""
 			accept_event()
 		elif event.pressed and not event.echo and event.keycode == KEY_G:
 			toggle_surface_grid()
@@ -2041,7 +2083,10 @@ func set_face_selection(ids: PackedInt64Array, components: Array) -> void:
 func start_fly() -> void:
 	cancel_gesture()
 	flying = true
-	crosshair.show()
+	if radiant_camera_behavior:
+		crosshair.show()
+	else:
+		crosshair.hide()
 	selection_painting = false
 	held.clear()
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
@@ -2059,6 +2104,9 @@ func begin_rmb() -> void:
 
 func finish_rmb() -> void:
 	if not rmb_down:
+		return
+	if not radiant_camera_behavior:
+		stop_fly()
 		return
 	var keep_flying := rmb_was_flying if rmb_dragging else not rmb_was_flying
 	rmb_down = false
@@ -2082,6 +2130,32 @@ func stop_fly() -> void:
 	rmb_dragging = false
 	update_hint()
 
+func update_godot_navigation(relative: Vector2) -> void:
+	if camera == null:
+		return
+	if godot_navigation == "orbit":
+		var offset: Vector3 = camera.global_position - orbit_target
+		if offset.length_squared() < 0.0001:
+			offset = camera.global_basis.z * maxf(orbit_distance, 0.01)
+		offset = Basis(Vector3.UP, -relative.x * 0.012) * offset
+		var candidate: Vector3 = Basis(camera.global_basis.x.normalized(), -relative.y * 0.012) * offset
+		if absf(candidate.normalized().dot(Vector3.UP)) < 0.995:
+			offset = candidate
+		orbit_distance = offset.length()
+		camera.global_position = orbit_target + offset
+		camera.look_at(orbit_target)
+		pitch = camera.rotation.x
+		yaw = camera.rotation.y
+	elif godot_navigation == "pan":
+		var scale := maxf(orbit_distance, 0.01) * 0.002
+		var movement := camera.global_basis.x * -relative.x * scale + camera.global_basis.y * relative.y * scale
+		camera.global_position += movement
+		orbit_target += movement
+	elif godot_navigation == "dolly":
+		godot_zoom(exp(relative.y * 0.01))
+		return
+	camera_transform_changed()
+
 func _input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo and (event.keycode in [KEY_BRACKETLEFT, KEY_BRACKETRIGHT] or event.keycode >= KEY_1 and event.keycode <= KEY_9):
 		# The host applies grid shortcuts later in GUI dispatch; refresh every camera afterward.
@@ -2097,7 +2171,7 @@ func _input(event: InputEvent) -> void:
 				begin_rmb()
 			else:
 				finish_rmb()
-		elif event.button_index == MOUSE_BUTTON_LEFT:
+		elif radiant_camera_behavior and event.button_index == MOUSE_BUTTON_LEFT:
 			selection_painting = event.pressed and event.shift_pressed and not event.ctrl_pressed and host.session.components.is_empty()
 			if event.pressed:
 				if event.ctrl_pressed:
@@ -2118,7 +2192,7 @@ func _input(event: InputEvent) -> void:
 				selection_painting = false
 	elif event is InputEventMouseMotion:
 		var previous_transform := camera.transform
-		if rmb_down:
+		if radiant_camera_behavior and rmb_down:
 			rmb_drag_distance += event.relative.length()
 			rmb_dragging = rmb_dragging or rmb_drag_distance >= DRAG_THRESHOLD
 			var pan_scale := fly_speed * 0.01

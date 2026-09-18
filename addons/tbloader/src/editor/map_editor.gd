@@ -60,6 +60,7 @@ var scene_tabs: TabBar
 var document_tabs: TabBar
 var file_menu: MenuButton
 var layout_menu: MenuButton
+var camera_behavior_button: Button
 var workspace: HSplitContainer
 var left_views: VSplitContainer
 var right_views: VSplitContainer
@@ -69,6 +70,7 @@ var slot_views: Array = [null, null, null, null]
 var slot_types: Array[String] = ["Camera", "Side Grid", "Top Grid", "Front Grid"]
 var view_parking: Control
 var view_layout = 3
+var radiant_camera_behavior := false
 var camera_slot = 0 # Compatibility alias; pane placement is now slot-owned.
 var syncing_view_splits = false
 var sessions: Array[RefCounted] = [] # Documents outlive expirable history payloads.
@@ -174,6 +176,13 @@ func _ready() -> void:
 		layout_menu.get_popup().add_radio_check_item("%d Views" % count, count)
 	layout_menu.get_popup().id_pressed.connect(layout_menu_command)
 	layout_group.add_child(layout_menu)
+	camera_behavior_button = Button.new()
+	camera_behavior_button.name = "CameraBehavior"
+	camera_behavior_button.toggle_mode = true
+	camera_behavior_button.theme_type_variation = "FlatButton"
+	camera_behavior_button.toggled.connect(set_radiant_camera_behavior)
+	layout_group.add_child(camera_behavior_button)
+	update_camera_behavior_button()
 	binding_label = Label.new()
 	add_child(binding_label)
 	var geometry_group := toolbar_group(toolbar)
@@ -579,6 +588,22 @@ func refresh_cut_views() -> void:
 func layout_menu_command(id: int) -> void:
 	apply_layout(id)
 
+func set_radiant_camera_behavior(enabled: bool) -> void:
+	cancel_interaction()
+	radiant_camera_behavior = enabled
+	update_camera_behavior_button()
+	for camera in cameras:
+		camera.set_radiant_camera_behavior(enabled)
+
+func update_camera_behavior_button() -> void:
+	if camera_behavior_button == null:
+		return
+	camera_behavior_button.set_pressed_no_signal(radiant_camera_behavior)
+	camera_behavior_button.text = "Radiant Camera" if radiant_camera_behavior else "Godot Camera"
+	camera_behavior_button.tooltip_text = ("Use Radiant camera controls: RMB click toggles fly, RMB drag pans"
+		if radiant_camera_behavior else "Use Godot 3D editor camera controls: hold RMB to freelook, MMB to orbit")
+	camera_behavior_button.accessibility_name = camera_behavior_button.text
+
 func slot_menu_command(pane_id: int, slot: int) -> void:
 	if pane_id >= 0 and pane_id < PANE_TYPES.size():
 		set_slot_type(slot, PANE_TYPES[pane_id])
@@ -591,6 +616,7 @@ func create_pane(type: String) -> Control:
 	if type == "Camera":
 		pane = Camera.new()
 		pane.host = self
+		pane.radiant_camera_behavior = radiant_camera_behavior
 		pane.camera_moved.connect(camera_moved)
 	elif type.ends_with(" Grid"):
 		pane = Graph.new()
@@ -731,6 +757,7 @@ func workspace_state() -> Dictionary:
 		slots.append(pane_state)
 	return {
 		"layout": view_layout,
+		"radiant_camera_behavior": radiant_camera_behavior,
 		"workspace_split": workspace.split_offset,
 		"left_split": left_views.split_offset,
 		"right_split": right_views.split_offset,
@@ -740,6 +767,7 @@ func workspace_state() -> Dictionary:
 func restore_workspace_state(state: Dictionary) -> void:
 	if state.is_empty():
 		return
+	set_radiant_camera_behavior(bool(state.get("radiant_camera_behavior", false)))
 	var mode := int(state.get("layout", 3))
 	var slots: Array = state.get("slots", [])
 	if slots.is_empty():

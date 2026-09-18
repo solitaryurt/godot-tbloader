@@ -146,6 +146,30 @@ func run() -> void:
 	checks.check(ui.rebuild_on_save is Button and ui.rebuild_on_save.toggle_mode and ui.rebuild_on_save.icon != null and ui.rebuild_on_save.tooltip_text == "Build meshes on save", "Build meshes on save is a compact independent icon toggle")
 	checks.check(ui.loader_actions.BindLoader.disabled and ui.loader_actions.DetachLoader.disabled and ui.loader_actions.UpdateLoaderPath.disabled and ui.loader_actions.BuildMeshes.disabled and ui.rebuild_on_save.disabled, "unselected and unbound loader actions start disabled")
 	checks.check(ui.loader_actions.BuildMeshes.tooltip_text == "Build Meshes from saved map" and ui.loader_actions.BuildMeshes.accessibility_name == "Build Meshes from saved map", "map toolbar exposes Build Meshes terminology to tooltip and accessibility APIs")
+	checks.check(not ui.radiant_camera_behavior and not ui.camera_behavior_button.button_pressed
+		and ui.camera_behavior_button.text == "Godot Camera" and not ui.camera_view.radiant_camera_behavior,
+		"camera behavior defaults to Godot mode")
+	checks.check(ui.camera_behavior_button.get_parent() == ui.layout_menu.get_parent()
+		and ui.camera_behavior_button.get_index() == ui.layout_menu.get_index() + 1,
+		"camera behavior toggle sits beside the layout menu")
+	var godot_camera_transform: Transform3D = ui.camera_view.camera.transform
+	var godot_camera_target: Vector3 = ui.camera_view.orbit_target
+	mouse(ui.camera_view, ui.camera_view.size * 0.5, true, MOUSE_BUTTON_MIDDLE)
+	motion(ui.camera_view, ui.camera_view.size * 0.5 + Vector2(20, 10), Vector2(20, 10))
+	mouse(ui.camera_view, ui.camera_view.size * 0.5 + Vector2(20, 10), false, MOUSE_BUTTON_MIDDLE)
+	checks.check(ui.camera_view.godot_navigation == "" and ui.camera_view.camera.transform != godot_camera_transform,
+		"Godot camera mode orbits while MMB is held")
+	ui.camera_view.begin_rmb()
+	checks.check(ui.camera_view.flying, "Godot camera mode enters freelook while RMB is held")
+	ui.camera_view.finish_rmb()
+	checks.check(not ui.camera_view.flying, "Godot camera mode exits freelook when RMB is released")
+	ui.camera_view.camera.transform = godot_camera_transform
+	ui.camera_view.orbit_target = godot_camera_target
+	ui.camera_view.camera_transform_changed()
+	ui.set_radiant_camera_behavior(true)
+	ui.active_graph.grab_focus()
+	checks.check(ui.camera_behavior_button.button_pressed and ui.camera_behavior_button.text == "Radiant Camera"
+		and ui.camera_view.radiant_camera_behavior, "camera behavior toggle enables Radiant controls")
 	checks.check(ui.view_layout == 3 and ui.visible_graphs().size() == 2 and not ui.view_slots[1].visible, "three-view layout changes visibility without changing pane types")
 	ui.apply_layout(2)
 	ui.set_slot_type(2, "Camera")
@@ -176,9 +200,12 @@ func run() -> void:
 	var saved_workspace: Dictionary = ui.workspace_state()
 	ui.graph_a.origin = Vector3.ZERO
 	ui.camera_view.orbit_target = Vector3.ZERO
+	ui.set_radiant_camera_behavior(false)
 	ui.apply_layout(2)
 	ui.restore_workspace_state(saved_workspace)
-	checks.check(ui.view_layout == 4 and ui.slot_types == ["Camera", "Side Grid", "Top Grid", "Front Grid"] and ui.workspace.split_offset == 17 and ui.left_views.split_offset == 11, "workspace state restores per-slot types and splitter positions")
+	checks.check(ui.view_layout == 4 and ui.slot_types == ["Camera", "Side Grid", "Top Grid", "Front Grid"] and ui.workspace.split_offset == 17 and ui.left_views.split_offset == 11
+		and ui.radiant_camera_behavior and ui.camera_behavior_button.button_pressed,
+		"workspace state restores per-slot types, splitter positions, and camera behavior")
 	checks.check(ui.graph_a.origin == Vector3(3, 4, 0) and ui.camera_view.orbit_target == Vector3(1, 2, 3), "workspace state restores independent camera and grid state")
 	ui.apply_layout(3)
 	checks.check(ui.camera_view.get_parent() == ui.view_slots[0] and ui.visible_graphs().size() == 2, "layout changes restore camera-left three-view arrangement")

@@ -273,8 +273,9 @@ class Journey:
         state = self.wait("real Radiant tab restores authoring document", lambda s: s["visible"] and s["text"] == canonical)
 
         for exit_mode in ("Escape", "RMB", "focus"):
-            self.click(center(state["camera"]), 3)
-            state = self.wait(f"RMB enters captured fly before {exit_mode}", lambda s: s["flying"] and s["mouse_mode"] == 2)
+            self.x.move(center(state["camera"]))
+            self.x.button(3, True)
+            state = self.wait(f"held RMB enters captured freelook before {exit_mode}", lambda s: s["flying"] and s["mouse_mode"] == 2)
             initial_position = state["camera_position"]
             self.x.key("w", True)
             time.sleep(0.15)
@@ -292,8 +293,8 @@ class Journey:
                 self.x.key("w", False)
                 if exit_mode == "Escape":
                     self.x.chord("Escape")
+                    self.x.button(3, False)
                 else:
-                    self.x.button(3, True, captured=True)
                     self.x.button(3, False)
                 state = self.wait(f"{exit_mode} releases captured fly", lambda s: not s["flying"] and s["mouse_mode"] == 0 and not s["held"])
 
