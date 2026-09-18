@@ -137,6 +137,7 @@ const CAMERA_FOV_STEP = 5.0
 const MIN_DOLLY_STEP = 0.125
 const MAX_DOLLY_STEP = 128.0
 const DOLLY_STEP_FACTOR = 1.25
+const TRACKPAD_ZOOM_FACTOR = 1.25
 const SKY_ENVIRONMENT_PROPERTIES = [
 	"background_mode",
 	"sky",
@@ -421,9 +422,9 @@ func update_hint() -> void:
 		return
 	var fps := Engine.get_frames_per_second()
 	if flying:
-		hint.text = "FLY • %.0f FPS • speed %.1f • FOV %.0f° • WASD / Q E • mouse look • RMB drag pan • RMB click / Esc exit" % [float(fps), float(fly_speed), float(camera_fov)]
+		hint.text = "FLY • %.0f FPS • speed %.1f • FOV %.0f° • WASD / Q E • mouse look • wheel/pinch zoom • RMB drag pan • RMB click / Esc exit" % [float(fps), float(fly_speed), float(camera_fov)]
 	else:
-		hint.text = "%.0f FPS • wheel dolly %.3f • Ctrl+wheel step • RMB click fly • RMB drag pan" % [float(fps), float(dolly_step)]
+		hint.text = "%.0f FPS • wheel/pinch/scroll dolly %.3f • Ctrl+wheel step • RMB click fly • RMB drag pan" % [float(fps), float(dolly_step)]
 
 func handle_camera_wheel(event: InputEventMouseButton) -> bool:
 	if not event.pressed or event.button_index not in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]:
@@ -453,6 +454,28 @@ func handle_camera_wheel(event: InputEventMouseButton) -> bool:
 	if is_instance_valid(host) and host.has_method("set_status"):
 		host.set_status(feedback)
 	return true
+
+func zoom_camera(factor: float) -> void:
+	# Continuous dolly zoom used by macOS pinch/scroll gestures. Factor above 1.0
+	# moves toward the orbit target, matching a wheel-up dolly.
+	if camera == null or not is_finite(factor) or factor <= 0.0 or is_equal_approx(factor, 1.0):
+		return
+	var movement := -camera.global_basis.z * dolly_step * (factor - 1.0)
+	camera.global_position += movement
+	orbit_target += movement
+	orbit_distance = maxf(camera.global_position.distance_to(orbit_target), 0.01)
+	camera_transform_changed()
+	update_hint()
+	if is_instance_valid(host) and host.has_method("set_status"):
+		host.set_status("Camera zoom: %.3f" % factor)
+
+func handle_trackpad_zoom(event: InputEventPanGesture) -> void:
+	# The engine negates macOS scrollingDeltaY, so scrolling up (negative pan
+	# delta.y) zooms in, exactly like MOUSE_BUTTON_WHEEL_UP.
+	var steps := -event.delta.y
+	if is_zero_approx(steps):
+		return
+	zoom_camera(pow(TRACKPAD_ZOOM_FACTOR, steps))
 
 func transform_map(point: Vector3) -> Vector3:
 	return transform_map_scaled(point, map_scale())
@@ -1789,6 +1812,14 @@ func _gui_input(event: InputEvent) -> void:
 				else:
 					finish_camera_left()
 			accept_event()
+	elif event is InputEventMagnifyGesture:
+		# macOS trackpad pinch: factor above 1.0 dollies toward the target.
+		zoom_camera(event.factor)
+		accept_event()
+	elif event is InputEventPanGesture:
+		# macOS trackpad two-finger scroll drives the same dolly as the wheel.
+		handle_trackpad_zoom(event)
+		accept_event()
 	elif event is InputEventMouseMotion and ctrl_gesture != "":
 		update_ctrl_gesture(event.position)
 		accept_event()
@@ -2076,6 +2107,11 @@ func _input(event: InputEvent) -> void:
 	elif event is InputEventKey:
 		if event.keycode == KEY_ESCAPE:
 			stop_fly()
+		elif event.pressed and not event.echo and event.keycode in [KEY_DELETE, KEY_BACKSPACE]:
+			# Fly mode owns the keyboard, so the host router is bypassed; still let
+			# the delete keys remove the current brush/entity selection.
+			if is_instance_valid(host) and host.has_method("delete_selection"):
+				host.delete_selection()
 		else:
 			held[event.physical_keycode if event.physical_keycode else event.keycode] = event.pressed
 			if not event.shift_pressed:

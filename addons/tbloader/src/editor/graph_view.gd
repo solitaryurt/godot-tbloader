@@ -88,6 +88,7 @@ const DENSE_RENDER_BUFFER_POINTS = 8192
 const DENSE_EDGE_POINT_BYTES = 8
 const DENSE_EDGE_RANGE_BYTES = 16
 const CONTEXT_DRAG_THRESHOLD = 4.0
+const TRACKPAD_ZOOM_FACTOR = 1.25
 
 func _ready() -> void:
 	focus_mode = Control.FOCUS_ALL
@@ -285,6 +286,12 @@ func zoom_at(position: Vector2, factor: float) -> void:
 	offset[orientation] = 0
 	origin += offset
 	queue_view_redraw()
+
+func handle_trackpad_scroll(event: InputEventPanGesture) -> void:
+	var steps := -event.delta.y
+	if is_zero_approx(steps):
+		return
+	zoom_at(event.position, pow(TRACKPAD_ZOOM_FACTOR, steps))
 
 func frame_selection() -> void:
 	var selected_items: Array = []
@@ -785,6 +792,16 @@ func _gui_input(event: InputEvent) -> void:
 			else:
 				finish_left(event)
 			accept_event()
+	elif event is InputEventMagnifyGesture:
+		# macOS trackpad pinch. A factor above 1.0 zooms in, anchoring the view
+		# under the gesture position exactly like wheel zoom.
+		zoom_at(event.position, event.factor)
+		accept_event()
+	elif event is InputEventPanGesture:
+		# macOS trackpad two-finger scroll. The engine negates scrollingDeltaY, so
+		# scrolling up (negative pan delta.y) matches MOUSE_BUTTON_WHEEL_UP.
+		handle_trackpad_scroll(event)
+		accept_event()
 	elif event is InputEventMouseMotion and gesture != "":
 		cursor = event.position
 		shift_drag = event.shift_pressed
