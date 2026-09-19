@@ -55,12 +55,14 @@ func drag(graph: Control, p: Vector3, q: Vector3, button_index: int = MOUSE_BUTT
 	motion(graph, end, end - start, shift, ctrl)
 	mouse(graph, end, false, button_index, shift, ctrl)
 
-func key(code: int, ctrl = false, shift = false) -> void:
+func key(code: int, ctrl = false, shift = false, alt = false, meta = false) -> void:
 	var event = InputEventKey.new()
 	event.keycode = code
 	event.pressed = true
 	event.ctrl_pressed = ctrl
 	event.shift_pressed = shift
+	event.alt_pressed = alt
+	event.meta_pressed = meta
 	ui._input(event)
 
 func paste_map_clipboard(exported: String) -> void:
@@ -106,19 +108,19 @@ func per_document_history_regression() -> void:
 		"interleaved second action records in document A")
 	var a_second: String = a.document.export_text().value
 	ui.set_session(b)
-	ui.active_graph.grab_focus()
+	ui.graph_a.grab_focus()
 	key(KEY_Z, true)
 	checks.check(b.document.export_text().value != b_edited and a.document.export_text().value == a_second
 		and b.history_cursor() == 0 and ui.notice.text == "Undid: Edit document B",
 		"undo in active B changes only B and reports its action")
 	ui.set_session(a)
-	ui.active_graph.grab_focus()
+	ui.graph_a.grab_focus()
 	key(KEY_Z, true)
 	checks.check(a.document.export_text().value == a_first and a.selected == a_selected
 		and b.history_cursor() == 0 and ui.notice.text == "Undid: Move document A",
 		"switching to A restores A content and selection only")
 	ui.set_session(b)
-	ui.active_graph.grab_focus()
+	ui.graph_a.grab_focus()
 	key(KEY_Y, true)
 	checks.check(b.document.export_text().value == b_edited and b.selected == b_selected
 		and b.history_cursor() == 1 and ui.notice.text == "Redid: Edit document B",
@@ -194,6 +196,13 @@ func run() -> void:
 	plugin.show_materials()
 	plugin.hide_bottom_panel()
 	checks.check(ui.slot_types == ["Camera", "Side Grid", "Top Grid", "Front Grid"] and ui.camera_view.get_parent() == ui.view_slots[0] and ui.graph_a.get_parent() == ui.view_slots[2] and not ui.is_ancestor_of(ui.material_workspace), "three-view workspace starts with per-slot camera and grid types")
+	checks.check(ui.active_slot == 0 and ui.visible_slot_order() == [0, 2, 3] and ui.active_graph == null
+		and ui.slot_borders.size() == 4
+		and ui.slot_borders[0].get_theme_stylebox("panel").border_color.a > 0.01
+		and ui.slot_borders[1].get_theme_stylebox("panel").border_color.a == 0
+		and ui.slot_borders[2].get_theme_stylebox("panel").border_color.a == 0
+		and ui.slot_borders[3].get_theme_stylebox("panel").border_color.a == 0,
+		"default 3-view activates first visual slot with exactly one accent border")
 	checks.check(plugin.map_control.visible and plugin.map_control.get_child_count() == 2
 		and plugin.map_control.get_child(0).text == "Build Meshes"
 		and plugin.map_control.get_child(0).icon == ui.loader_actions.BuildMeshes.icon
@@ -248,7 +257,7 @@ func run() -> void:
 	ui.camera_view.orbit_target = godot_camera_target
 	ui.camera_view.camera_transform_changed()
 	ui.set_radiant_camera_behavior(true)
-	ui.active_graph.grab_focus()
+	ui.graph_a.grab_focus()
 	checks.check(ui.camera_behavior_button.button_pressed and ui.camera_behavior_button.accessibility_name == "Radiant Camera"
 		and ui.camera_view.radiant_camera_behavior, "camera behavior toggle enables Radiant controls")
 	checks.check(ui.view_layout == 3 and ui.visible_graphs().size() == 2 and not ui.view_slots[1].visible, "three-view layout changes visibility without changing pane types")
@@ -279,6 +288,7 @@ func run() -> void:
 	ui.graph_a.origin = Vector3(3, 4, 0)
 	ui.camera_view.orbit_target = Vector3(1, 2, 3)
 	var saved_workspace: Dictionary = ui.workspace_state()
+	checks.check(not saved_workspace.has("active_slot"), "workspace state omits active_slot")
 	ui.graph_a.origin = Vector3.ZERO
 	ui.camera_view.orbit_target = Vector3.ZERO
 	ui.set_radiant_camera_behavior(false)
@@ -288,8 +298,14 @@ func run() -> void:
 		and ui.radiant_camera_behavior and ui.camera_behavior_button.button_pressed,
 		"workspace state restores per-slot types, splitter positions, and camera behavior")
 	checks.check(ui.graph_a.origin == Vector3(3, 4, 0) and ui.camera_view.orbit_target == Vector3(1, 2, 3), "workspace state restores independent camera and grid state")
+	ui.set_active_slot(3)
+	ui.restore_workspace_state(saved_workspace)
+	checks.check(not ui.workspace_state().has("active_slot") and ui.active_slot == ui.visible_slot_order()[0],
+		"workspace restore freshly selects a visible layout slot")
 	ui.apply_layout(3)
 	checks.check(ui.camera_view.get_parent() == ui.view_slots[0] and ui.visible_graphs().size() == 2, "layout changes restore camera-left three-view arrangement")
+	active_pane_journey()
+	document_tab_shortcut_journey()
 	checks.check(ui.camera_view.find_children("FrameSelection", "Button", true, false).size() == 1 and ui.graph_a.find_children("FrameSelection", "Button", true, false).size() == 1, "camera and grid panes expose compact frame buttons")
 	checks.check(ui.camera_view.find_children("BuiltAppearance", "Button", true, false).size() == 1
 		and ui.camera_view.built_appearance_button.toggle_mode and not ui.camera_view.built_appearance_button.button_pressed
@@ -444,11 +460,17 @@ func run() -> void:
 	checks.check(graph.origin != old_origin, "RMB graph pan")
 	var state_origin: Vector3 = graph.origin
 	var state_zoom: float = graph.zoom
-	key(KEY_TAB, true)
-	checks.check(graph.orientation == 1 and ui.graph_b.orientation == 1, "Ctrl Tab cycles only focused pane")
-	key(KEY_TAB, true)
+	graph.cycle_orientation()
+	if not ui.session.selected.is_empty():
+		graph.frame_selection()
+	checks.check(graph.orientation == 1 and ui.graph_b.orientation == 1, "cycle_orientation cycles only focused pane")
+	graph.cycle_orientation()
+	if not ui.session.selected.is_empty():
+		graph.frame_selection()
 	checks.check(graph.orientation == 0, "side orientation")
-	key(KEY_TAB, true)
+	graph.cycle_orientation()
+	if not ui.session.selected.is_empty():
+		graph.frame_selection()
 	checks.check(graph.orientation == 2 and graph.origin == state_origin and graph.zoom == state_zoom, "orientation restores pan and zoom")
 	graph.origin = Vector3.ZERO
 	graph.zoom = 1
@@ -466,10 +488,12 @@ func run() -> void:
 	graph.origin = Vector3(10000, 10000, 10000)
 	graph.zoom = 0.01
 	graph.set_orientation(2)
-	key(KEY_TAB, true)
+	graph.cycle_orientation()
+	if not ui.session.selected.is_empty():
+		graph.frame_selection()
 	var selected_center: Vector3 = (brush.aabb_min + brush.aabb_max) * 0.5
 	checks.check(graph.orientation == 1 and graph.project(selected_center).distance_to(graph.size * 0.5) < 1.0,
-		"Ctrl Tab keeps selected brushes centered in the new grid angle")
+		"cycle_orientation keeps selected brushes centered in the new grid angle")
 	graph.set_orientation(2)
 	checks.check(ui.session.history_action_count() == 1, "one gesture one action")
 	checks.check(ui.camera_view.triangle_count == 12, "camera generated from native preview")
@@ -1129,6 +1153,246 @@ func run() -> void:
 	ui = plugin.map_editor
 	verify_recovery_regression(recovery)
 	checks.finish(get_tree(), suite)
+
+func _active_border_count() -> int:
+	var count := 0
+	for border in ui.slot_borders:
+		if border.get_theme_stylebox("panel").border_color.a > 0.01:
+			count += 1
+	return count
+
+func _document_snapshot() -> Dictionary:
+	return {
+		"text": text(),
+		"selected": ui.session.selected.duplicate(),
+		"revision": ui.session.document.get_revision(),
+		"dirty": ui.session.document.is_dirty(),
+		"actions": ui.session.history_action_count(),
+		"cursor": ui.session.history_cursor(),
+	}
+
+func _same_document(before: Dictionary) -> bool:
+	return text() == before.text and ui.session.selected == before.selected and ui.session.document.get_revision() == before.revision \
+		and ui.session.document.is_dirty() == before.dirty and ui.session.history_action_count() == before.actions \
+		and ui.session.history_cursor() == before.cursor
+
+func active_pane_journey() -> void:
+	var before := _document_snapshot()
+	checks.check(ui.active_slot == 0 and ui.visible_slot_order() == [0, 2, 3] and _active_border_count() == 1,
+		"3-view starts with camera slot 0 and one active border")
+	var owner = ui.get_viewport().gui_get_focus_owner()
+	ui.graph_a.grab_focus()
+	checks.check(ui.get_viewport().gui_get_focus_owner() == ui.graph_a, "graph can take focus before hover")
+	ui.view_slots[0].mouse_entered.emit()
+	checks.check(ui.active_slot == 0 and ui.get_viewport().gui_get_focus_owner() == ui.graph_a, "hover camera does not steal focus")
+	ui.view_slots[2].mouse_entered.emit()
+	checks.check(ui.active_slot == 2 and ui.active_graph == ui.slot_views[2] and ui.get_viewport().gui_get_focus_owner() == ui.graph_a,
+		"hover top grid activates slot identity without stealing focus")
+	ui.view_slots[3].mouse_entered.emit()
+	checks.check(ui.active_slot == 3 and ui.active_graph == ui.slot_views[3], "hover front grid activates slot 3")
+	ui._on_slot_mouse_entered(2)
+	checks.check(ui.active_slot == 2 and not ui.slot_menus[2].get_popup().visible and ui.get_viewport().gui_get_focus_owner() == ui.graph_a,
+		"hover over pane menu activates the slot without opening it")
+	var click := InputEventMouseButton.new()
+	click.pressed = true
+	click.button_index = MOUSE_BUTTON_LEFT
+	ui._on_slot_gui_input(click, 0)
+	checks.check(ui.active_slot == 0 and ui.active_graph == null, "click camera activates camera slot")
+	ui.graph_a.grab_focus()
+	ui._on_gui_focus_changed(ui.graph_a)
+	checks.check(ui.active_slot == ui.slot_views.find(ui.graph_a) and ui.active_graph == ui.graph_a, "descendant graph focus activates its slot")
+	ui.apply_layout(2)
+	ui.set_slot_type(0, "Camera")
+	ui.set_slot_type(2, "Camera")
+	ui.slot_views[0].grab_focus()
+	checks.check(ui.active_slot == 0 and ui.slot_views[0] != ui.slot_views[2], "duplicate cameras activate by slot identity")
+	ui.slot_views[2].grab_focus()
+	checks.check(ui.active_slot == 2, "second camera slot is distinct from the first")
+	ui.set_slot_type(0, "Top Grid")
+	ui.set_slot_type(2, "Top Grid")
+	ui.slot_views[0].grab_focus()
+	checks.check(ui.active_slot == 0 and ui.slot_views[0].orientation == ui.slot_views[2].orientation, "duplicate grids activate by slot not orientation")
+	ui.slot_views[2].grab_focus()
+	checks.check(ui.active_slot == 2, "second same-orientation grid keeps its own slot")
+	ui.set_active_slot(0, true)
+	key(KEY_RIGHT, false, false, true)
+	checks.check(ui.active_slot == 2, "2-view Alt+Right moves to the other horizontal slot")
+	key(KEY_RIGHT, false, false, true)
+	checks.check(ui.active_slot == 0, "2-view Alt+Right wraps on the row")
+	key(KEY_UP, false, false, true)
+	checks.check(ui.active_slot == 0, "2-view Alt+Up is ignored on a single-slot column")
+	ui.set_slot_type(0, "Camera")
+	ui.set_slot_type(1, "Side Grid")
+	ui.set_slot_type(2, "Top Grid")
+	ui.set_slot_type(3, "Front Grid")
+	ui.apply_layout(4)
+	ui.set_active_slot(0, true)
+	key(KEY_RIGHT, false, false, true)
+	checks.check(ui.active_slot == 2, "4-view Alt+Right from TL to TR")
+	key(KEY_DOWN, false, false, true)
+	checks.check(ui.active_slot == 3, "4-view Alt+Down from TR to BR")
+	key(KEY_LEFT, false, false, true)
+	checks.check(ui.active_slot == 1, "4-view Alt+Left from BR to BL")
+	key(KEY_UP, false, false, true)
+	checks.check(ui.active_slot == 0, "4-view Alt+Up from BL to TL")
+	key(KEY_LEFT, false, false, true)
+	checks.check(ui.active_slot == 2, "4-view Alt+Left wraps TL to TR")
+	ui.apply_layout(3)
+	ui.set_active_slot(0, true)
+	key(KEY_DOWN, false, false, true)
+	checks.check(ui.active_slot == 0, "3-view Alt+Down ignores hidden slot 1")
+	ui.set_active_slot(2, true)
+	key(KEY_DOWN, false, false, true)
+	checks.check(ui.active_slot == 3, "3-view Alt+Down from TR to BR")
+	key(KEY_LEFT, false, false, true)
+	checks.check(ui.active_slot == 3, "3-view Alt+Left from BR ignores hidden slot 1")
+	key(KEY_UP, false, false, true)
+	checks.check(ui.active_slot == 2, "3-view Alt+Up from BR to TR")
+	ui.set_active_slot(2)
+	var old_pane: Control = ui.slot_views[2]
+	ui.set_slot_type(2, "Camera")
+	checks.check(ui.active_slot == 2 and ui.active_graph == null and (not is_instance_valid(old_pane) or old_pane.is_queued_for_deletion()),
+		"replacing the active graph keeps the slot and drops the freed alias")
+	ui.set_slot_type(2, "UV")
+	checks.check(ui.active_slot == 2 and ui.active_graph == null, "replacing with UV keeps the slot and nulls active_graph")
+	ui.slot_views[2].texture_field.grab_focus()
+	checks.check(ui.active_slot == 2, "UV field focus activates the UV slot")
+	var uv_slot: int = ui.active_slot
+	key(KEY_SPACE)
+	key(KEY_RIGHT, false, false, true)
+	checks.check(ui.active_slot == uv_slot and _same_document(before), "UV text fields block clone and pane cycling")
+	ui.slot_views[2].shift_x.get_line_edit().grab_focus()
+	key(KEY_RIGHT, false, false, true)
+	key(KEY_DELETE)
+	checks.check(ui.active_slot == uv_slot and _same_document(before), "UV SpinBox editors block cycle and Map commands")
+	ui.set_slot_type(2, "Entities")
+	ui.slot_views[2].key_field.grab_focus()
+	checks.check(ui.active_slot == 2 and ui.active_graph == null, "Entities field focus activates the entity slot")
+	key(KEY_SPACE)
+	checks.check(_same_document(before), "Entities pane does not fall back to a graph command")
+	ui.set_slot_type(2, "Top Grid")
+	for graph in ui.graphs:
+		if not graph.is_visible_in_tree():
+			continue
+		ui.active_graph = graph
+		checks.check(ui.active_slot == ui.slot_views.find(graph) and ui.active_graph == graph, "alias assignment activates the containing slot")
+	var kept: int = ui.active_slot
+	ui.active_graph = null
+	checks.check(ui.active_slot == kept and ui.active_graph != null, "assigning null does not clear a valid graph slot")
+	ui.apply_layout(4)
+	ui.set_active_slot(2)
+	ui.apply_layout(2)
+	checks.check(ui.active_slot == 2, "layout change keeps a still-visible active slot")
+	ui.apply_layout(4)
+	ui.set_active_slot(1)
+	checks.check(ui.active_slot == 1, "4-view can activate the bottom-left slot")
+	ui.apply_layout(3)
+	checks.check(ui.active_slot == 0, "hiding the active slot falls back to the first visual slot")
+	ui.apply_layout(4)
+	checks.check(ui.active_slot == 0, "re-expanding does not resurrect the previously hidden slot")
+	ui.apply_layout(3)
+	ui.set_active_slot(2, true)
+	ui.graph_a.grab_focus()
+	key(KEY_SPACE)
+	checks.check(_same_document(before), "graph-only clone on an empty selection does not edit")
+	ui.set_active_slot(0, true)
+	var grid_visible: bool = ui.camera_view.surface_grid_visible
+	key(KEY_G)
+	checks.check(ui.camera_view.surface_grid_visible != grid_visible, "G toggles grid on the active camera")
+	key(KEY_G)
+	ui.set_active_slot(2, true)
+	grid_visible = ui.camera_view.surface_grid_visible
+	key(KEY_G)
+	checks.check(ui.camera_view.surface_grid_visible == grid_visible, "G does nothing when a graph is active")
+	ui.texture_field.grab_focus()
+	var slot: int = ui.active_slot
+	key(KEY_RIGHT, false, false, true)
+	key(KEY_H)
+	checks.check(ui.active_slot == slot and _same_document(before), "bottom LineEdit blocks cycle and Map commands")
+	ui.graph_a.grab_focus()
+	ui.file_dialog.visible = true
+	key(KEY_RIGHT, false, false, true)
+	checks.check(ui.active_slot == slot and _same_document(before), "file dialog blocks pane cycling")
+	ui.file_dialog.visible = false
+	ui.dirty_dialog.visible = true
+	key(KEY_RIGHT, false, false, true)
+	checks.check(ui.active_slot == slot, "dirty dialog blocks pane cycling")
+	ui.dirty_dialog.visible = false
+	ui.inspector.visible = true
+	key(KEY_RIGHT, false, false, true)
+	checks.check(ui.active_slot == slot, "inspector blocks pane cycling")
+	ui.inspector.visible = false
+	ui.graph_a.gesture = "move"
+	key(KEY_RIGHT, false, false, true)
+	checks.check(ui.active_slot == slot and ui.graph_a.gesture == "move" and _same_document(before),
+		"graph gesture rejects cycling without content or history change")
+	ui.graph_a.gesture = ""
+	ui.camera_view.flying = true
+	key(KEY_RIGHT, false, false, true)
+	checks.check(ui.active_slot == slot, "camera fly rejects pane cycling")
+	ui.camera_view.flying = false
+	ui.set_slot_type(0, "Camera")
+	ui.set_slot_type(1, "Side Grid")
+	ui.set_slot_type(2, "Top Grid")
+	ui.set_slot_type(3, "Front Grid")
+	ui.apply_layout(3)
+	if owner is Control:
+		owner.grab_focus()
+	checks.check(_same_document(before), "activation and cycling leave document, selection, dirty, and history unchanged")
+	if ui.get_viewport().gui_get_focus_owner() != ui.graph_a:
+		ui.graph_a.grab_focus()
+
+func document_tab_shortcut_journey() -> void:
+	var original = ui.session
+	var parked: Array = ui.sessions.duplicate()
+	ui.graph_a.grab_focus()
+	key(KEY_T, true)
+	var created = ui.session
+	checks.check(created != original and created.document.get_path().is_empty() and ui.sessions.has(original),
+		"Ctrl+T opens a new untitled Map tab")
+	key(KEY_TAB, true)
+	checks.check(ui.session == original, "Ctrl+Tab cycles to the next Map tab")
+	key(KEY_TAB, true)
+	checks.check(ui.session == created, "Ctrl+Tab wraps Map tabs")
+	key(KEY_TAB, true, true)
+	checks.check(ui.session == original, "Ctrl+Shift+Tab cycles to the previous Map tab")
+	ui.set_session(created)
+	key(KEY_W, true)
+	checks.check(not ui.sessions.has(created) and ui.session == original, "Ctrl+W closes the active Map tab")
+	var named = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	ui.set_session(named)
+	checks.check(named.document.save_map("user://phase2-reopen.map").ok, "reopen fixture writes a saved path")
+	ui.close_document(named)
+	key(KEY_T, true, true)
+	checks.check(ui.session != original and str(ui.session.document.get_path()).ends_with("phase2-reopen.map"),
+		"Ctrl+Shift+T reopens the last closed saved path")
+	ui.close_document(ui.session)
+	ui.closed_paths.clear()
+	key(KEY_T, true, true)
+	checks.check(ui.notice.text.contains("No closed"), "Ctrl+Shift+T on an empty stack is a no-op notice")
+	var held: Array = ui.sessions.duplicate()
+	var held_session = ui.session
+	ui.sessions.clear()
+	ui.set_session(null)
+	checks.check(ui.session == null and ui.empty_overlay.visible and not ui.workspace.visible,
+		"last-tab close shows the empty overlay instead of an untitled session")
+	key(KEY_T, true)
+	checks.check(ui.session != null and not ui.empty_overlay.visible and ui.workspace.visible and ui.session.document.get_path().is_empty(),
+		"Ctrl+T from empty creates untitled and dismisses the overlay")
+	ui.close_document(ui.session)
+	ui.file_command("new")
+	checks.check(ui.session != null and not ui.empty_overlay.visible, "New Map from overlay creates untitled")
+	ui.close_document(ui.session)
+	ui.sessions.clear()
+	for origin in held:
+		ui.sessions.append(origin)
+	ui.set_session(held_session)
+	for origin in ui.sessions.duplicate():
+		if not parked.has(origin):
+			origin.save_enabled = false
+			ui.close_document(origin)
+	ui.set_session(original)
+	checks.check(ui.session == original and not ui.empty_overlay.visible, "document tab tests restore the original session")
 
 func camera_marker_regression() -> void:
 	var graph = ui.graph_a
@@ -2157,8 +2421,10 @@ func precision_journey() -> void:
 	graph.grab_focus()
 	var other_orientation: int = ui.graph_a.orientation
 	for cycle in 3:
-		key(KEY_TAB, true)
-		checks.check(ui.graph_a.orientation == other_orientation and ui.active_graph == graph, "keyboard focus cycles only grid B %d" % cycle)
+		graph.cycle_orientation()
+		if not scratch.selected.is_empty():
+			graph.frame_selection()
+		checks.check(ui.graph_a.orientation == other_orientation and ui.active_graph == graph, "orientation cycles only grid B %d" % cycle)
 	graph.orientation = 2
 	graph.origin = Vector3.ZERO
 	graph.zoom = 2
@@ -2634,7 +2900,9 @@ func grid_draw_batch_regression() -> void:
 	graph.clip_flip = true
 	checks.check(ui.graphs.all(func(item): return item.clip_points == ui.cut_points and item.clip_flip) and ui.camera_view.overlays.has_node("CutOverlay"),
 		"grid and camera panes share one cut point/flip state")
+	var kept_slot: int = ui.active_slot
 	ui.active_graph = null
+	checks.check(ui.active_slot == kept_slot, "null alias does not clear a valid active_slot")
 	ui.flip_clip()
 	ui.set_tool("Brush")
 	checks.check(ui.cut_points.is_empty() and not ui.cut_flip and not ui.camera_view.overlays.has_node("CutOverlay"),

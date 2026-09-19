@@ -196,21 +196,34 @@ class Journey:
         self.wait("real grid key sets shared grid 8", lambda s: s["grid"] == 8)
         self.x.chord("5")
         self.wait("real grid key restores shared grid 16", lambda s: s["grid"] == 16)
-        for pane, orientations in (("a", [1, 0, 2]), ("b", [0, 2, 1])):
-            self.click(self.point(state, pane, [32, 16, 0]))
-            other = "b" if pane == "a" else "a"
-            fixed = self.request()[other]["orientation"]
-            for orientation in orientations:
-                self.x.chord("Tab", "Control_L")
-                state = self.wait(f"Ctrl+Tab {pane} to {orientation}, other pane unchanged", lambda s: s[pane]["orientation"] == orientation and s[other]["orientation"] == fixed and s["text"] == moved)
-                if pane == "a" and orientation in (0, 1):
-                    start = self.point(state, pane, [32, 16, 0])
-                    self.drag(start, [start[0] + 16, start[1] - 16])
-                    minimum = [-16, -32, -48] if orientation == 1 else [-32, -16, -48]
-                    maximum = [112, 64, 80] if orientation == 1 else [96, 80, 80]
-                    self.wait(f"real orientation {orientation} move preserves hidden axis", lambda s: s["brushes"][0]["min"] == minimum and s["brushes"][0]["max"] == maximum)
-                    self.x.chord("z", "Control_L")
-                    state = self.wait(f"real orientation {orientation} move undo", lambda s: s["text"] == moved)
+        self.x.move(center(state["camera"]))
+        state = self.wait("hover camera activates slot 0", lambda s: s["active_slot"] == 0 and s["active_pane_type"] == "Camera" and s["slot_border_active"][0] and s["slot_border_active"].count(True) == 1 and s["text"] == moved)
+        hover_focus = state["focus"]
+        self.x.move(center(state["a"]["rect"]))
+        state = self.wait("hover top grid activates slot 2 without stealing focus", lambda s: s["active_slot"] == 2 and s["active_pane_type"] == "Top Grid" and s["focus"] == hover_focus and s["text"] == moved)
+        self.click(center(state["b"]["rect"]))
+        state = self.wait("click front grid activates slot 3", lambda s: s["active_slot"] == 3 and s["active_pane_type"] == "Front Grid")
+        self.x.chord("Up", "Alt_L")
+        state = self.wait("Alt+Up from front grid to top grid", lambda s: s["active_slot"] == 2 and s["text"] == moved)
+        self.x.chord("Left", "Alt_L")
+        state = self.wait("Alt+Left from top grid to camera", lambda s: s["active_slot"] == 0)
+        self.x.chord("Right", "Alt_L")
+        state = self.wait("Alt+Right wraps or moves camera to top grid", lambda s: s["active_slot"] == 2)
+        self.x.chord("Down", "Alt_L")
+        state = self.wait("Alt+Down from top grid to front grid", lambda s: s["active_slot"] == 3)
+        self.x.chord("Left", "Alt_L")
+        state = self.wait("Alt+Left on BR row is ignored in 3-view", lambda s: s["active_slot"] == 3)
+        self.screenshot("window-active-pane")
+        start = self.point(state, "a", [32, 16, 0])
+        self.x.move(start)
+        self.x.button(1, True)
+        preview = self.wait("held drag for cycle rejection", lambda s: s["a"]["gesture"] == "move")
+        slot = preview["active_slot"]
+        self.x.chord("Right", "Alt_L")
+        state = self.request()
+        self.check("Alt+Arrow ignored during graph gesture", state["active_slot"] == slot and state["a"]["gesture"] == "move" and state["text"] == moved)
+        self.x.button(1, False)
+        state = self.wait("gesture release after rejected cycle", lambda s: s["a"]["gesture"] == "")
         # Crucially inspect the preview while LMB is still down, BEFORE focus loss.
         for pane in ("a", "b"):
             self.click(self.point(state, pane, [32, 16, 0]))
@@ -234,6 +247,9 @@ class Journey:
 
         self.field(state["search_rect"], "nh123")
         state = self.wait("material search receives shortcut letters as text", lambda s: s["search"] == "nh123" and not s["inspector"] and s["hidden"] == 0 and s["grid"] == 16 and s["text"] == moved and not s["search_results"])
+        slot = state["active_slot"]
+        self.x.chord("Right", "Alt_L")
+        state = self.wait("Alt+Arrow ignored in nested browser field", lambda s: s["active_slot"] == slot and s["search"] == "nh123" and s["text"] == moved)
         self.field(state["search_rect"], "checker")
         state = self.wait("real material search finds both project folders", lambda s: len(s["search_results"]) == 2 and all("checker" in p for p in s["search_results"]))
         # Assign via production shader LineEdit and button, no observer mutations.
@@ -300,6 +316,9 @@ class Journey:
 
         self.x.chord("s", "Control_L", "Shift_L")
         state = self.wait("Save As dialog is real and visible", lambda s: s["file_dialog"])
+        slot = state["active_slot"]
+        self.x.chord("Right", "Alt_L")
+        state = self.wait("Alt+Arrow ignored while file dialog is open", lambda s: s["file_dialog"] and s["active_slot"] == slot)
         path = self.project / "window-authored.map"
         self.field(state["file_name_rect"], str(path))
         self.click(center(self.request()["file_ok_rect"]))

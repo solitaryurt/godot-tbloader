@@ -24,7 +24,21 @@ var graphs: Array[Control] = []
 var cameras: Array[Control] = []
 var uv_panes: Array[Control] = []
 var entity_panes: Array[Control] = []
-var active_graph: Control
+var active_slot: int = -1
+var visual_slot_order: Array[int] = [0, 2, 1, 3]
+var slot_borders: Array[Control] = []
+var active_graph: Control:
+	get:
+		var pane := active_pane()
+		if is_instance_valid(pane) and not pane.is_queued_for_deletion() and pane.get_script() == Graph:
+			return pane
+		return null
+	set(graph):
+		if graph == null or not is_instance_valid(graph) or graph.is_queued_for_deletion():
+			return
+		var index := slot_views.find(graph)
+		if index >= 0 and index < view_slots.size() and view_slots[index].visible:
+			set_active_slot(index)
 var camera_view: Control
 var material_workspace: Control
 var browser: Control
@@ -96,8 +110,15 @@ var shutting_down = false
 const RECOVERY_PATH = "user://tbloader-map-recovery.json"
 const RECOVERY_META = "tbloader_map_recovery"
 const RECOVERY_VERSION = 2
+const RECENT_MAPS_PATH = "user://tbloader-recent-maps.json"
+const ACCENT_FALLBACK := Color(0.44, 0.73, 0.98)
 var scan_delay = -1.0
 var fallback_entity_pane: Control
+var empty_overlay: Control
+var empty_recent_list: ItemList
+var empty_all_list: ItemList
+var closed_paths: Array[String] = []
+var recent_paths: Array[String] = []
 var cut_points: Array[Vector3] = []
 var cut_plane_points: Array[Vector3] = []
 var cut_flip := false
@@ -237,7 +258,10 @@ func _ready() -> void:
 	for entry in [["Entities", "entities", "hide_entities"], ["Caulk", "caulk", "hide_caulk"], ["Clips", "clips", "hide_clips"], ["HintSkip", "hint_skip", "hide_hint_skip"]]:
 		var category: String = entry[1]
 		var control := icon_button(filter_group, "Hide%s" % entry[0], "Hide %s in all map views; this does not edit the map" % entry[0].to_lower(),
-			custom_icon(entry[2]), func(): session.set_visibility_filter(category, not session.visibility_filters[category]), true)
+			custom_icon(entry[2]), func():
+				if session != null:
+					session.set_visibility_filter(category, not session.visibility_filters[category]),
+			true)
 		visibility_buttons[category] = control
 	workspace = HSplitContainer.new()
 	workspace.name = "MapViewWorkspace"
@@ -262,6 +286,20 @@ func _ready() -> void:
 		slot.size_flags_vertical = Control.SIZE_EXPAND_FILL
 		(left_views if index < 2 else right_views).add_child(slot)
 		view_slots.append(slot)
+		var border := Panel.new()
+		border.name = "ActivePaneBorder%d" % index
+		border.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		border.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		var box := StyleBoxFlat.new()
+		box.bg_color = Color(0, 0, 0, 0)
+		box.draw_center = false
+		box.set_border_width_all(maxi(editor_scaled(1), 1))
+		box.border_color = Color(0, 0, 0, 0)
+		border.add_theme_stylebox_override("panel", box)
+		slot.add_child(border)
+		slot_borders.append(border)
+		slot.mouse_entered.connect(_on_slot_mouse_entered.bind(index))
+		slot.gui_input.connect(_on_slot_gui_input.bind(index))
 		var pane_menu := MenuButton.new()
 		pane_menu.name = "PaneMenu%d" % index
 		pane_menu.icon = editor_icon("GuiTabMenu")
@@ -286,10 +324,19 @@ func _ready() -> void:
 	view_parking.name = "UnusedViews"
 	view_parking.hide()
 	add_child(view_parking)
+	empty_overlay = PanelContainer.new()
+	empty_overlay.name = "MapStartOverlay"
+	empty_overlay.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	empty_overlay.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	empty_overlay.hide()
+	add_child(empty_overlay)
+	build_empty_overlay()
 	for index in 4:
 		set_slot_type(index, slot_types[index])
-	active_graph = graph_a
 	apply_layout(3)
+	if get_viewport() != null and not get_viewport().gui_focus_changed.is_connected(_on_gui_focus_changed):
+		get_viewport().gui_focus_changed.connect(_on_gui_focus_changed)
+	load_recent_paths()
 	status = Label.new()
 	add_child(status)
 	notice = Label.new()
@@ -483,6 +530,158 @@ func entity_menu_selected(id: int) -> void:
 func visible_graphs() -> Array[Control]:
 	return graphs.filter(func(graph): return graph.is_inside_tree() and graph.is_visible_in_tree())
 
+func active_pane() -> Control:
+	if active_slot < 0 or active_slot >= slot_views.size():
+		return null
+	var pane: Control = slot_views[active_slot]
+	if not is_instance_valid(pane) or pane.is_queued_for_deletion():
+		return null
+	return pane
+
+func visible_slot_order() -> Array[int]:
+	var order: Array[int] = []
+	for index in visual_slot_order:
+		if index >= 0 and index < view_slots.size() and view_slots[index].visible:
+			order.append(index)
+	return order
+
+func slot_for_control(control: Control) -> int:
+	var node: Node = control
+	while node is Control:
+		var index := view_slots.find(node)
+		if index >= 0:
+			return index
+		node = node.get_parent()
+	return -1
+
+func activate_control(control: Control) -> void:
+	var slot := slot_for_control(control)
+	if slot >= 0:
+		set_active_slot(slot)
+
+func set_active_slot(index: int, request_focus := false) -> void:
+	if index == -1:
+		active_slot = -1
+		refresh_slot_borders()
+		return
+	if index < 0 or index >= view_slots.size() or not view_slots[index].visible:
+		return
+	active_slot = index
+	refresh_slot_borders()
+	if request_focus:
+		var pane: Control = slot_views[index]
+		if is_instance_valid(pane) and pane.focus_mode != Control.FOCUS_NONE:
+			pane.grab_focus()
+
+func refresh_slot_borders() -> void:
+	var accent := editor_color("accent_color", ACCENT_FALLBACK)
+	for index in slot_borders.size():
+		var box: StyleBoxFlat = slot_borders[index].get_theme_stylebox("panel")
+		box.border_color = accent if index == active_slot else Color(0, 0, 0, 0)
+		slot_borders[index].queue_redraw()
+		update_slot_accessibility(index)
+
+func update_slot_accessibility(slot: int) -> void:
+	if slot < 0 or slot >= view_slots.size():
+		return
+	var type_name: String = slot_types[slot] if slot < slot_types.size() else "Pane"
+	var text := "%s pane, slot %d" % [type_name, slot + 1]
+	if slot == active_slot:
+		text = "Active pane, " + text
+	view_slots[slot].accessibility_name = text
+	view_slots[slot].accessibility_description = text
+	var pane: Control = slot_views[slot] if slot < slot_views.size() else null
+	if is_instance_valid(pane):
+		pane.accessibility_description = text
+
+func move_active_slot(direction: Vector2i) -> bool:
+	if active_slot < 0 or direction == Vector2i.ZERO:
+		return false
+	var row := 0 if active_slot in [0, 2] else 1
+	var col := 0 if active_slot in [0, 1] else 1
+	var line: Array[int] = []
+	if direction.x != 0:
+		for candidate_col in 2:
+			var slot: int = ([0, 2] if row == 0 else [1, 3])[candidate_col]
+			if slot < view_slots.size() and view_slots[slot].visible:
+				line.append(slot)
+	else:
+		for candidate_row in 2:
+			var slot: int = ([0, 1] if col == 0 else [2, 3])[candidate_row]
+			if slot < view_slots.size() and view_slots[slot].visible:
+				line.append(slot)
+	if line.size() < 2:
+		return false
+	var current := line.find(active_slot)
+	if current < 0:
+		return false
+	var step := 1 if (direction.x + direction.y) > 0 else -1
+	set_active_slot(line[posmod(current + step, line.size())], true)
+	return true
+
+func _on_slot_mouse_entered(slot: int) -> void:
+	if not is_visible_in_tree():
+		return
+	set_active_slot(slot)
+
+func _on_slot_gui_input(event: InputEvent, slot: int) -> void:
+	if not is_visible_in_tree():
+		return
+	if event is InputEventMouseButton and event.pressed:
+		set_active_slot(slot)
+
+func _on_gui_focus_changed(control: Control) -> void:
+	if not is_visible_in_tree() or control == null:
+		return
+	var slot := slot_for_control(control)
+	if slot >= 0 and view_slots[slot].visible:
+		set_active_slot(slot)
+
+func is_protected_focus(focus: Control) -> bool:
+	if browser != null and browser.has_browser_focus():
+		return true
+	var node: Node = focus
+	while node is Control:
+		if node is LineEdit or node is TextEdit or node is CodeEdit:
+			return true
+		if node is SpinBox and node.editable:
+			return true
+		node = node.get_parent()
+	return false
+
+func is_protected_surface(focus: Control) -> bool:
+	if is_protected_focus(focus):
+		return true
+	if file_dialog != null and file_dialog.visible:
+		return true
+	if dirty_dialog != null and dirty_dialog.visible:
+		return true
+	if inspector != null and inspector.visible:
+		return true
+	if entity_menu != null and entity_menu.visible:
+		return true
+	if file_menu != null and file_menu.get_popup().visible:
+		return true
+	if layout_menu != null and layout_menu.get_popup().visible:
+		return true
+	for menu in slot_menus:
+		if menu.get_popup().visible:
+			return true
+	return false
+
+func has_active_interaction() -> bool:
+	if Input.get_mouse_button_mask() != 0:
+		return true
+	for graph in graphs:
+		if is_instance_valid(graph) and graph.gesture != "":
+			return true
+	for camera in cameras:
+		if not is_instance_valid(camera):
+			continue
+		if camera.flying or camera.camera_gesture != "" or camera.godot_navigation != "" or camera.ctrl_gesture != "" or camera.rmb_down or not camera.held.is_empty():
+			return true
+	return false
+
 func camera_moved(position: Vector3, direction: Vector3) -> void:
 	for graph in graphs:
 		graph.set_camera_pose(position, direction)
@@ -583,6 +782,8 @@ func clear_cut_state() -> void:
 	refresh_cut_views()
 
 func flip_clip() -> void:
+	if session == null:
+		return
 	if tool != "Cut" or cut_plane_points.size() != 3:
 		set_status("Place two or three clip points first.")
 		return
@@ -634,6 +835,8 @@ func preview_clip(split: bool, owner: Object = null) -> bool:
 		plane[0], plane[1], plane[2], split, cut_flip), owner if owner != null else self)
 
 func apply_clip(split: bool) -> void:
+	if session == null:
+		return
 	var plane := cut_plane()
 	if tool != "Cut" or plane.is_empty():
 		set_status("Place two or three clip points first.")
@@ -728,14 +931,25 @@ func set_slot_type(slot: int, type: String) -> void:
 	if is_instance_valid(old):
 		view_slots[slot].remove_child(old)
 		old.queue_free()
+	var keep_active := active_slot == slot
 	var pane := create_pane(type)
+	if pane == null:
+		return
 	slot_types[slot] = type
 	slot_views[slot] = pane
 	view_slots[slot].add_child(pane)
 	pane.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	pane.mouse_entered.connect(_on_slot_mouse_entered.bind(slot))
+	pane.gui_input.connect(_on_slot_gui_input.bind(slot))
+	if slot < slot_borders.size():
+		view_slots[slot].move_child(slot_borders[slot], -1)
 	view_slots[slot].move_child(slot_menus[slot], -1)
 	rebuild_pane_collections()
 	update_slot_menu(slot)
+	if keep_active:
+		set_active_slot(slot)
+	elif active_slot >= 0:
+		refresh_slot_borders()
 	if session != null:
 		refresh()
 
@@ -777,8 +991,6 @@ func rebuild_pane_collections() -> void:
 	graph_a = graphs[0] if graphs.size() > 0 else null
 	graph_b = graphs[1] if graphs.size() > 1 else null
 	graph_c = graphs[2] if graphs.size() > 2 else null
-	if not is_instance_valid(active_graph) or not graphs.has(active_graph):
-		active_graph = graph_a
 	for graph in graphs:
 		graph.set_camera_views(cameras)
 	camera_slot = slot_types.find("Camera")
@@ -801,9 +1013,11 @@ func apply_layout(mode: int, _legacy_camera_slot := -1) -> void:
 		view_slots[index].visible = visible_slots.has(index)
 	if mode == 4:
 		right_views.split_offset = left_views.split_offset
-	var shown_graphs := visible_graphs()
-	if not shown_graphs.is_empty() and not shown_graphs.has(active_graph):
-		active_graph = shown_graphs[0]
+	if active_slot < 0 or active_slot >= view_slots.size() or not view_slots[active_slot].visible:
+		var order := visible_slot_order()
+		set_active_slot(order[0] if not order.is_empty() else -1)
+	else:
+		refresh_slot_borders()
 	update_layout_menus()
 	refresh_status()
 
@@ -821,6 +1035,9 @@ func workspace_state() -> Dictionary:
 	for index in slot_views.size():
 		var pane: Control = slot_views[index]
 		var pane_state := {"type": slot_types[index]}
+		if not is_instance_valid(pane):
+			slots.append(pane_state)
+			continue
 		if pane.get_script() == Graph:
 			pane_state.merge({"orientation": pane.orientation, "origin": pane.origin, "zoom": pane.zoom, "view_states": pane.view_states})
 		elif pane.get_script() == Camera and pane.camera != null:
@@ -892,6 +1109,141 @@ func restore_workspace_state(state: Dictionary) -> void:
 				pane.set_camera_grid_visible(bool(pane_state.get("camera_grid_visible", pane.camera_grid_visible)))
 				pane.camera_transform_changed()
 	refresh()
+	var order := visible_slot_order()
+	set_active_slot(order[0] if not order.is_empty() else -1)
+
+func build_empty_overlay() -> void:
+	var column := VBoxContainer.new()
+	column.name = "MapStartColumn"
+	column.add_theme_constant_override("separation", editor_scaled(8))
+	empty_overlay.add_child(column)
+	var title := Label.new()
+	title.text = "No Map document open"
+	column.add_child(title)
+	var new_map := Button.new()
+	new_map.name = "NewMap"
+	new_map.text = "New Map"
+	new_map.pressed.connect(func(): file_command("new"))
+	column.add_child(new_map)
+	var recent_label := Label.new()
+	recent_label.text = "Recent"
+	column.add_child(recent_label)
+	empty_recent_list = ItemList.new()
+	empty_recent_list.name = "RecentMaps"
+	empty_recent_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	empty_recent_list.item_activated.connect(func(index): open_empty_list_path(empty_recent_list, index))
+	column.add_child(empty_recent_list)
+	var all_label := Label.new()
+	all_label.text = "All maps"
+	column.add_child(all_label)
+	empty_all_list = ItemList.new()
+	empty_all_list.name = "AllMaps"
+	empty_all_list.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	empty_all_list.item_activated.connect(func(index): open_empty_list_path(empty_all_list, index))
+	column.add_child(empty_all_list)
+
+func open_empty_list_path(list: ItemList, index: int) -> void:
+	if index < 0 or index >= list.item_count:
+		return
+	var path := str(list.get_item_metadata(index))
+	if not path.is_empty():
+		open_path(path)
+
+func update_empty_workspace() -> void:
+	var empty := session == null
+	if workspace != null:
+		workspace.visible = not empty
+	if empty_overlay != null:
+		empty_overlay.visible = empty
+		if empty:
+			rebuild_empty_overlay()
+	if document_tabs != null:
+		document_tabs.visible = not empty
+
+func rebuild_empty_overlay() -> void:
+	if empty_recent_list == null or empty_all_list == null:
+		return
+	empty_recent_list.clear()
+	var recent: Array[String] = []
+	for path in recent_paths:
+		if FileAccess.file_exists(path):
+			recent.append(path)
+			empty_recent_list.add_item(path.get_file() if path.get_file() else path)
+			empty_recent_list.set_item_metadata(empty_recent_list.item_count - 1, path)
+			empty_recent_list.set_item_tooltip(empty_recent_list.item_count - 1, path)
+	empty_all_list.clear()
+	for path in scan_project_maps():
+		if recent.has(path):
+			continue
+		empty_all_list.add_item(path.get_file() if path.get_file() else path)
+		empty_all_list.set_item_metadata(empty_all_list.item_count - 1, path)
+		empty_all_list.set_item_tooltip(empty_all_list.item_count - 1, path)
+
+func scan_project_maps() -> Array[String]:
+	var found: Array[String] = []
+	var filesystem = EditorInterface.get_resource_filesystem()
+	if filesystem == null:
+		return found
+	var root = filesystem.get_filesystem()
+	if root == null:
+		return found
+	var stack: Array = [root]
+	while not stack.is_empty():
+		var directory = stack.pop_back()
+		for index in directory.get_file_count():
+			var path: String = directory.get_file_path(index)
+			if path.get_extension().to_lower() == "map":
+				found.append(path)
+		for index in directory.get_subdir_count():
+			stack.append(directory.get_subdir(index))
+	found.sort()
+	return found
+
+func load_recent_paths() -> void:
+	recent_paths.clear()
+	if not FileAccess.file_exists(RECENT_MAPS_PATH):
+		return
+	var data = JSON.parse_string(FileAccess.get_file_as_string(RECENT_MAPS_PATH))
+	if data is Array:
+		for item in data:
+			if item is String and FileAccess.file_exists(item):
+				recent_paths.append(item)
+
+func save_recent_paths() -> void:
+	var file := FileAccess.open(RECENT_MAPS_PATH, FileAccess.WRITE)
+	if file == null:
+		return
+	file.store_string(JSON.stringify(recent_paths))
+
+func remember_recent_path(path: String) -> void:
+	if path.is_empty() or not FileAccess.file_exists(path):
+		return
+	recent_paths.erase(path)
+	recent_paths.push_front(path)
+	if recent_paths.size() > 20:
+		recent_paths.resize(20)
+	save_recent_paths()
+
+func cycle_document_tab(delta: int) -> void:
+	var open: Array = []
+	for origin in sessions:
+		if origin.scene_managed and origin.scene.get_ref() == null:
+			continue
+		open.append(origin)
+	if open.size() < 2:
+		return
+	var index := open.find(session)
+	if index < 0:
+		return
+	set_session(open[posmod(index + delta, open.size())])
+
+func reopen_closed_document() -> void:
+	while not closed_paths.is_empty():
+		var path: String = closed_paths.pop_front()
+		if FileAccess.file_exists(path):
+			open_path(path)
+			return
+	set_status("No closed Map to reopen.")
 
 func file_menu_command(id: int) -> void:
 	match id:
@@ -905,6 +1257,18 @@ func file_menu_command(id: int) -> void:
 func set_session(value: RefCounted) -> void:
 	cancel_interaction()
 	session = value
+	if session == null:
+		clear_cut_state()
+		for pane in entity_panes:
+			pane.set_session(null)
+		if fallback_entity_pane != null:
+			fallback_entity_pane.set_session(null)
+		if texture_field != null:
+			texture_field.text = ""
+		refresh_status()
+		if plugin != null:
+			plugin.update_bottom_panel_sessions()
+		return
 	sync_baked_state(session)
 	if not session.scene_managed:
 		last_standalone = weakref(session)
@@ -1020,7 +1384,19 @@ func baked_state_is_current(origin: RefCounted, state: Dictionary) -> bool:
 	return state.current_records.any(func(record): return record.epoch == epoch and record.generation == generation)
 
 func refresh_status() -> void:
-	if session == null or status == null:
+	update_empty_workspace()
+	if status == null:
+		return
+	if session == null:
+		status.text = ""
+		if binding_label != null:
+			binding_label.text = ""
+		changing_document_tabs = true
+		document_tabs.set_block_signals(true)
+		document_tabs.clear_tabs()
+		document_tabs.set_block_signals(false)
+		changing_document_tabs = false
+		_document_tab_signature = []
 		return
 	var baked_state: Dictionary = sync_baked_state(session)
 	var baked = "meshes never built" if session.baked_text.is_empty() else ("meshes current" if baked_state_is_current(session, baked_state) else "meshes stale")
@@ -1092,6 +1468,7 @@ func close_document_tab(index: int) -> void:
 func close_document(origin: RefCounted) -> void:
 	if origin == null or not sessions.has(origin):
 		return
+	var path: String = origin.document.get_path()
 	var replacement = session if session != origin else adjacent_session(origin)
 	sessions.erase(origin)
 	for id in scene_sessions.keys():
@@ -1101,7 +1478,14 @@ func close_document(origin: RefCounted) -> void:
 		last_standalone = weakref(null)
 	origin.dispose()
 	discard_on_replace = null
-	set_session(replacement if replacement != null else Session.new())
+	if not path.is_empty():
+		closed_paths.erase(path)
+		closed_paths.push_front(path)
+		remember_recent_path(path)
+	if replacement != null:
+		set_session(replacement)
+	else:
+		set_session(null)
 
 func adjacent_session(origin: RefCounted) -> RefCounted:
 	var index := sessions.find(origin)
@@ -1173,13 +1557,13 @@ func set_tool(value: String) -> void:
 	else:
 		refresh()
 
-func route_key(event: InputEventKey, graph: Control) -> bool:
+func route_key(event: InputEventKey, _graph: Control) -> bool:
 	var command_or_control := event.ctrl_pressed or event.meta_pressed
 	var history_shortcut := command_or_control and event.keycode in [KEY_Z, KEY_Y]
 	if not event.pressed or event.echo or (cameras.any(func(camera): return camera.flying) and not history_shortcut):
 		return false
 	var focus = get_viewport().gui_get_focus_owner()
-	if focus is LineEdit or focus is TextEdit or browser.has_browser_focus() or file_dialog.visible or dirty_dialog.visible or inspector.visible:
+	if is_protected_surface(focus):
 		return false
 	var plain_shortcut := not event.ctrl_pressed and not event.alt_pressed and not event.shift_pressed and not event.meta_pressed
 	if is_visible_in_tree() and plain_shortcut and event.keycode in [KEY_S, KEY_N]:
@@ -1188,15 +1572,47 @@ func route_key(event: InputEventKey, graph: Control) -> bool:
 		else:
 			toggle_entities()
 		return true
-	if not is_visible_in_tree() or (not graphs.has(focus) and not cameras.has(focus)):
+	if not is_visible_in_tree():
 		return false
-	if graphs.has(focus):
-		graph = focus
-	elif cameras.has(focus):
-		graph = null
-	if is_instance_valid(graph):
-		active_graph = graph
 	var key = event.keycode
+	if event.alt_pressed and not command_or_control and key in [KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_DOWN]:
+		if has_active_interaction():
+			return false
+		var direction := Vector2i.ZERO
+		match key:
+			KEY_LEFT:
+				direction = Vector2i(-1, 0)
+			KEY_RIGHT:
+				direction = Vector2i(1, 0)
+			KEY_UP:
+				direction = Vector2i(0, -1)
+			KEY_DOWN:
+				direction = Vector2i(0, 1)
+		move_active_slot(direction)
+		return true
+	if event.ctrl_pressed and key == KEY_TAB:
+		cycle_document_tab(-1 if event.shift_pressed else 1)
+		return true
+	if event.is_command_or_control_pressed() and key == KEY_T:
+		if event.shift_pressed:
+			reopen_closed_document()
+		else:
+			file_command("new")
+		return true
+	if event.is_command_or_control_pressed() and key == KEY_W and not event.shift_pressed:
+		if session != null and document_tabs != null and document_tabs.current_tab >= 0:
+			close_document_tab(document_tabs.current_tab)
+		return true
+	if session == null:
+		if command_or_control and key == KEY_N:
+			file_command("new")
+			return true
+		if command_or_control and key == KEY_O:
+			file_command("open")
+			return true
+		return false
+	var graph: Control = active_graph
+	var pane: Control = active_pane()
 	if command_or_control:
 		match key:
 			KEY_Z, KEY_Y:
@@ -1210,11 +1626,6 @@ func route_key(event: InputEventKey, graph: Control) -> bool:
 				var changed: bool = session.history_redo() if redoing else session.history_undo()
 				if changed and notice_generation == message_generation:
 					set_status("%s: %s" % ["Redid" if redoing else "Undid", action_name])
-			KEY_TAB:
-				if is_instance_valid(graph):
-					graph.cycle_orientation()
-					if not session.selected.is_empty():
-						graph.frame_selection()
 			KEY_C:
 				copy_selection()
 			KEY_X:
@@ -1231,7 +1642,8 @@ func route_key(event: InputEventKey, graph: Control) -> bool:
 				flip_clip()
 			_:
 				if key >= KEY_3 and key <= KEY_9:
-					make_prism(key - KEY_0)
+					if is_instance_valid(graph):
+						make_prism(key - KEY_0)
 				else:
 					return false
 	else:
@@ -1263,8 +1675,8 @@ func route_key(event: InputEventKey, graph: Control) -> bool:
 			KEY_F:
 				set_tool("Face")
 			KEY_G:
-				if cameras.has(focus):
-					focus.toggle_surface_grid()
+				if pane != null and pane.get_script() == Camera:
+					pane.toggle_surface_grid()
 				else:
 					return false
 			KEY_E:
@@ -1305,6 +1717,8 @@ func _input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 
 func clone_selection(axis: int) -> void:
+	if session == null:
+		return
 	session.transact("Clone map brushes", func():
 		var result: Dictionary = session.document.duplicate_brushes(session.selected)
 		if result.ok and not result.value.is_empty():
@@ -1315,6 +1729,8 @@ func clone_selection(axis: int) -> void:
 		return result)
 
 func paste_text(text: String) -> void:
+	if session == null:
+		return
 	cancel_interaction()
 	if session.transact("Paste map brushes", func():
 		var result: Dictionary = session.document.import_selection(text)
@@ -1325,7 +1741,7 @@ func paste_text(text: String) -> void:
 		set_status("Pasted %d %s." % [pasted_count, "brush" if pasted_count == 1 else "brushes"])
 
 func copy_selection() -> void:
-	if session.selected.is_empty():
+	if session == null or session.selected.is_empty():
 		set_status("No brushes selected to copy.")
 		return
 	var result: Dictionary = session.document.export_selection(session.selected)
@@ -1334,7 +1750,7 @@ func copy_selection() -> void:
 		set_status("Copied %d %s." % [session.selected.size(), "brush" if session.selected.size() == 1 else "brushes"])
 
 func cut_selection() -> void:
-	if session.selected.is_empty():
+	if session == null or session.selected.is_empty():
 		set_status("No brushes selected to cut.")
 		return
 	var selected: PackedInt64Array = session.selected.duplicate()
@@ -1347,6 +1763,8 @@ func cut_selection() -> void:
 		set_status("Cut %d %s." % [selected.size(), "brush" if selected.size() == 1 else "brushes"])
 
 func delete_selection() -> void:
+	if session == null:
+		return
 	session.transact("Delete map selection", func():
 		var result: Dictionary = session.document.delete_brushes(session.selected)
 		if result.ok:
@@ -1354,6 +1772,8 @@ func delete_selection() -> void:
 		return result)
 
 func make_prism(sides: int) -> void:
+	if session == null:
+		return
 	if not is_instance_valid(active_graph):
 		set_status("A grid pane is required to choose the prism axis.")
 		return
@@ -1365,6 +1785,8 @@ func make_prism(sides: int) -> void:
 		return session.success())
 
 func merge_selection() -> void:
+	if session == null:
+		return
 	var ids: PackedInt64Array = session.selected.duplicate()
 	session.transact("Merge map brushes", func():
 		var result: Dictionary = session.document.merge_brushes(ids)
@@ -1373,6 +1795,8 @@ func merge_selection() -> void:
 		return result)
 
 func configure_browser(root: String) -> void:
+	if session == null:
+		return
 	var loader = session.loader.get_ref()
 	if is_instance_valid(loader) and root != loader.texture_path:
 		set_status("Bound materials use the loader's Texture Path; edit it in the scene Inspector.")
@@ -1382,6 +1806,8 @@ func configure_browser(root: String) -> void:
 	sync_resolver(true)
 
 func sync_resolver(force = false) -> void:
+	if session == null:
+		return
 	var loader = session.loader.get_ref()
 	var root: String = loader.texture_path if is_instance_valid(loader) else session.texture_root
 	var config: Array = [root]
@@ -1635,6 +2061,8 @@ func apply_uv_component(component: String, value: float) -> void:
 	apply_uv_operation(operation, "Edit map UV")
 
 func apply_uv_operation(operation: Dictionary, label: String, targets = null) -> void:
+	if session == null:
+		return
 	if targets == null:
 		targets = face_targets()
 	if targets.is_empty():
@@ -1728,6 +2156,8 @@ func build_dialogs() -> void:
 	entity_class = fallback_entity_pane.class_field
 
 func show_entities() -> void:
+	if session == null:
+		return
 	cancel_interaction()
 	var targets: PackedInt64Array = session.entity_targets()
 	plugin.show_entities_panel()
@@ -1735,6 +2165,8 @@ func show_entities() -> void:
 		plugin.entities_pane.set_selected_entity_id(targets[0])
 
 func toggle_entities() -> void:
+	if session == null:
+		return
 	cancel_interaction()
 	var targets: PackedInt64Array = session.entity_targets()
 	if plugin.toggle_entities_panel() and plugin.entities_pane != null and not targets.is_empty():
@@ -1782,7 +2214,7 @@ func request_replace(callback: Callable) -> void:
 	cancel_interaction()
 	discard_on_replace = null
 	pending = callback
-	if session.has_unsaved_changes():
+	if session != null and session.has_unsaved_changes():
 		dirty_dialog.popup_centered()
 	else:
 		run_pending()
@@ -1802,18 +2234,22 @@ func file_command(command: String) -> void:
 		"open":
 			show_file_dialog("open")
 		"save":
+			if session == null:
+				return
 			if session.document.get_path().is_empty():
 				show_file_dialog("save")
 			elif save_path(session.document.get_path()) and save_then_pending:
 				run_pending()
 		"save_as":
+			if session == null:
+				return
 			show_file_dialog("save")
 
 func show_file_dialog(operation: String) -> void:
 	dialog_operation = operation
 	file_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE if operation == "open" else FileDialog.FILE_MODE_SAVE_FILE
 	file_dialog.current_dir = ProjectSettings.globalize_path("res://")
-	if operation == "save" and not session.recovery_source.is_empty():
+	if operation == "save" and session != null and not session.recovery_source.is_empty():
 		file_dialog.current_file = session.recovery_source.get_file()
 	if DisplayServer.get_name() == "headless":
 		file_dialog.popup(Rect2i(Vector2i.ZERO, file_dialog.size))
@@ -1834,11 +2270,16 @@ func open_path(path: String) -> bool:
 		return true
 	var candidate = Session.new()
 	var result: Dictionary = candidate.document.load_map(path)
-	if not session.report(result):
+	var opened: bool = session.report(result) if session != null else result.ok
+	if not opened:
+		if session == null and not result.ok:
+			var err: Dictionary = result.get("error", {})
+			set_status(str(err.get("message", "Failed to open map")))
 		candidate.dispose()
 		discard_on_replace = null
 		return false
 	replace_session(candidate)
+	remember_recent_path(path)
 	refresh_materials()
 	set_status("Opened %s" % path)
 	return true
@@ -1846,7 +2287,7 @@ func open_path(path: String) -> bool:
 func find_path_session(path: String, binding_loader: Node = null) -> RefCounted:
 	if path.is_empty():
 		return null
-	if same_path(session.document.get_path(), path):
+	if session != null and same_path(session.document.get_path(), path):
 		var active_loader = session.loader.get_ref()
 		if binding_loader == null or active_loader == null or active_loader == binding_loader:
 			return session
@@ -2000,11 +2441,14 @@ func replace_session(candidate: RefCounted) -> void:
 	set_session(candidate)
 
 func save_path(path: String, defer_bake = false) -> bool:
+	if session == null:
+		return false
 	var result: Dictionary = session.document.save_map(path)
 	if not session.report(result):
 		set_status(notice.text + " • Save As to another path or reopen the external version; current edits are retained.")
 		return false
 	session.recovery_source = ""
+	remember_recent_path(session.document.get_path())
 	set_status("Saved %s" % session.document.get_path())
 	refresh_status()
 	# Coalesce Save All notifications and avoid reentering a texture import.
@@ -2056,7 +2500,8 @@ func bind_loader(loader: Node) -> void:
 		if origin == null:
 			origin = Session.new()
 			var result: Dictionary = origin.document.load_map(loader.map_resource)
-			if not session.report(result):
+			var loaded: bool = session.report(result) if session != null else result.ok
+			if not loaded:
 				origin.dispose()
 				return
 	origin.loader = weakref(loader)
@@ -2070,6 +2515,8 @@ func bind_loader(loader: Node) -> void:
 	queue_scene_discovery()
 
 func detach() -> void:
+	if session == null:
+		return
 	session.loader = weakref(null)
 	session.scene = weakref(null)
 	session.was_bound = false
@@ -2081,6 +2528,8 @@ func detach() -> void:
 func valid_binding(origin: RefCounted = null) -> bool:
 	if origin == null:
 		origin = session
+	if origin == null:
+		return false
 	var loader = origin.loader.get_ref()
 	var root = EditorInterface.get_edited_scene_root()
 	return is_instance_valid(loader) and root != null and origin.scene.get_ref() == root and (root == loader or root.is_ancestor_of(loader))
@@ -2105,7 +2554,7 @@ func update_loader_path() -> void:
 	refresh_status()
 
 func bake() -> bool:
-	return bake_origin(session)
+	return bake_origin(session) if session != null else false
 
 func bake_origin(origin: RefCounted) -> bool:
 	if not valid_binding(origin):

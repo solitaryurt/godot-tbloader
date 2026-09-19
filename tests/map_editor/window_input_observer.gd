@@ -91,7 +91,18 @@ func state() -> Dictionary:
 		brushes.append({"id": brush.id, "min": vector(brush.aabb_min), "max": vector(brush.aabb_max),
 			"faces": brush.faces.size(), "vertices": brush.vertices.size(), "textures": textures})
 	var focus = get_tree().root.gui_get_focus_owner()
+	var slot_rects: Array = []
+	var slot_border_active: Array = []
+	for index in ui.view_slots.size():
+		slot_rects.append(rect(ui.view_slots[index]) if ui.view_slots[index].visible else [0, 0, 0, 0])
+		var border_color: Color = ui.slot_borders[index].get_theme_stylebox("panel").border_color if index < ui.slot_borders.size() else Color()
+		slot_border_active.append(border_color.a > 0.01)
+	var pane_type := ""
+	if ui.active_slot >= 0 and ui.active_slot < ui.slot_types.size():
+		pane_type = ui.slot_types[ui.active_slot]
 	return {"pid": OS.get_process_id(), "usec": Time.get_ticks_usec(), "visible": ui.is_visible_in_tree(), "window_position": [get_tree().root.position.x, get_tree().root.position.y],
+		"active_slot": ui.active_slot, "active_pane_type": pane_type, "visible_slot_order": ui.visible_slot_order(),
+		"slot_rects": slot_rects, "slot_border_active": slot_border_active,
 		"window_focus": get_tree().root.has_focus(), "last_frame_usec": last_frame, "controls": buttons, "a": graph_state(ui.graph_a), "b": graph_state(ui.graph_b),
 		"graphs": ui.graphs.map(graph_state), "layout": ui.view_layout, "camera_slot": ui.camera_slot,
 		"quad_split": rect(ui.workspace.get_drag_area_controls()[0]),

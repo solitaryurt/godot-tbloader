@@ -239,7 +239,7 @@ func build_meshes():
 	if not loader.has_method("build_meshes_checked"):
 		map_editor.set_status("Checked Build Meshes API unavailable; mesh build deferred.")
 		return
-	if loader == map_editor.session.loader.get_ref():
+	if map_editor.session != null and loader == map_editor.session.loader.get_ref():
 		map_editor.bake()
 		return
 	map_editor.commit_bake(loader)

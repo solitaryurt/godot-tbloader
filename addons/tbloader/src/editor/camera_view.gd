@@ -159,6 +159,9 @@ const SKY_ENVIRONMENT_PROPERTIES = [
 
 func _ready() -> void:
 	focus_mode = Control.FOCUS_ALL
+	focus_entered.connect(func():
+		if is_instance_valid(host):
+			host.activate_control(self))
 	custom_minimum_size = Vector2(240, 180)
 	var container = SubViewportContainer.new()
 	container.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -1838,6 +1841,8 @@ func _gui_input(event: InputEvent) -> void:
 			return
 		if event.pressed:
 			grab_focus()
+			if is_instance_valid(host):
+				host.activate_control(self)
 		if handle_camera_wheel(event):
 			accept_event()
 		elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
@@ -1887,9 +1892,6 @@ func _gui_input(event: InputEvent) -> void:
 		if event.pressed and event.keycode == KEY_ESCAPE and (ctrl_gesture != "" or camera_gesture != "" or godot_navigation != ""):
 			cancel_gesture()
 			godot_navigation = ""
-			accept_event()
-		elif event.pressed and not event.echo and event.keycode == KEY_G:
-			toggle_surface_grid()
 			accept_event()
 		elif host.route_key(event, host.active_graph):
 			refresh_selection()

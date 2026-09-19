@@ -1330,7 +1330,8 @@ func draw_tool_layer(canvas: Control) -> void:
 		if i:
 			canvas.draw_line(project(clip_points[i - 1]), p, Color("fc7373"), 2, true)
 	canvas.draw_rect(Rect2(0, 0, size.x, 36), Color(0.08, 0.1, 0.14, 0.95))
-	canvas.draw_string(_overlay_font(), Vector2(38, 23), "Ctrl+Tab  •  %.3f px/u%s" % [zoom, "  • ACTIVE" if has_focus() else ""], HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("b9cfdf"))
+	var active: bool = is_instance_valid(host) and host.active_graph == self
+	canvas.draw_string(_overlay_font(), Vector2(38, 23), "%.3f px/u%s" % [zoom, "  • ACTIVE" if active else ""], HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("b9cfdf"))
 
 func draw_camera_layer(canvas: Control) -> void:
 	if not camera_pose_valid:
