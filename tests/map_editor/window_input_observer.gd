@@ -109,8 +109,18 @@ func state() -> Dictionary:
 	var pane_type := ""
 	if ui.active_slot >= 0 and ui.active_slot < ui.slot_types.size():
 		pane_type = ui.slot_types[ui.active_slot]
+	var slot_visible: Array = []
+	var pane_instance_ids: Array = []
+	for index in ui.view_slots.size():
+		slot_visible.append(ui.view_slots[index].visible)
+		var pane: Control = ui.slot_views[index] if index < ui.slot_views.size() else null
+		pane_instance_ids.append(pane.get_instance_id() if is_instance_valid(pane) else 0)
 	return {"pid": OS.get_process_id(), "usec": Time.get_ticks_usec(), "visible": ui.is_visible_in_tree(), "window_position": [get_tree().root.position.x, get_tree().root.position.y],
 		"active_slot": ui.active_slot, "active_pane_type": pane_type, "visible_slot_order": ui.visible_slot_order(),
+		"maximized_slot": ui.maximized_slot, "slot_visible": slot_visible,
+		"left_views_visible": ui.left_views.visible, "right_views_visible": ui.right_views.visible,
+		"workspace_split": ui.workspace.split_offset, "left_split": ui.left_views.split_offset, "right_split": ui.right_views.split_offset,
+		"pane_instance_ids": pane_instance_ids,
 		"slot_rects": slot_rects, "slot_border_active": slot_border_active,
 		"window_focus": get_tree().root.has_focus(), "last_frame_usec": last_frame, "controls": buttons, "a": graph_state(ui.graph_a), "b": graph_state(ui.graph_b),
 		"graphs": ui.graphs.map(graph_state), "layout": ui.view_layout, "camera_slot": ui.camera_slot,

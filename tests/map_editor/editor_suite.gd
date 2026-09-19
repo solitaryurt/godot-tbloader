@@ -331,6 +331,7 @@ func run() -> void:
 	ui.apply_layout(3)
 	checks.check(ui.camera_view.get_parent() == ui.view_slots[0] and ui.visible_graphs().size() == 2, "layout changes restore camera-left three-view arrangement")
 	active_pane_journey()
+	maximized_pane_journey()
 	document_tab_shortcut_journey()
 	checks.check(ui.camera_view.find_children("FrameSelection", "Button", true, false).size() == 1 and ui.graph_a.find_children("FrameSelection", "Button", true, false).size() == 1, "camera and grid panes expose compact frame buttons")
 	checks.check(ui.camera_view.find_children("BuiltAppearance", "Button", true, false).size() == 1
@@ -1307,6 +1308,260 @@ func _same_document(before: Dictionary) -> bool:
 	return text() == before.text and ui.session.selected == before.selected and ui.session.document.get_revision() == before.revision \
 		and ui.session.document.is_dirty() == before.dirty and ui.session.history_action_count() == before.actions \
 		and ui.session.history_cursor() == before.cursor
+
+func _layout_slots(mode: int) -> Array:
+	return [0, 2] if mode == 2 else ([0, 2, 3] if mode == 3 else [0, 2, 1, 3])
+
+func _shown_slots() -> Array:
+	var shown: Array = []
+	for index in ui.view_slots.size():
+		if ui.view_slots[index].visible:
+			shown.append(index)
+	return shown
+
+func _split_snapshot() -> Array:
+	return [ui.workspace.split_offset, ui.left_views.split_offset, ui.right_views.split_offset]
+
+func _pane_ids() -> Array:
+	var ids: Array = []
+	for pane in ui.slot_views:
+		ids.append(pane.get_instance_id() if is_instance_valid(pane) else 0)
+	return ids
+
+func _pane_parents() -> Array:
+	var parents: Array = []
+	for pane in ui.slot_views:
+		parents.append(pane.get_parent() if is_instance_valid(pane) else null)
+	return parents
+
+func _file_menu_texts() -> PackedStringArray:
+	var texts := PackedStringArray()
+	var popup: PopupMenu = ui.file_menu.get_popup()
+	for index in popup.item_count:
+		texts.append(popup.get_item_text(index))
+	return texts
+
+func maximized_pane_journey() -> void:
+	var before := _document_snapshot()
+	ui.set_slot_type(0, "Camera")
+	ui.set_slot_type(1, "Side Grid")
+	ui.set_slot_type(2, "Top Grid")
+	ui.set_slot_type(3, "Front Grid")
+	var graph_origin: Vector3 = ui.graph_a.origin
+	var graph_zoom: float = ui.graph_a.zoom
+	ui.graph_a.origin = Vector3(9, 8, 7)
+	ui.graph_a.zoom = 2.25
+	for mode in [2, 3, 4]:
+		ui.apply_layout(mode)
+		ui.workspace.split_offset = 21
+		ui.left_views.split_offset = 15
+		ui.right_views.split_offset = 15
+		var splits: Array = _split_snapshot()
+		var ids: Array = _pane_ids()
+		var parents: Array = _pane_parents()
+		checks.check(not ui.view_slots[1].visible if mode != 4 else ui.view_slots[1].visible,
+			"%d-view slot 1 membership before maximize" % mode)
+		if mode == 2:
+			checks.check(not ui.view_slots[1].visible and not ui.view_slots[3].visible, "2-view hides slots 1 and 3 before maximize")
+		if mode == 3:
+			checks.check(not ui.view_slots[1].visible, "3-view hides slot 1 before maximize")
+		for slot in _layout_slots(mode):
+			ui.set_active_slot(slot, true)
+			ui.slot_views[slot].grab_focus()
+			ui.toggle_maximized_slot()
+			var left_used: bool = slot in [0, 1]
+			var right_used: bool = slot in [2, 3]
+			checks.check(ui.maximized_slot == slot and ui.active_slot == slot and ui.is_slot_maximized(slot)
+				and _shown_slots() == [slot] and ui.left_views.visible == left_used and ui.right_views.visible == right_used
+				and _active_border_count() == 1
+				and ui.view_slots[slot].accessibility_description.contains("maximized")
+				and ui.slot_borders[slot].get_theme_stylebox("panel").border_color.a > 0.01,
+				"%d-view maximize slot %d shows only that pane and column" % [mode, slot])
+			for index in 4:
+				if index != slot:
+					checks.check(not ui.view_slots[index].visible
+						and ui.slot_borders[index].get_theme_stylebox("panel").border_color.a == 0,
+						"%d-view maximize slot %d hides slot %d without an active border" % [mode, slot, index])
+			if mode == 2:
+				checks.check(not ui.view_slots[1].visible and not ui.view_slots[3].visible, "2-view keeps slots 1 and 3 hidden while maximized")
+			if mode == 3:
+				checks.check(not ui.view_slots[1].visible, "3-view keeps slot 1 hidden while maximized")
+			checks.check(_split_snapshot() == splits and _pane_ids() == ids and _pane_parents() == parents
+				and ui.graph_a.origin == Vector3(9, 8, 7) and ui.graph_a.zoom == 2.25,
+				"%d-view maximize slot %d preserves splits, instances, and graph view" % [mode, slot])
+			ui.toggle_maximized_slot()
+			checks.check(ui.maximized_slot == -1 and ui.visible_slot_order() == _layout_slots(mode)
+				and ui.left_views.visible and ui.right_views.visible
+				and _split_snapshot() == splits and _pane_ids() == ids and _pane_parents() == parents
+				and not ui.view_slots[slot].accessibility_description.contains("maximized"),
+				"%d-view restore slot %d returns the normal layout" % [mode, slot])
+			if mode == 2:
+				checks.check(not ui.view_slots[1].visible and not ui.view_slots[3].visible, "2-view keeps slots 1 and 3 hidden after restore")
+			if mode == 3:
+				checks.check(not ui.view_slots[1].visible, "3-view keeps slot 1 hidden after restore")
+	ui.graph_a.origin = graph_origin
+	ui.graph_a.zoom = graph_zoom
+	ui.apply_layout(3)
+	ui.set_active_slot(0, true)
+	ui.slot_views[0].grab_focus()
+	checks.check(ui.maximized_slot == -1, "F12 journey starts restored")
+	key(KEY_F12)
+	checks.check(ui.maximized_slot == 0 and _shown_slots() == [0] and not ui.right_views.visible, "one F12 maximizes the active slot")
+	key(KEY_F12)
+	checks.check(ui.maximized_slot == -1 and ui.visible_slot_order() == [0, 2, 3], "a second F12 restores the layout")
+	ui.build_file_menu()
+	var file_texts := _file_menu_texts()
+	var file_has_maximize := false
+	for label in file_texts:
+		file_has_maximize = file_has_maximize or label.contains("Maximize") or label.contains("Restore")
+	checks.check(not file_has_maximize and ui.file_menu.get_popup().get_item_id(0) == 0
+		and ui.file_menu.get_popup().get_item_id(2) == 1 and ui.file_menu.get_popup().get_item_id(3) == 2
+		and ui.file_menu.get_popup().get_item_id(5) == ui.CMD_UNDO and ui.file_menu.get_popup().get_item_id(15) == ui.CMD_SHOW_HIDDEN,
+		"file menu stays Open/Save/edit commands without Maximize/Restore")
+	var slot_popup: PopupMenu = ui.slot_menus[0].get_popup()
+	var slot_command_row := false
+	for pane_index in slot_popup.item_count:
+		var pane_label: String = slot_popup.get_item_text(pane_index)
+		slot_command_row = slot_command_row or pane_label in ["Maximize", "Restore", "Undo", "Cut", "Hide"]
+	checks.check(slot_popup.item_count == ui.PANE_TYPES.size() and not slot_command_row, "slot menus stay pane-type radios")
+	ui.texture_field.grab_focus()
+	key(KEY_F12)
+	checks.check(ui.maximized_slot == -1, "focused LineEdit keeps F12")
+	ui.slot_views[0].grab_focus()
+	checks.check(ui.dispatch_map_command(ui.CMD_MAXIMIZE) and ui.maximized_slot == 0, "CMD_MAXIMIZE dispatch maximizes")
+	checks.check(ui.map_command_enabled(ui.CMD_MAXIMIZE), "maximize stays enabled while maximized")
+	ui.restore_panes()
+	checks.check(ui.map_command_enabled(ui.CMD_MAXIMIZE), "maximize is enabled for a layout-visible slot")
+	ui.apply_layout(2)
+	ui.set_active_slot(0, true)
+	ui.slot_views[0].grab_focus()
+	key(KEY_F12)
+	key(KEY_RIGHT, false, false, true)
+	checks.check(ui.maximized_slot == 2 and ui.active_slot == 2 and ui.view_slots[2].visible and not ui.left_views.visible,
+		"2-view Alt+Right transfers maximization 0 to 2")
+	key(KEY_RIGHT, false, false, true)
+	checks.check(ui.maximized_slot == 0 and ui.active_slot == 0, "2-view Alt+Right wraps maximization 2 to 0")
+	key(KEY_DOWN, false, false, true)
+	checks.check(ui.maximized_slot == 0 and ui.active_slot == 0, "2-view Alt+Down is ignored on a single-slot column")
+	ui.restore_panes()
+	ui.apply_layout(3)
+	ui.set_active_slot(0, true)
+	ui.slot_views[0].grab_focus()
+	var splits3: Array = _split_snapshot()
+	key(KEY_F12)
+	key(KEY_RIGHT, false, false, true)
+	checks.check(ui.maximized_slot == 2 and ui.active_slot == 2 and not ui.left_views.visible and ui.right_views.visible
+		and _split_snapshot() == splits3, "3-view Alt+Right from 0 transfers maximize to 2 without changing splits")
+	key(KEY_DOWN, false, false, true)
+	checks.check(ui.maximized_slot == 3 and ui.active_slot == 3, "3-view Alt+Down from 2 transfers maximize to 3")
+	key(KEY_LEFT, false, false, true)
+	checks.check(ui.maximized_slot == 3 and ui.active_slot == 3, "3-view Alt+Left from 3 ignores hidden slot 1")
+	key(KEY_UP, false, false, true)
+	checks.check(ui.maximized_slot == 2 and ui.active_slot == 2, "3-view Alt+Up from 3 transfers maximize to 2")
+	ui.restore_panes()
+	ui.set_active_slot(0, true)
+	ui.slot_views[0].grab_focus()
+	ui.toggle_maximized_slot()
+	key(KEY_DOWN, false, false, true)
+	checks.check(ui.maximized_slot == 0 and ui.active_slot == 0, "3-view Alt+Down from 0 ignores hidden slot 1")
+	ui.restore_panes()
+	ui.apply_layout(4)
+	ui.set_active_slot(0, true)
+	ui.slot_views[0].grab_focus()
+	var splits4: Array = _split_snapshot()
+	key(KEY_F12)
+	key(KEY_RIGHT, false, false, true)
+	checks.check(ui.maximized_slot == 2 and ui.active_slot == 2 and _split_snapshot() == splits4, "4-view Alt+Right from TL to TR stays maximized")
+	key(KEY_DOWN, false, false, true)
+	checks.check(ui.maximized_slot == 3 and ui.active_slot == 3, "4-view Alt+Down from TR to BR stays maximized")
+	key(KEY_LEFT, false, false, true)
+	checks.check(ui.maximized_slot == 1 and ui.active_slot == 1, "4-view Alt+Left from BR to BL stays maximized")
+	key(KEY_UP, false, false, true)
+	checks.check(ui.maximized_slot == 0 and ui.active_slot == 0 and _split_snapshot() == splits4, "4-view Alt+Up from BL to TL stays maximized")
+	ui.restore_panes()
+	ui.apply_layout(3)
+	ui.set_active_slot(0, true)
+	ui.toggle_maximized_slot()
+	for type_name in ui.PANE_TYPES:
+		ui.set_slot_type(0, type_name)
+		checks.check(ui.maximized_slot == 0 and ui.active_slot == 0 and ui.slot_types[0] == type_name
+			and ui.view_slots[0].visible and not ui.right_views.visible,
+			"replacing maximized pane with %s keeps the slot maximized" % type_name)
+	ui.set_slot_type(3, "Entities")
+	checks.check(ui.maximized_slot == 0 and not ui.view_slots[3].visible and ui.slot_types[3] == "Entities",
+		"replacing a hidden pane does not show it")
+	ui.set_slot_type(0, "Camera")
+	ui.set_slot_type(3, "Front Grid")
+	ui.apply_layout(3)
+	checks.check(ui.maximized_slot == -1 and ui.visible_slot_order() == [0, 2, 3], "apply_layout of the current layout exits maximize")
+	ui.set_active_slot(2, true)
+	ui.toggle_maximized_slot()
+	ui.apply_layout(2)
+	checks.check(ui.maximized_slot == -1 and ui.visible_slot_order() == [0, 2], "apply_layout 2 while maximized restores 2-view")
+	ui.set_active_slot(0, true)
+	ui.toggle_maximized_slot()
+	ui.apply_layout(4)
+	checks.check(ui.maximized_slot == -1 and ui.visible_slot_order() == [0, 2, 1, 3], "apply_layout 4 while maximized restores 4-view")
+	ui.set_active_slot(1, true)
+	ui.toggle_maximized_slot()
+	ui.apply_layout(3)
+	checks.check(ui.maximized_slot == -1 and ui.visible_slot_order() == [0, 2, 3] and ui.active_slot == 0,
+		"apply_layout 3 while maximized restores 3-view and a visible slot")
+	ui.apply_layout(4)
+	ui.workspace.split_offset = 19
+	ui.left_views.split_offset = 13
+	ui.right_views.split_offset = 13
+	ui.set_slot_type(1, "UV")
+	var saved_workspace: Dictionary = ui.workspace_state()
+	checks.check(not saved_workspace.has("maximized_slot"), "workspace_state omits maximized_slot")
+	ui.apply_layout(3)
+	ui.set_active_slot(0, true)
+	ui.toggle_maximized_slot()
+	ui.restore_workspace_state(saved_workspace)
+	checks.check(ui.maximized_slot == -1 and ui.view_layout == 4 and ui.slot_types[1] == "UV"
+		and ui.workspace.split_offset == 19 and ui.left_views.split_offset == 13 and ui.right_views.split_offset == 13
+		and ui.visible_slot_order() == [0, 2, 1, 3] and not ui.workspace_state().has("maximized_slot"),
+		"workspace restore discards maximization and applies persisted layout")
+	ui.set_slot_type(1, "Side Grid")
+	ui.apply_layout(3)
+	ui.set_active_slot(0, true)
+	ui.toggle_maximized_slot()
+	var original = ui.session
+	var extra = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	ui.set_session(extra)
+	checks.check(ui.maximized_slot == 0 and ui.view_slots[0].visible and not ui.right_views.visible,
+		"session switch keeps workspace maximization")
+	ui.set_session(original)
+	ui.close_document(extra)
+	checks.check(ui.maximized_slot == 0, "restoring the original session keeps maximization")
+	ui.restore_panes()
+	ui.restore_panes()
+	checks.check(ui.maximized_slot == -1 and ui.visible_slot_order() == [0, 2, 3], "restore_panes is idempotent")
+	ui.toggle_maximized_slot(1)
+	checks.check(ui.maximized_slot == -1 and not ui.view_slots[1].visible, "toggle on an ineligible 3-view slot does nothing")
+	ui.set_active_slot(2, true)
+	ui.graph_a.grab_focus()
+	ui.toggle_maximized_slot()
+	var selected_before: PackedInt64Array = ui.session.selected.duplicate()
+	key(KEY_ESCAPE)
+	checks.check(ui.maximized_slot == 2, "Escape does not restore maximized panes")
+	if not selected_before.is_empty():
+		checks.check(ui.session.selected.is_empty(), "Escape still clears selection while maximized")
+	ui.restore_panes()
+	ui.set_active_slot(0, true)
+	ui.camera_view.flying = true
+	key(KEY_F12)
+	checks.check(ui.maximized_slot == 0 and not ui.camera_view.flying, "F12 cancels fly and maximizes")
+	ui.restore_panes()
+	ui.set_slot_type(0, "Camera")
+	ui.set_slot_type(1, "Side Grid")
+	ui.set_slot_type(2, "Top Grid")
+	ui.set_slot_type(3, "Front Grid")
+	ui.apply_layout(3)
+	ui.set_active_slot(0, true)
+	if ui.get_viewport().gui_get_focus_owner() != ui.graph_a:
+		ui.graph_a.grab_focus()
+	checks.check(_same_document(before), "maximization leaves document, selection, dirty, and history unchanged")
 
 func active_pane_journey() -> void:
 	var before := _document_snapshot()

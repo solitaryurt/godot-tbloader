@@ -23,6 +23,7 @@ const CMD_DUPLICATE := 105
 const CMD_DELETE := 106
 const CMD_HIDE := 107
 const CMD_SHOW_HIDDEN := 108
+const CMD_MAXIMIZE := 109
 
 var plugin: EditorPlugin
 var session: RefCounted
@@ -34,6 +35,7 @@ var cameras: Array[Control] = []
 var uv_panes: Array[Control] = []
 var entity_panes: Array[Control] = []
 var active_slot: int = -1
+var maximized_slot := -1
 var visual_slot_order: Array[int] = [0, 2, 1, 3]
 var slot_borders: Array[Control] = []
 var active_graph: Control:
@@ -213,6 +215,7 @@ func _ready() -> void:
 	map_shortcuts[CMD_DELETE] = shortcut_for(KEY_DELETE)
 	map_shortcuts[CMD_HIDE] = shortcut_for(KEY_H)
 	map_shortcuts[CMD_SHOW_HIDDEN] = shortcut_for(KEY_H, false, true)
+	map_shortcuts[CMD_MAXIMIZE] = shortcut_for(KEY_F12)
 	file_menu.get_popup().about_to_popup.connect(build_file_menu)
 	file_menu.get_popup().id_pressed.connect(file_menu_command)
 	build_file_menu()
@@ -565,6 +568,8 @@ func append_transform_menu_items(_popup: PopupMenu) -> void:
 
 
 func map_command_enabled(command_id: int) -> bool:
+	if command_id == CMD_MAXIMIZE:
+		return maximized_slot >= 0 or layout_slot_indices().has(active_slot)
 	if session == null:
 		return false
 	match command_id:
@@ -631,6 +636,9 @@ func dispatch_map_command(command_id: int) -> bool:
 		CMD_SHOW_HIDDEN:
 			if map_command_enabled(CMD_SHOW_HIDDEN):
 				session.hide_selection(true)
+			return true
+		CMD_MAXIMIZE:
+			toggle_maximized_slot()
 			return true
 		_:
 			return false
@@ -746,6 +754,8 @@ func update_slot_accessibility(slot: int) -> void:
 	var text := "%s pane, slot %d" % [type_name, slot + 1]
 	if slot == active_slot:
 		text = "Active pane, " + text
+	if slot == maximized_slot:
+		text += ", maximized"
 	view_slots[slot].accessibility_name = text
 	view_slots[slot].accessibility_description = text
 	var pane: Control = slot_views[slot] if slot < slot_views.size() else null
@@ -755,18 +765,19 @@ func update_slot_accessibility(slot: int) -> void:
 func move_active_slot(direction: Vector2i) -> bool:
 	if active_slot < 0 or direction == Vector2i.ZERO:
 		return false
+	var members := layout_slot_indices()
 	var row := 0 if active_slot in [0, 2] else 1
 	var col := 0 if active_slot in [0, 1] else 1
 	var line: Array[int] = []
 	if direction.x != 0:
 		for candidate_col in 2:
 			var slot: int = ([0, 2] if row == 0 else [1, 3])[candidate_col]
-			if slot < view_slots.size() and view_slots[slot].visible:
+			if slot < view_slots.size() and (members.has(slot) if maximized_slot >= 0 else view_slots[slot].visible):
 				line.append(slot)
 	else:
 		for candidate_row in 2:
 			var slot: int = ([0, 1] if col == 0 else [2, 3])[candidate_row]
-			if slot < view_slots.size() and view_slots[slot].visible:
+			if slot < view_slots.size() and (members.has(slot) if maximized_slot >= 0 else view_slots[slot].visible):
 				line.append(slot)
 	if line.size() < 2:
 		return false
@@ -774,7 +785,11 @@ func move_active_slot(direction: Vector2i) -> bool:
 	if current < 0:
 		return false
 	var step := 1 if (direction.x + direction.y) > 0 else -1
-	set_active_slot(line[posmod(current + step, line.size())], true)
+	var dest: int = line[posmod(current + step, line.size())]
+	if maximized_slot >= 0:
+		maximized_slot = dest
+		apply_workspace_visibility()
+	set_active_slot(dest, true)
 	return true
 
 func _on_slot_mouse_entered(slot: int) -> void:
@@ -1105,7 +1120,7 @@ func set_slot_type(slot: int, type: String) -> void:
 	rebuild_pane_collections()
 	update_slot_menu(slot)
 	if keep_active:
-		set_active_slot(slot)
+		set_active_slot(slot, maximized_slot == slot)
 	elif active_slot >= 0:
 		refresh_slot_borders()
 	if session != null:
@@ -1154,21 +1169,66 @@ func rebuild_pane_collections() -> void:
 	camera_slot = slot_types.find("Camera")
 
 func sync_view_splits(source: SplitContainer, offset: int) -> void:
-	if syncing_view_splits or view_layout != 4:
+	if syncing_view_splits or view_layout != 4 or maximized_slot >= 0:
 		return
 	syncing_view_splits = true
 	(left_views if source == right_views else right_views).split_offset = offset
 	syncing_view_splits = false
+
+func layout_slot_indices(mode: int = -1) -> Array[int]:
+	if mode < 2:
+		mode = view_layout
+	var slots: Array[int] = []
+	if mode == 2:
+		slots.assign([0, 2])
+	elif mode == 3:
+		slots.assign([0, 2, 3])
+	else:
+		slots.assign([0, 2, 1, 3])
+	return slots
+
+func apply_workspace_visibility() -> void:
+	var shown_slots: Array[int] = []
+	if maximized_slot >= 0:
+		shown_slots.append(maximized_slot)
+	else:
+		shown_slots.append_array(layout_slot_indices(view_layout))
+	var left_used := shown_slots.has(0) or shown_slots.has(1)
+	var right_used := shown_slots.has(2) or shown_slots.has(3)
+	for index in view_slots.size():
+		view_slots[index].visible = shown_slots.has(index)
+	left_views.visible = left_used
+	right_views.visible = right_used
+
+func is_slot_maximized(slot := active_slot) -> bool:
+	return maximized_slot >= 0 and maximized_slot == slot
+
+func toggle_maximized_slot(slot := active_slot) -> void:
+	if maximized_slot >= 0:
+		restore_panes()
+		return
+	if not layout_slot_indices().has(slot):
+		return
+	cancel_interaction()
+	maximized_slot = slot
+	apply_workspace_visibility()
+	set_active_slot(slot, true)
+
+func restore_panes() -> void:
+	if maximized_slot < 0:
+		return
+	maximized_slot = -1
+	apply_workspace_visibility()
+	refresh_slot_borders()
 
 func apply_layout(mode: int, _legacy_camera_slot := -1) -> void:
 	if not mode in [2, 3, 4]:
 		return
 	if workspace.is_inside_tree():
 		cancel_interaction()
+	maximized_slot = -1
 	view_layout = mode
-	var visible_slots := [0, 2] if mode == 2 else ([0, 2, 3] if mode == 3 else [0, 1, 2, 3])
-	for index in view_slots.size():
-		view_slots[index].visible = visible_slots.has(index)
+	apply_workspace_visibility()
 	if mode == 4:
 		right_views.split_offset = left_views.split_offset
 	if active_slot < 0 or active_slot >= view_slots.size() or not view_slots[active_slot].visible:
@@ -1215,6 +1275,7 @@ func workspace_state() -> Dictionary:
 func restore_workspace_state(state: Dictionary) -> void:
 	if state.is_empty():
 		return
+	maximized_slot = -1
 	set_radiant_camera_behavior(bool(state.get("radiant_camera_behavior", false)))
 	var mode := int(state.get("layout", 3))
 	var slots: Array = state.get("slots", [])
@@ -1720,7 +1781,8 @@ func set_tool(value: String) -> void:
 func route_key(event: InputEventKey, _graph: Control) -> bool:
 	var command_or_control := event.ctrl_pressed or event.meta_pressed
 	var history_shortcut := command_or_control and event.keycode in [KEY_Z, KEY_Y]
-	if not event.pressed or event.echo or (cameras.any(func(camera): return camera.flying) and not history_shortcut):
+	var maximize_shortcut := not command_or_control and not event.alt_pressed and not event.shift_pressed and event.keycode == KEY_F12
+	if not event.pressed or event.echo or (cameras.any(func(camera): return camera.flying) and not history_shortcut and not maximize_shortcut):
 		return false
 	var focus = get_viewport().gui_get_focus_owner()
 	if is_protected_surface(focus):
@@ -1749,6 +1811,9 @@ func route_key(event: InputEventKey, _graph: Control) -> bool:
 			KEY_DOWN:
 				direction = Vector2i(0, 1)
 		move_active_slot(direction)
+		return true
+	if plain_shortcut and key == KEY_F12:
+		dispatch_map_command(CMD_MAXIMIZE)
 		return true
 	if event.ctrl_pressed and key == KEY_TAB:
 		cycle_document_tab(-1 if event.shift_pressed else 1)
@@ -2828,6 +2893,7 @@ func shutdown() -> void:
 	# The editor adapter also reparents this control during registration. Only
 	# explicit plugin teardown disposes documents; tree exit alone is not teardown.
 	cancel_interaction()
+	maximized_slot = -1
 	shutting_down = true
 	material_cache.clear()
 	for origin in sessions:
