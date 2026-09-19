@@ -220,10 +220,29 @@ func run() -> void:
 	checks.check(ui.tool_buttons.Vertex.tooltip_text == "Vertex Tool (V)" and ui.tool_buttons.Edge.tooltip_text == "Edge Tool (E)" and ui.tool_buttons.Texture.tooltip_text == "Texture Tool", "tooltips show existing shortcuts without inventing missing bindings")
 	checks.check(["New", "Open…", "Save", "Save As…"].all(func(command): return not toolbar_labels.has(command)), "map toolbar omits redundant document controls")
 	checks.check(map_toolbar.get_child(0).is_ancestor_of(ui.file_menu) and ui.file_menu.text.is_empty() and ui.file_menu.icon != null, "icon file command menu starts the grouped map toolbar")
-	checks.check(ui.file_menu.get_popup().item_count == 4 and ui.file_menu.get_popup().get_item_text(0) == "Open…"
-		and ui.file_menu.get_popup().is_item_separator(1)
-		and ui.file_menu.get_popup().get_item_text(2) == "Save" and ui.file_menu.get_popup().get_item_text(3) == "Save As…",
-		"file menu separates Open from Save operations")
+	var file_popup: PopupMenu = ui.file_menu.get_popup()
+	var file_texts: PackedStringArray = PackedStringArray()
+	var file_has_ctrl := false
+	for file_index in file_popup.item_count:
+		file_texts.append(file_popup.get_item_text(file_index))
+		file_has_ctrl = file_has_ctrl or file_popup.get_item_text(file_index).contains("Ctrl+")
+	checks.check(file_popup.item_count == 16 and file_texts[0] == "Open…" and file_popup.get_item_id(0) == 0
+		and file_popup.is_item_separator(1)
+		and file_texts[2] == "Save" and file_popup.get_item_id(2) == 1
+		and file_texts[3] == "Save As…" and file_popup.get_item_id(3) == 2
+		and file_popup.is_item_separator(4)
+		and file_popup.get_item_id(5) == ui.CMD_UNDO and file_popup.get_item_id(6) == ui.CMD_REDO
+		and file_popup.is_item_separator(7)
+		and file_popup.get_item_id(8) == ui.CMD_CUT and file_texts[8] == "Cut"
+		and file_popup.get_item_id(9) == ui.CMD_COPY and file_texts[9] == "Copy"
+		and file_popup.get_item_id(10) == ui.CMD_PASTE and file_texts[10] == "Paste"
+		and file_popup.get_item_id(11) == ui.CMD_DUPLICATE and file_texts[11] == "Duplicate"
+		and file_popup.get_item_id(12) == ui.CMD_DELETE and file_texts[12] == "Delete"
+		and file_popup.is_item_separator(13)
+		and file_popup.get_item_id(14) == ui.CMD_HIDE and file_texts[14] == "Hide"
+		and file_popup.get_item_id(15) == ui.CMD_SHOW_HIDDEN and file_texts[15] == "Show Hidden"
+		and not file_has_ctrl,
+		"file menu lists Open, Save, history, edit, and visibility commands without hardcoded Ctrl+ labels")
 	checks.check(ui.document_tabs.get_index() == ui.scene_tabs.get_index() + 1 and ui.document_tabs.get_tab_title(ui.document_tabs.tab_count - 1) == "+", "document tabs sit below scene tabs with a trailing new tab")
 	checks.check(chrome != null and chrome.get_theme_constant("margin_left") > 0 and chrome.get_theme_constant("margin_right") > 0
 		and ui.document_tabs.get_parent().get_parent().name == "MapTabsPanel"
@@ -278,6 +297,13 @@ func run() -> void:
 		all_pane_icons = all_pane_icons and ui.slot_menus[0].get_popup().get_item_icon(pane_index) != null
 	checks.check(all_pane_icons,
 		"slot pane menu displays pane-type icons")
+	var slot_command_row := false
+	for pane_index in ui.slot_menus[0].get_popup().item_count:
+		var pane_label: String = ui.slot_menus[0].get_popup().get_item_text(pane_index)
+		slot_command_row = slot_command_row or pane_label in ["Undo", "Cut", "Hide"]
+	checks.check(ui.slot_menus[0].get_popup().item_count == ui.PANE_TYPES.size() and ui.PANE_TYPES.size() == 6
+		and not slot_command_row,
+		"slot pane menus stay pane-type radios without edit command rows")
 	ui.set_slot_type(1, "Side Grid")
 	ui.set_slot_type(2, "Top Grid")
 	ui.set_slot_type(3, "Front Grid")
@@ -508,6 +534,108 @@ func run() -> void:
 	ui.camera_view.camera.position.x += 1
 	ui.camera_view._process(0)
 	checks.check(ui.camera_view.map_geometry.get_children() == preview_nodes, "camera marker update does not rebuild preview geometry")
+	graph.grab_focus()
+	ui.set_active_slot(ui.slot_views.find(graph))
+	ui.build_file_menu()
+	file_popup = ui.file_menu.get_popup()
+	checks.check(not file_popup.is_item_disabled(file_popup.get_item_index(ui.CMD_CUT))
+		and not file_popup.is_item_disabled(file_popup.get_item_index(ui.CMD_COPY))
+		and not file_popup.is_item_disabled(file_popup.get_item_index(ui.CMD_DELETE))
+		and not file_popup.is_item_disabled(file_popup.get_item_index(ui.CMD_HIDE))
+		and not file_popup.is_item_disabled(file_popup.get_item_index(ui.CMD_DUPLICATE))
+		and file_popup.is_item_disabled(file_popup.get_item_index(ui.CMD_SHOW_HIDDEN))
+		and file_popup.is_item_disabled(file_popup.get_item_index(ui.CMD_PASTE)) == (not DisplayServer.has_feature(DisplayServer.FEATURE_CLIPBOARD) or DisplayServer.clipboard_get().is_empty())
+		and file_popup.get_item_text(file_popup.get_item_index(ui.CMD_UNDO)) == "Undo %s" % ui.session.history_undo_name()
+		and file_popup.is_item_disabled(file_popup.get_item_index(ui.CMD_REDO))
+		and file_popup.get_item_shortcut(file_popup.get_item_index(ui.CMD_CUT)) != null
+		and file_popup.get_item_shortcut(file_popup.get_item_index(ui.CMD_UNDO)) != null,
+		"selected grid brush enables cut/copy/delete/hide/duplicate and names undo")
+	ui.set_active_slot(0)
+	ui.build_file_menu()
+	checks.check(file_popup.is_item_disabled(file_popup.get_item_index(ui.CMD_DUPLICATE))
+		and not file_popup.is_item_disabled(file_popup.get_item_index(ui.CMD_CUT)),
+		"duplicate disables on a camera slot even with brushes selected")
+	ui.set_active_slot(ui.slot_views.find(graph))
+	ui.open_entity_menu(graph, graph.project(Vector3.ZERO))
+	var entity_texts: PackedStringArray = PackedStringArray()
+	for entity_index in ui.entity_menu.item_count:
+		entity_texts.append(ui.entity_menu.get_item_text(entity_index))
+	checks.check(ui.entity_menu.get_item_id(0) == ui.CMD_CUT and ui.entity_menu.get_item_id(3) == ui.CMD_DUPLICATE
+		and ui.entity_menu.get_item_id(4) == ui.CMD_DELETE and ui.entity_menu.is_item_separator(5)
+		and ui.entity_menu.get_item_id(6) == ui.CMD_HIDE and ui.entity_menu.get_item_id(7) == ui.CMD_SHOW_HIDDEN
+		and ui.entity_menu.is_item_separator(8) and entity_texts[9].begins_with("Point: ")
+		and entity_texts[ui.entity_menu.get_item_index(5)].begins_with("Brush: ")
+		and ui.entity_menu.get_item_index(ui.CMD_UNDO) < 0 and ui.entity_menu.get_item_index(ui.CMD_REDO) < 0
+		and not entity_texts.has("Open…") and not entity_texts.has("Save")
+		and not ui.entity_menu.is_item_disabled(ui.entity_menu.get_item_index(ui.CMD_CUT))
+		and not ui.entity_menu.is_item_disabled(ui.entity_menu.get_item_index(ui.CMD_DUPLICATE)),
+		"grid context menu prepends edit commands and keeps spawn ids")
+	ui.entity_menu.hide()
+	var menu_cursor: int = ui.session.history_cursor()
+	var godot_version: int = history.get_version()
+	var selected_before: PackedInt64Array = ui.session.selected.duplicate()
+	file_popup.id_pressed.emit(ui.CMD_CUT)
+	checks.check(ui.session.history_cursor() == menu_cursor + 1 and ui.session.history_undo_name() == "Cut map brushes"
+		and ui.session.selected.is_empty() and history.get_version() == godot_version,
+		"file menu cut records one session transaction")
+	file_popup.id_pressed.emit(ui.CMD_UNDO)
+	checks.check(ui.session.history_undo_name() == "Create map brush"
+		and ui.session.selected == selected_before and ui.session.history_cursor() == menu_cursor
+		and history.get_version() == godot_version,
+		"file menu undo moves session history once without Godot history")
+	ui.open_entity_menu(graph, graph.project(Vector3.ZERO))
+	ui.entity_menu.id_pressed.emit(ui.CMD_DUPLICATE)
+	ui.entity_menu.hide()
+	checks.check(ui.session.history_cursor() == menu_cursor + 1 and ui.session.history_undo_name() == "Clone map brushes"
+		and history.get_version() == godot_version,
+		"entity menu duplicate records one clone transaction")
+	ui.dispatch_map_command(ui.CMD_UNDO)
+	ui.session.select(selected_before)
+	key(KEY_DELETE)
+	checks.check(ui.session.history_cursor() == menu_cursor + 1 and ui.session.history_undo_name() == "Delete map selection"
+		and history.get_version() == godot_version,
+		"keyboard delete records one matching transaction")
+	key(KEY_Z, true)
+	ui.session.select(selected_before)
+	var stale_text: String = text()
+	var stale_cursor: int = ui.session.history_cursor()
+	var stale_actions: int = ui.session.history_action_count()
+	select_none()
+	ui.dispatch_map_command(ui.CMD_DELETE)
+	ui.dispatch_map_command(ui.CMD_CUT)
+	checks.check(text() == stale_text and ui.session.history_cursor() == stale_cursor
+		and ui.session.history_action_count() == stale_actions, "stale delete and cut do not mutate")
+	ui.session.select(selected_before)
+	ui.dispatch_map_command(ui.CMD_HIDE)
+	ui.build_file_menu()
+	checks.check(not file_popup.is_item_disabled(file_popup.get_item_index(ui.CMD_SHOW_HIDDEN))
+		and file_popup.is_item_disabled(file_popup.get_item_index(ui.CMD_HIDE)),
+		"show hidden enables after hide")
+	ui.dispatch_map_command(ui.CMD_SHOW_HIDDEN)
+	ui.session.select(selected_before)
+	ui.build_file_menu()
+	var named_undo: String = file_popup.get_item_text(file_popup.get_item_index(ui.CMD_UNDO))
+	file_popup.id_pressed.emit(ui.CMD_CUT)
+	ui.build_file_menu()
+	checks.check(named_undo == "Undo Create map brush"
+		and file_popup.get_item_text(file_popup.get_item_index(ui.CMD_UNDO)) == "Undo Cut map brushes",
+		"undo labels follow session history names")
+	file_popup.id_pressed.emit(ui.CMD_UNDO)
+	ui.build_file_menu()
+	checks.check(file_popup.get_item_text(file_popup.get_item_index(ui.CMD_REDO)) == "Redo Cut map brushes"
+		and file_popup.get_item_text(file_popup.get_item_index(ui.CMD_UNDO)) == "Undo Create map brush",
+		"redo labels update after undo")
+	while ui.session.history_cursor() > menu_cursor:
+		ui.session.history_undo()
+	ui.session._history_truncate_redo()
+	ui.session.select(selected_before)
+	ui.texture_field.grab_focus()
+	var copy_event := InputEventKey.new()
+	copy_event.keycode = KEY_C
+	copy_event.pressed = true
+	copy_event.ctrl_pressed = true
+	checks.check(not ui.route_key(copy_event, graph), "focused LineEdit keeps native copy")
+	graph.grab_focus()
 	var created = text()
 	key(KEY_Z, true)
 	checks.check(text() == before and ui.session.selected.is_empty() and ui.notice.text == "Undid: Create map brush",
@@ -827,8 +955,12 @@ func run() -> void:
 	mouse(graph, entity_click, true, MOUSE_BUTTON_RIGHT)
 	mouse(graph, entity_click, false, MOUSE_BUTTON_RIGHT)
 	checks.check(ui.entity_menu.visible and ui.entity_menu_point == graph.snap_point(Vector3(32, 48,
-		ui.session.workzone.get_center().z)) and ui.entity_menu.is_item_separator(4)
-		and ui.entity_menu.is_item_disabled(ui.entity_menu.get_item_index(5)),
+		ui.session.workzone.get_center().z))
+		and ui.entity_menu.get_item_id(0) == ui.CMD_CUT
+		and ui.entity_menu.get_item_id(7) == ui.CMD_SHOW_HIDDEN
+		and ui.entity_menu.get_item_text(ui.entity_menu.get_item_index(1)).begins_with("Point: ")
+		and ui.entity_menu.is_item_disabled(ui.entity_menu.get_item_index(5))
+		and ui.entity_menu.get_item_index(ui.CMD_UNDO) < 0 and ui.entity_menu.get_item_index(ui.CMD_REDO) < 0,
 		"RMB grid click opens entity menu at the snapped workzone point and disables brush classes without a brush selection")
 	ui.entity_menu_selected(1)
 	ui.entity_menu.hide()

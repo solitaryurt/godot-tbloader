@@ -14,6 +14,15 @@ const BAKED_STATE_META := &"_tbloader_editor_baked_state"
 const BAKED_STATE_RECORD_LIMIT := 128
 
 const PANE_TYPES := ["Camera", "Top Grid", "Front Grid", "Side Grid", "UV", "Entities"]
+const CMD_UNDO := 100
+const CMD_REDO := 101
+const CMD_CUT := 102
+const CMD_COPY := 103
+const CMD_PASTE := 104
+const CMD_DUPLICATE := 105
+const CMD_DELETE := 106
+const CMD_HIDE := 107
+const CMD_SHOW_HIDDEN := 108
 
 var plugin: EditorPlugin
 var session: RefCounted
@@ -133,6 +142,7 @@ var entity_menu: PopupMenu
 var entity_menu_actions: Dictionary = {}
 var entity_menu_session: WeakRef = weakref(null)
 var entity_menu_point := Vector3.ZERO
+var map_shortcuts: Dictionary = {} # command ID -> Shortcut
 
 func _ready() -> void:
 	size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -187,14 +197,25 @@ func _ready() -> void:
 	var file_group := toolbar_group(toolbar)
 	file_menu = MenuButton.new()
 	file_menu.icon = editor_icon("GuiTabMenu")
-	file_menu.tooltip_text = "Map file commands (Ctrl+O / Ctrl+S / Ctrl+Shift+S)"
+	file_menu.tooltip_text = "Map file and edit commands"
 	file_menu.accessibility_name = "Map file commands"
+	file_menu.accessibility_description = "Map file and edit commands"
 	file_menu.theme_type_variation = "FlatMenuButton"
-	file_menu.get_popup().add_item("Open…", 0)
-	file_menu.get_popup().add_separator()
-	file_menu.get_popup().add_item("Save", 1)
-	file_menu.get_popup().add_item("Save As…", 2)
+	map_shortcuts[0] = shortcut_for(KEY_O, true)
+	map_shortcuts[1] = shortcut_for(KEY_S, true)
+	map_shortcuts[2] = shortcut_for(KEY_S, true, true)
+	map_shortcuts[CMD_UNDO] = shortcut_for(KEY_Z, true)
+	map_shortcuts[CMD_REDO] = shortcut_for(KEY_Z, true, true)
+	map_shortcuts[CMD_CUT] = shortcut_for(KEY_X, true)
+	map_shortcuts[CMD_COPY] = shortcut_for(KEY_C, true)
+	map_shortcuts[CMD_PASTE] = shortcut_for(KEY_V, true)
+	map_shortcuts[CMD_DUPLICATE] = shortcut_for(KEY_SPACE)
+	map_shortcuts[CMD_DELETE] = shortcut_for(KEY_DELETE)
+	map_shortcuts[CMD_HIDE] = shortcut_for(KEY_H)
+	map_shortcuts[CMD_SHOW_HIDDEN] = shortcut_for(KEY_H, false, true)
+	file_menu.get_popup().about_to_popup.connect(build_file_menu)
 	file_menu.get_popup().id_pressed.connect(file_menu_command)
+	build_file_menu()
 	file_group.add_child(file_menu)
 	var mode_group := toolbar_group(toolbar)
 	var exclusive_tools := ButtonGroup.new()
@@ -482,6 +503,139 @@ func build_entity_menu() -> void:
 	add_child(entity_menu)
 
 
+func shortcut_for(keycode, ctrl=false, shift=false) -> Shortcut:
+	var shortcut := Shortcut.new()
+	var event := InputEventKey.new()
+	event.keycode = keycode
+	if shift:
+		event.shift_pressed = true
+	if ctrl:
+		event.ctrl_pressed = true
+		event.command_or_control_autoremap = true
+	shortcut.events = [event]
+	return shortcut
+
+
+func build_file_menu() -> void:
+	if file_menu == null:
+		return
+	var popup := file_menu.get_popup()
+	popup.clear()
+	popup.add_item("Open…", 0)
+	popup.set_item_shortcut(popup.get_item_index(0), map_shortcuts[0], false)
+	popup.add_separator()
+	popup.add_item("Save", 1)
+	popup.set_item_shortcut(popup.get_item_index(1), map_shortcuts[1], false)
+	popup.add_item("Save As…", 2)
+	popup.set_item_shortcut(popup.get_item_index(2), map_shortcuts[2], false)
+	popup.add_separator()
+	var undo_name: String = session.history_undo_name() if session != null else ""
+	popup.add_item("Undo" if undo_name.is_empty() else "Undo %s" % undo_name, CMD_UNDO)
+	popup.set_item_shortcut(popup.get_item_index(CMD_UNDO), map_shortcuts[CMD_UNDO], false)
+	popup.set_item_disabled(popup.get_item_index(CMD_UNDO), not map_command_enabled(CMD_UNDO))
+	var redo_name: String = session.history_redo_name() if session != null else ""
+	popup.add_item("Redo" if redo_name.is_empty() else "Redo %s" % redo_name, CMD_REDO)
+	popup.set_item_shortcut(popup.get_item_index(CMD_REDO), map_shortcuts[CMD_REDO], false)
+	popup.set_item_disabled(popup.get_item_index(CMD_REDO), not map_command_enabled(CMD_REDO))
+	popup.add_separator()
+	append_edit_menu_items(popup)
+
+
+func append_edit_menu_items(popup: PopupMenu) -> void:
+	for command in [["Cut", CMD_CUT], ["Copy", CMD_COPY], ["Paste", CMD_PASTE], ["Duplicate", CMD_DUPLICATE]]:
+		popup.add_item(command[0], command[1])
+		var index := popup.get_item_index(command[1])
+		popup.set_item_shortcut(index, map_shortcuts[command[1]], false)
+		popup.set_item_disabled(index, not map_command_enabled(command[1]))
+	append_transform_menu_items(popup)
+	popup.add_item("Delete", CMD_DELETE)
+	popup.set_item_shortcut(popup.get_item_index(CMD_DELETE), map_shortcuts[CMD_DELETE], false)
+	popup.set_item_disabled(popup.get_item_index(CMD_DELETE), not map_command_enabled(CMD_DELETE))
+	popup.add_separator()
+	popup.add_item("Hide", CMD_HIDE)
+	popup.set_item_shortcut(popup.get_item_index(CMD_HIDE), map_shortcuts[CMD_HIDE], false)
+	popup.set_item_disabled(popup.get_item_index(CMD_HIDE), not map_command_enabled(CMD_HIDE))
+	popup.add_item("Show Hidden", CMD_SHOW_HIDDEN)
+	popup.set_item_shortcut(popup.get_item_index(CMD_SHOW_HIDDEN), map_shortcuts[CMD_SHOW_HIDDEN], false)
+	popup.set_item_disabled(popup.get_item_index(CMD_SHOW_HIDDEN), not map_command_enabled(CMD_SHOW_HIDDEN))
+
+
+func append_transform_menu_items(_popup: PopupMenu) -> void:
+	pass
+
+
+func map_command_enabled(command_id: int) -> bool:
+	if session == null:
+		return false
+	match command_id:
+		CMD_UNDO:
+			return not session.history_undo_name().is_empty()
+		CMD_REDO:
+			return not session.history_redo_name().is_empty()
+		CMD_CUT, CMD_COPY, CMD_HIDE:
+			return not session.selected.is_empty()
+		CMD_PASTE:
+			return DisplayServer.has_feature(DisplayServer.FEATURE_CLIPBOARD) and not DisplayServer.clipboard_get().is_empty()
+		CMD_DUPLICATE:
+			return is_instance_valid(active_graph) and not session.selected.is_empty()
+		CMD_DELETE:
+			return not session.selected.is_empty() or not session.points.is_empty()
+		CMD_SHOW_HIDDEN:
+			return not session.hidden.is_empty()
+		_:
+			return false
+
+
+func dispatch_map_command(command_id: int) -> bool:
+	match command_id:
+		CMD_UNDO, CMD_REDO:
+			if session == null:
+				return true
+			cancel_interaction()
+			var redoing := command_id == CMD_REDO
+			var action_name: String = session.history_redo_name() if redoing else session.history_undo_name()
+			if action_name.is_empty():
+				set_status("Nothing to redo." if redoing else "Nothing to undo.")
+				return true
+			var message_generation := notice_generation
+			var changed: bool = session.history_redo() if redoing else session.history_undo()
+			if changed and notice_generation == message_generation:
+				set_status("%s: %s" % ["Redid" if redoing else "Undid", action_name])
+			refresh_status()
+			return true
+		CMD_COPY:
+			copy_selection()
+			return true
+		CMD_CUT:
+			cut_selection()
+			return true
+		CMD_PASTE:
+			if map_command_enabled(CMD_PASTE):
+				cancel_interaction()
+				paste_text(DisplayServer.clipboard_get())
+			return true
+		CMD_DUPLICATE:
+			if map_command_enabled(CMD_DUPLICATE):
+				cancel_interaction()
+				clone_selection(active_graph.axes().x)
+			return true
+		CMD_DELETE:
+			if map_command_enabled(CMD_DELETE):
+				cancel_interaction()
+				delete_selection()
+			return true
+		CMD_HIDE:
+			if map_command_enabled(CMD_HIDE):
+				session.hide_selection(false)
+			return true
+		CMD_SHOW_HIDDEN:
+			if map_command_enabled(CMD_SHOW_HIDDEN):
+				session.hide_selection(true)
+			return true
+		_:
+			return false
+
+
 func open_entity_menu(graph: Control, screen_position: Vector2) -> void:
 	if not is_instance_valid(graph) or session == null:
 		return
@@ -491,6 +645,8 @@ func open_entity_menu(graph: Control, screen_position: Vector2) -> void:
 	entity_menu_session = weakref(session)
 	entity_menu_actions.clear()
 	entity_menu.clear()
+	append_edit_menu_items(entity_menu)
+	entity_menu.add_separator()
 	var id := 1
 	for classname in POINT_ENTITY_CLASSES:
 		entity_menu.add_item("Point: " + classname, id)
@@ -507,6 +663,8 @@ func open_entity_menu(graph: Control, screen_position: Vector2) -> void:
 
 
 func entity_menu_selected(id: int) -> void:
+	if dispatch_map_command(id):
+		return
 	var origin = entity_menu_session.get_ref()
 	if origin == null or origin != session or not entity_menu_actions.has(id):
 		return
@@ -1246,6 +1404,8 @@ func reopen_closed_document() -> void:
 	set_status("No closed Map to reopen.")
 
 func file_menu_command(id: int) -> void:
+	if dispatch_map_command(id):
+		return
 	match id:
 		0:
 			file_command("open")
@@ -1616,22 +1776,13 @@ func route_key(event: InputEventKey, _graph: Control) -> bool:
 	if command_or_control:
 		match key:
 			KEY_Z, KEY_Y:
-				cancel_interaction()
-				var redoing := key == KEY_Y or event.shift_pressed
-				var action_name: String = session.history_redo_name() if redoing else session.history_undo_name()
-				if action_name.is_empty():
-					set_status("Nothing to redo." if redoing else "Nothing to undo.")
-					return true
-				var message_generation := notice_generation
-				var changed: bool = session.history_redo() if redoing else session.history_undo()
-				if changed and notice_generation == message_generation:
-					set_status("%s: %s" % ["Redid" if redoing else "Undid", action_name])
+				dispatch_map_command(CMD_REDO if key == KEY_Y or event.shift_pressed else CMD_UNDO)
 			KEY_C:
-				copy_selection()
+				dispatch_map_command(CMD_COPY)
 			KEY_X:
-				cut_selection()
+				dispatch_map_command(CMD_CUT)
 			KEY_V:
-				paste_text(DisplayServer.clipboard_get())
+				dispatch_map_command(CMD_PASTE)
 			KEY_S:
 				file_command("save_as" if event.shift_pressed else "save")
 			KEY_N:
@@ -1660,12 +1811,11 @@ func route_key(event: InputEventKey, _graph: Control) -> bool:
 				else:
 					session.select(PackedInt64Array())
 			KEY_H:
-				session.hide_selection(event.shift_pressed)
+				dispatch_map_command(CMD_SHOW_HIDDEN if event.shift_pressed else CMD_HIDE)
 			KEY_SPACE:
-				if is_instance_valid(graph):
-					clone_selection(graph.axes().x)
+				dispatch_map_command(CMD_DUPLICATE)
 			KEY_DELETE, KEY_BACKSPACE:
-				delete_selection()
+				dispatch_map_command(CMD_DELETE)
 			KEY_X:
 				set_tool("Brush" if tool == "Cut" else "Cut")
 			KEY_Q:

@@ -76,6 +76,15 @@ func controls(node: Node, result: Array) -> void:
 func vector(v: Vector3) -> Array:
 	return [v.x, v.y, v.z]
 
+func popup_rows(popup: PopupMenu) -> Array:
+	var rows: Array = []
+	if popup == null:
+		return rows
+	for index in popup.item_count:
+		rows.append({"text": popup.get_item_text(index), "id": popup.get_item_id(index),
+			"disabled": popup.is_item_disabled(index), "separator": popup.is_item_separator(index)})
+	return rows
+
 func graph_state(graph: Control) -> Dictionary:
 	return {"rect": rect(graph), "orientation": graph.orientation, "origin": vector(graph.origin), "zoom": graph.zoom,
 		"gesture": graph.gesture, "delta": vector(graph.delta), "focus": graph.has_focus()}
@@ -112,6 +121,9 @@ func state() -> Dictionary:
 		"brushes": brushes, "text": ui.session.document.export_text().value, "revision": ui.session.document.get_revision(),
 		"dirty": ui.session.document.is_dirty(), "path": ui.session.document.get_path(),
 		"history": ui.session.history_action_count() * 1000 + ui.session.history_cursor(),
+		"history_cursor": ui.session.history_cursor(),
+		"file_menu": popup_rows(ui.file_menu.get_popup()) if ui.file_menu != null else [],
+		"entity_menu": popup_rows(ui.entity_menu) if ui.entity_menu != null and ui.entity_menu.visible else [],
 		"actions": ui.session.history_action_count(), "selected": Array(ui.session.selected), "hidden": ui.session.hidden.size(),
 		"grid": ui.session.grid, "tool": ui.tool, "search": ui.browser._search.text, "search_rect": rect(ui.browser._search),
 		"search_results": ui.browser.get_visible_paths(), "focus": str(focus.get_path()) if focus else "",
