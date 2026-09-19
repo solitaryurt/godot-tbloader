@@ -3,10 +3,12 @@ extends VBoxContainer
 
 signal texture_token_requested(token: String)
 signal uv_transform_requested(shift: Vector2, rotation: float, scale: Vector2)
+signal uv_component_requested(component: String, value: float)
 signal match_grid_requested
-signal texture_axis_requested(axis: String)
+signal texture_axis_requested(axis: String, scale: Vector2)
 signal reset_requested
 signal fit_requested(scale: Vector2)
+signal flip_requested(axis: String)
 signal projection_requested(mode: String)
 
 class PaneHeader extends Control:
@@ -56,6 +58,7 @@ var scale_x: SpinBox
 var scale_y: SpinBox
 var rotation_field: SpinBox
 var shift_step: SpinBox
+var shift_step_y: SpinBox
 var scale_step: SpinBox
 var rotation_step: SpinBox
 var fit_scale_x: SpinBox
@@ -63,6 +66,7 @@ var fit_scale_y: SpinBox
 var status_label: Label
 var canvas: UVCanvas
 var projection_buttons: Dictionary = {}
+var projection_support: Dictionary = {}
 
 var _state: Dictionary = {}
 var _syncing := false
@@ -93,19 +97,17 @@ func refresh() -> void:
 	var fit_scale: Vector2 = _state.get("fit_scale", Vector2.ONE)
 	fit_scale_x.set_value_no_signal(fit_scale.x)
 	fit_scale_y.set_value_no_signal(fit_scale.y)
-	var editable: bool = bool(_state.get("editable", false)) and str(_state.get("projection", "classic")) != "valve"
+	var editable: bool = bool(_state.get("editable", false))
 	for field in [shift_x, shift_y, scale_x, scale_y, rotation_field]:
 		field.editable = editable
 	texture_field.editable = bool(_state.get("texture_editable", editable))
 	var projection := str(_state.get("projection", "classic"))
-	if projection == "valve":
-		status_label.text = "Valve projection is read-only"
-	elif bool(_state.get("mixed", false)):
-		status_label.text = "Mixed UVs; an edit applies the displayed transform"
+	if bool(_state.get("mixed", false)):
+		status_label.text = "Mixed UVs; component edits preserve each face"
 	elif not editable:
 		status_label.text = "No editable face selection"
 	else:
-		status_label.text = "Classic UV"
+		status_label.text = "Valve UV" if projection == "valve" else "Classic UV"
 	var texture: Texture2D = _state.get("texture_resource")
 	var uvs: PackedVector2Array = _state.get("triangle_uvs", PackedVector2Array())
 	canvas.set_preview(texture, uvs)
@@ -123,11 +125,16 @@ func set_texture_preview(texture: Texture2D, triangle_uvs: PackedVector2Array) -
 # Projection mutations are unavailable in today's native API. Coordinators may
 # explicitly enable a mode when they can service projection_requested themselves.
 func set_projection_supported(mode: String, supported: bool) -> void:
+	projection_support[mode] = supported
 	if not projection_buttons.has(mode):
 		return
 	var control: Button = projection_buttons[mode]
 	control.disabled = not supported
 	control.tooltip_text = "Request %s projection" % mode.capitalize() if supported else "%s projection is not supported by the native map API" % mode.capitalize()
+
+func set_shift_steps(horizontal: float, vertical: float) -> void:
+	shift_step.value = maxf(horizontal, shift_step.min_value)
+	shift_step_y.value = maxf(vertical, shift_step_y.min_value)
 
 func current_transform() -> Dictionary:
 	return {
@@ -162,18 +169,27 @@ func _build_ui() -> void:
 	shift_x = _add_value_row(grid, "Horizontal shift", 0.125)
 	shift_step = _add_step(grid, 8.0, 0.125)
 	shift_y = _add_value_row(grid, "Vertical shift", 0.125)
-	_add_step_proxy(grid, shift_step)
+	shift_step_y = _add_step(grid, 8.0, 0.125)
 	scale_x = _add_value_row(grid, "Horizontal stretch", 0.01)
 	scale_step = _add_step(grid, 0.5, 0.01)
 	scale_y = _add_value_row(grid, "Vertical stretch", 0.01)
 	_add_step_proxy(grid, scale_step)
 	rotation_field = _add_value_row(grid, "Rotate", 0.25)
 	rotation_step = _add_step(grid, 45.0, 0.25)
-	for field in [shift_x, shift_y, scale_x, scale_y, rotation_field]:
-		field.value_changed.connect(func(_value): _request_transform())
-	shift_step.value_changed.connect(func(value): shift_x.step = value; shift_y.step = value)
-	scale_step.value_changed.connect(func(value): scale_x.step = value; scale_y.step = value)
-	rotation_step.value_changed.connect(func(value): rotation_field.step = value)
+	shift_x.value_changed.connect(func(value): _request_component("shift_x", value))
+	shift_y.value_changed.connect(func(value): _request_component("shift_y", value))
+	scale_x.value_changed.connect(func(value): _request_component("scale_x", value))
+	scale_y.value_changed.connect(func(value): _request_component("scale_y", value))
+	rotation_field.value_changed.connect(func(value): _request_component("rotation", value))
+	shift_step.value_changed.connect(func(value): shift_x.custom_arrow_step = value)
+	shift_step_y.value_changed.connect(func(value): shift_y.custom_arrow_step = value)
+	scale_step.value_changed.connect(func(value): scale_x.custom_arrow_step = value; scale_y.custom_arrow_step = value)
+	rotation_step.value_changed.connect(func(value): rotation_field.custom_arrow_step = value)
+	shift_x.custom_arrow_step = shift_step.value
+	shift_y.custom_arrow_step = shift_step_y.value
+	scale_x.custom_arrow_step = scale_step.value
+	scale_y.custom_arrow_step = scale_step.value
+	rotation_field.custom_arrow_step = rotation_step.value
 
 	var match_row := HBoxContainer.new()
 	match_row.alignment = BoxContainer.ALIGNMENT_END
@@ -184,8 +200,10 @@ func _build_ui() -> void:
 	add_child(separator)
 	var sizing := HBoxContainer.new()
 	add_child(sizing)
-	_add_button(sizing, "Width", func(): texture_axis_requested.emit("width"))
-	_add_button(sizing, "Height", func(): texture_axis_requested.emit("height"))
+	_add_button(sizing, "Width", func(): texture_axis_requested.emit("width", Vector2(fit_scale_x.value, fit_scale_y.value)))
+	_add_button(sizing, "Height", func(): texture_axis_requested.emit("height", Vector2(fit_scale_x.value, fit_scale_y.value)))
+	_add_button(sizing, "Flip U", func(): flip_requested.emit("horizontal"))
+	_add_button(sizing, "Flip V", func(): flip_requested.emit("vertical"))
 	var fit_row := HBoxContainer.new()
 	add_child(fit_row)
 	_add_button(fit_row, "Reset", func(): reset_requested.emit())
@@ -202,7 +220,7 @@ func _build_ui() -> void:
 		var mode_value: String = mode
 		var control := _add_button(project, mode.capitalize(), func(): projection_requested.emit(mode_value))
 		projection_buttons[mode] = control
-		set_projection_supported(mode, false)
+		set_projection_supported(mode, bool(projection_support.get(mode, false)))
 
 	canvas = UVCanvas.new()
 	canvas.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -282,3 +300,7 @@ func _request_transform() -> void:
 		return
 	var value := current_transform()
 	uv_transform_requested.emit(value.shift, value.rotation, value.scale)
+
+func _request_component(component: String, value: float) -> void:
+	if not _syncing:
+		uv_component_requested.emit(component, value)

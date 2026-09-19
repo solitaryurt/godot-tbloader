@@ -30,6 +30,59 @@ bool token(const String &s, bool empty = false) {
 	for (int i = 0; i < s.length(); ++i) if (s[i] == 0) return false;
 	return true;
 }
+bool uv_number(const Variant &value, double &out) {
+	if (value.get_type() != Variant::FLOAT && value.get_type() != Variant::INT) return false;
+	out = value;
+	return std::isfinite(out) && std::abs(out) <= 1e9;
+}
+void axial_axes(vec3 normal, vec3 &u, vec3 &v) {
+	const double up = std::abs(normal.z), right = std::abs(normal.y), forward = std::abs(normal.x);
+	if (up >= right && up >= forward) { u = {1, 0, 0}; v = {0, -1, 0}; }
+	else if (right >= up && right >= forward) { u = {1, 0, 0}; v = {0, 0, -1}; }
+	else { u = {0, 1, 0}; v = {0, 0, -1}; }
+}
+void effective_uv_axes(const LMFace &face, vec3 &u, vec3 &v) {
+	if (face.is_valve_uv) { u = face.uv_valve.u.axis; v = face.uv_valve.v.axis; return; }
+	axial_axes(face.plane_normal, u, v);
+	const double angle = face.uv_extra.rot * 3.14159265358979323846 / 180.0;
+	const double c = std::cos(angle), s = std::sin(angle);
+	const vec3 base_u = u, base_v = v;
+	u = vec3_sub(vec3_mul_double(base_u, c), vec3_mul_double(base_v, s));
+	v = vec3_add(vec3_mul_double(base_u, s), vec3_mul_double(base_v, c));
+}
+double uv_offset(const LMFace &face, bool vertical) {
+	if (face.is_valve_uv) return vertical ? face.uv_valve.v.offset : face.uv_valve.u.offset;
+	return vertical ? face.uv_standard.v : face.uv_standard.u;
+}
+void set_uv_offset(LMFace &face, bool vertical, double value) {
+	if (face.is_valve_uv) {
+		if (vertical) face.uv_valve.v.offset = value; else face.uv_valve.u.offset = value;
+	} else {
+		if (vertical) face.uv_standard.v = value; else face.uv_standard.u = value;
+	}
+}
+double &uv_scale(LMFace &face, bool vertical) { return vertical ? face.uv_extra.scale_y : face.uv_extra.scale_x; }
+double uv_texel(const LMFace &face, vec3 point, bool vertical) {
+	vec3 u, v; effective_uv_axes(face, u, v);
+	return vec3_dot(vertical ? v : u, point) / (vertical ? face.uv_extra.scale_y : face.uv_extra.scale_x) + uv_offset(face, vertical);
+}
+vec3 rotate_axis(vec3 axis, vec3 normal, double radians) {
+	const double c = std::cos(radians), s = std::sin(radians);
+	return vec3_add(vec3_add(vec3_mul_double(axis, c), vec3_mul_double(vec3_cross(normal, axis), s)),
+			vec3_mul_double(normal, vec3_dot(normal, axis) * (1.0 - c)));
+}
+bool valid_uv_face(const LMFace &face) {
+	if (!std::isfinite(face.uv_extra.rot) || std::abs(face.uv_extra.rot) > 1e9 ||
+			!std::isfinite(face.uv_extra.scale_x) || !std::isfinite(face.uv_extra.scale_y) ||
+			std::abs(face.uv_extra.scale_x) < 1e-9 || std::abs(face.uv_extra.scale_y) < 1e-9 ||
+			std::abs(face.uv_extra.scale_x) > 1e9 || std::abs(face.uv_extra.scale_y) > 1e9) return false;
+	if (face.is_valve_uv) return valid(vector(face.uv_valve.u.axis)) && valid(vector(face.uv_valve.v.axis)) &&
+			vec3_length(face.uv_valve.u.axis) > 1e-9 && vec3_length(face.uv_valve.v.axis) > 1e-9 &&
+			std::isfinite(face.uv_valve.u.offset) && std::isfinite(face.uv_valve.v.offset) &&
+			std::abs(face.uv_valve.u.offset) <= 1e9 && std::abs(face.uv_valve.v.offset) <= 1e9;
+	return std::isfinite(face.uv_standard.u) && std::isfinite(face.uv_standard.v) &&
+			std::abs(face.uv_standard.u) <= 1e9 && std::abs(face.uv_standard.v) <= 1e9;
+}
 std::vector<int64_t> unique(const PackedInt64Array &ids) {
 	std::vector<int64_t> out; std::set<int64_t> seen;
 	for (int64_t id : ids) if (seen.insert(id).second) out.push_back(id);
@@ -812,8 +865,11 @@ Dictionary TBMapDocument::summarize_faces(const Array &targets) const {
 			first["projection"] = face.is_valve_uv ? "valve" : "classic"; first["shift"] = shift;
 			first["rotation"] = face.uv_extra.rot; first["scale"] = scale;
 			first["u_axis"] = vector(face.uv_valve.u.axis); first["v_axis"] = vector(face.uv_valve.v.axis); first_texture = texture;
-		} else if (Vector2(first["shift"]) != shift || double(first["rotation"]) != face.uv_extra.rot ||
-				Vector2(first["scale"]) != scale || first_texture != texture) mixed = true;
+		} else if (String(first["projection"]) != (face.is_valve_uv ? "valve" : "classic") ||
+				Vector2(first["shift"]) != shift || double(first["rotation"]) != face.uv_extra.rot ||
+				Vector2(first["scale"]) != scale || first_texture != texture ||
+				(face.is_valve_uv && (Vector3(first["u_axis"]) != vector(face.uv_valve.u.axis) ||
+						Vector3(first["v_axis"]) != vector(face.uv_valve.v.axis)))) mixed = true;
 		textures.push_back(texture);
 		if (!unique_textures.has(texture)) unique_textures.push_back(texture);
 		normalized_targets.push_back(target);
@@ -839,8 +895,7 @@ Dictionary TBMapDocument::apply_face_edits(const Array &edits) {
 		int face;
 		bool has_texture = false, has_uv = false;
 		std::string texture;
-		Vector2 shift, scale;
-		double rotation = 0;
+		LMFace uv_face{};
 	};
 	std::vector<FaceEdit> validated;
 	validated.reserve(edits.size());
@@ -861,25 +916,110 @@ Dictionary TBMapDocument::apply_face_edits(const Array &edits) {
 			if (item["texture"].get_type() != Variant::STRING || !token(String(item["texture"]))) return failure("INVALID_ARGUMENT", "Invalid texture name", "apply_face_edits");
 			edit.has_texture = true; edit.texture = bytes(item["texture"]);
 		}
+		const auto *location = live_location(edit.id, 'b');
+		const auto &source_face = current_brush(location->entity, location->index).faces[edit.face];
+		if (item.has("uv") && item.has("uv_op")) return failure("INVALID_ARGUMENT", "Face edit cannot contain both uv and uv_op", "apply_face_edits");
 		if (item.has("uv")) {
 			if (item["uv"].get_type() != Variant::DICTIONARY) return failure("INVALID_ARGUMENT", "Invalid UV edit schema", "apply_face_edits");
 			Dictionary uv = item["uv"];
 			if (!uv.has("shift") || !uv.has("rotation") || !uv.has("scale") || uv["shift"].get_type() != Variant::VECTOR2 ||
 					(uv["rotation"].get_type() != Variant::FLOAT && uv["rotation"].get_type() != Variant::INT) || uv["scale"].get_type() != Variant::VECTOR2)
 				return failure("INVALID_ARGUMENT", "Invalid UV edit schema", "apply_face_edits");
-			edit.shift = uv["shift"]; edit.rotation = uv["rotation"]; edit.scale = uv["scale"];
-			if (!edit.shift.is_finite() || !edit.scale.is_finite() || !std::isfinite(edit.rotation) || std::abs(edit.rotation) > 1e9 ||
-					std::abs(edit.shift.x) > 1e9 || std::abs(edit.shift.y) > 1e9 || std::abs(edit.scale.x) < 1e-9 || std::abs(edit.scale.y) < 1e-9 ||
-					std::abs(edit.scale.x) > 1e9 || std::abs(edit.scale.y) > 1e9) return failure("INVALID_ARGUMENT", "Invalid UV transform", "apply_face_edits");
-			const auto *location = live_location(edit.id, 'b');
-			if (current_brush(location->entity, location->index).faces[edit.face].is_valve_uv) return failure("UNSUPPORTED_PROJECTION", "Valve projection is read-only", "apply_face_edits");
+			if (source_face.is_valve_uv) return failure("UNSUPPORTED_PROJECTION", "Valve projection requires a semantic UV operation", "apply_face_edits");
+			edit.uv_face = source_face; edit.uv_face.uv_standard = {Vector2(uv["shift"]).x, Vector2(uv["shift"]).y};
+			edit.uv_face.uv_extra = {double(uv["rotation"]), Vector2(uv["scale"]).x, Vector2(uv["scale"]).y};
+			if (!valid_uv_face(edit.uv_face)) return failure("INVALID_ARGUMENT", "Invalid UV transform", "apply_face_edits");
+			edit.has_uv = true;
+		}
+		if (item.has("uv_op")) {
+			if (item["uv_op"].get_type() != Variant::DICTIONARY) return failure("INVALID_ARGUMENT", "Invalid UV operation schema", "apply_face_edits");
+			Dictionary op = item["uv_op"];
+			if (!op.has("kind") || op["kind"].get_type() != Variant::STRING) return failure("INVALID_ARGUMENT", "UV operation requires a kind", "apply_face_edits");
+			const String kind = op["kind"];
+			edit.uv_face = source_face;
+			const auto view = current_brush_geometry(location->entity, location->index);
+			if (!view.compact || edit.face >= static_cast<int>(view.compact->faces.size())) return failure("INVALID_GEOMETRY", "Face projection geometry is unavailable", "apply_face_edits");
+			const auto &geometry_face = view.compact->faces[edit.face];
+			if (geometry_face.corner_count < 3) return failure("INVALID_GEOMETRY", "Face has no projectable winding", "apply_face_edits");
+			std::vector<vec3> winding; winding.reserve(geometry_face.corner_count);
+			for (uint32_t v = 0; v < geometry_face.corner_count; ++v) winding.push_back(view.compact->positions[view.compact->corners[geometry_face.corner_begin + v].position]);
+			if (kind == "set") {
+				bool any = false;
+				for (const auto &field : {"shift_x", "shift_y", "rotation", "scale_x", "scale_y"}) if (op.has(field)) {
+					double value; if (!uv_number(op[field], value)) return failure("INVALID_ARGUMENT", "Invalid partial UV value", "apply_face_edits"); any = true;
+					if (String(field) == "shift_x") set_uv_offset(edit.uv_face, false, value);
+					else if (String(field) == "shift_y") set_uv_offset(edit.uv_face, true, value);
+					else if (String(field) == "scale_x") edit.uv_face.uv_extra.scale_x = value;
+					else if (String(field) == "scale_y") edit.uv_face.uv_extra.scale_y = value;
+					else if (edit.uv_face.is_valve_uv) {
+						const double delta = (value - edit.uv_face.uv_extra.rot) * 3.14159265358979323846 / 180.0;
+						edit.uv_face.uv_valve.u.axis = rotate_axis(edit.uv_face.uv_valve.u.axis, edit.uv_face.plane_normal, delta);
+						edit.uv_face.uv_valve.v.axis = rotate_axis(edit.uv_face.uv_valve.v.axis, edit.uv_face.plane_normal, delta);
+						edit.uv_face.uv_extra.rot = value;
+					} else edit.uv_face.uv_extra.rot = value;
+				}
+				if (!any) return failure("INVALID_ARGUMENT", "Partial UV operation is empty", "apply_face_edits");
+			} else if (kind == "reset") {
+				vec3 u, v; axial_axes(edit.uv_face.plane_normal, u, v);
+				edit.uv_face.uv_extra = {0, 1, 1};
+				if (edit.uv_face.is_valve_uv) edit.uv_face.uv_valve = LMValveUV{{u, 0}, {v, 0}};
+				else edit.uv_face.uv_standard = LMStandardUV{0, 0};
+			} else if (kind == "fit") {
+				if (!op.has("axes") || op["axes"].get_type() != Variant::STRING || !op.has("repeats") || op["repeats"].get_type() != Variant::VECTOR2)
+					return failure("INVALID_ARGUMENT", "Invalid fit operation", "apply_face_edits");
+				const String axes = op["axes"]; const Vector2 repeats = op["repeats"];
+				if ((axes != "both" && axes != "width" && axes != "height") || !repeats.is_finite() || repeats.x <= 0 || repeats.y <= 0)
+					return failure("INVALID_ARGUMENT", "Invalid fit operation", "apply_face_edits");
+				const String texture_name = String::utf8((edit.has_texture ? edit.texture : current_face_texture(location->entity, location->index, edit.face)).c_str());
+				const Vector2i texture_size = texture_sizes.get(texture_name, Vector2i());
+				if (texture_size.x <= 0 || texture_size.y <= 0) return failure("UNRESOLVED_TEXTURE", "Texture dimensions are required for fitting", "apply_face_edits");
+				auto fit_axis = [&](bool vertical, double desired) {
+					vec3 u, v; effective_uv_axes(edit.uv_face, u, v); const vec3 axis = vertical ? v : u;
+					double low = std::numeric_limits<double>::infinity(), high = -low;
+					for (vec3 point : winding) { const double value = vec3_dot(axis, point) / uv_scale(edit.uv_face, vertical); low = std::min(low, value); high = std::max(high, value); }
+					const double span = high - low; if (!std::isfinite(span) || span <= 1e-12) return false;
+					uv_scale(edit.uv_face, vertical) *= span / desired;
+					low = std::numeric_limits<double>::infinity();
+					for (vec3 point : winding) low = std::min(low, vec3_dot(axis, point) / uv_scale(edit.uv_face, vertical));
+					set_uv_offset(edit.uv_face, vertical, -low); return true;
+				};
+				if (axes == "both") {
+					if (!fit_axis(false, repeats.x * texture_size.x) || !fit_axis(true, repeats.y * texture_size.y)) return failure("DEGENERATE_PROJECTION", "Face cannot be fitted on the requested axes", "apply_face_edits");
+				} else {
+					const bool vertical = axes == "height"; vec3 u, v; effective_uv_axes(edit.uv_face, u, v); const vec3 axis = vertical ? v : u;
+					double low = std::numeric_limits<double>::infinity(), high = -low;
+					for (vec3 point : winding) { const double value = vec3_dot(axis, point) / uv_scale(edit.uv_face, vertical); low = std::min(low, value); high = std::max(high, value); }
+					const double desired = (vertical ? repeats.y * texture_size.y : repeats.x * texture_size.x);
+					if (!std::isfinite(high - low) || high - low <= 1e-12 || desired <= 0) return failure("DEGENERATE_PROJECTION", "Face cannot be fitted on the requested axis", "apply_face_edits");
+					const double ratio = (high - low) / desired;
+					edit.uv_face.uv_extra.scale_x *= ratio; edit.uv_face.uv_extra.scale_y *= ratio;
+					for (bool other : {false, true}) { vec3 au, av; effective_uv_axes(edit.uv_face, au, av); const vec3 a = other ? av : au; double minimum = std::numeric_limits<double>::infinity(); for (vec3 point : winding) minimum = std::min(minimum, vec3_dot(a, point) / uv_scale(edit.uv_face, other)); set_uv_offset(edit.uv_face, other, -minimum); }
+				}
+			} else if (kind == "flip") {
+				if (!op.has("axis") || op["axis"].get_type() != Variant::STRING || (String(op["axis"]) != "horizontal" && String(op["axis"]) != "vertical")) return failure("INVALID_ARGUMENT", "Invalid flip axis", "apply_face_edits");
+				const bool vertical = String(op["axis"]) == "vertical"; double low = std::numeric_limits<double>::infinity(), high = -low;
+				for (vec3 point : winding) { const double value = uv_texel(edit.uv_face, point, vertical); low = std::min(low, value); high = std::max(high, value); }
+				const double old_offset = uv_offset(edit.uv_face, vertical); uv_scale(edit.uv_face, vertical) = -uv_scale(edit.uv_face, vertical); set_uv_offset(edit.uv_face, vertical, low + high - old_offset);
+			} else if (kind == "project") {
+				if (!op.has("mode") || op["mode"].get_type() != Variant::STRING) return failure("INVALID_ARGUMENT", "Projection mode is required", "apply_face_edits");
+				const String mode = op["mode"]; const vec3 center = geometry_face.center;
+				const double old_u = uv_texel(edit.uv_face, center, false);
+				const double old_v = uv_texel(edit.uv_face, center, true);
+				vec3 u, v;
+				if (mode == "axial") { axial_axes(edit.uv_face.plane_normal, u, v); edit.uv_face.is_valve_uv = false; edit.uv_face.uv_extra.rot = 0; edit.uv_face.uv_standard = LMStandardUV{old_u - vec3_dot(u, center) / edit.uv_face.uv_extra.scale_x, old_v - vec3_dot(v, center) / edit.uv_face.uv_extra.scale_y}; }
+				else {
+					if ((mode != "ortho" && mode != "cam") || !op.has("u_axis") || !op.has("v_axis") || op["u_axis"].get_type() != Variant::VECTOR3 || op["v_axis"].get_type() != Variant::VECTOR3) return failure("INVALID_ARGUMENT", "Projection axes are required", "apply_face_edits");
+					const Vector3 gu = op["u_axis"], gv = op["v_axis"]; if (!valid(gu) || !valid(gv) || gu.length_squared() < 1e-18 || gv.length_squared() < 1e-18 || gu.cross(gv).length_squared() < 1e-18) return failure("INVALID_ARGUMENT", "Invalid projection axes", "apply_face_edits");
+					u = native(gu.normalized()); v = native(gv.normalized()); edit.uv_face.is_valve_uv = true; edit.uv_face.uv_extra.rot = 0; edit.uv_face.uv_valve = LMValveUV{{u, old_u - vec3_dot(u, center) / edit.uv_face.uv_extra.scale_x}, {v, old_v - vec3_dot(v, center) / edit.uv_face.uv_extra.scale_y}};
+				}
+			} else return failure("INVALID_ARGUMENT", "Unknown UV operation", "apply_face_edits");
+			if (!valid_uv_face(edit.uv_face)) return failure("INVALID_ARGUMENT", "UV operation produced an invalid projection", "apply_face_edits");
 			edit.has_uv = true;
 		}
 		if (!edit.has_texture && !edit.has_uv) return failure("INVALID_ARGUMENT", "Face edit must include texture or UV", "apply_face_edits");
-		const auto *location = live_location(edit.id, 'b');
-		const auto &face = current_brush(location->entity, location->index).faces[edit.face];
+		const auto &face = source_face;
 		if (edit.has_texture && edit.texture != current_face_texture(location->entity, location->index, edit.face)) changed = true;
-		if (edit.has_uv && (Vector2(face.uv_standard.u, face.uv_standard.v) != edit.shift || face.uv_extra.rot != edit.rotation || Vector2(face.uv_extra.scale_x, face.uv_extra.scale_y) != edit.scale)) changed = true;
+		if (edit.has_uv && !face_source_equal(face, edit.uv_face)) changed = true;
 		validated.push_back(std::move(edit));
 	}
 	if (!changed) return success();
@@ -889,7 +1029,7 @@ Dictionary TBMapDocument::apply_face_edits(const Array &edits) {
 	return local_brush_transaction(ids, "apply_face_edits", domains, [&](auto &drafts) {
 		for (const auto &edit : validated) { auto draft = std::find_if(drafts.begin(), drafts.end(), [&](const auto &item) { return item.id == edit.id; });
 			if (edit.has_texture) draft->materials[edit.face] = edit.texture;
-			if (edit.has_uv) { draft->faces[edit.face].uv_standard = {edit.shift.x, edit.shift.y}; draft->faces[edit.face].uv_extra = {edit.rotation, edit.scale.x, edit.scale.y}; }
+			if (edit.has_uv) draft->faces[edit.face] = edit.uv_face;
 		}
 		return success();
 	});

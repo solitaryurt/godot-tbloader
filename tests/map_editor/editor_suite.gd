@@ -617,17 +617,52 @@ func run() -> void:
 	uv_pane.uv_transform_requested.emit(Vector2(5, -2), 15.0, Vector2(0.75, 1.5))
 	var pane_uv: Dictionary = ui.session.document.get_face_uv(id, 0, ui.session.brush(id).topology_revision).value
 	checks.check(pane_uv.shift == Vector2(5, -2) and pane_uv.rotation == 15.0 and pane_uv.scale == Vector2(0.75, 1.5), "UV pane uses the authoritative UV transaction path")
+	var revision_before_match: int = ui.session.document.get_revision()
 	uv_pane.match_grid_requested.emit()
-	checks.check(ui.session.document.get_face_uv(id, 0, ui.session.brush(id).topology_revision).value.shift == Vector2.ZERO, "UV pane Match Grid snaps texture shifts to the map grid")
+	var matched_uv: Dictionary = ui.session.document.get_face_uv(id, 0, ui.session.brush(id).topology_revision).value
+	checks.check(ui.session.document.get_revision() == revision_before_match and matched_uv == pane_uv
+		and uv_pane.shift_step.value == 21 and uv_pane.shift_step_y.value == 11,
+		"UV pane Match Grid changes scale-aware U/V increments without mutating faces")
+	var pane_brush: Dictionary = ui.session.brush(id)
+	var partial_edits := [
+		{"brush_id": id, "face": 0, "topology_revision": pane_brush.topology_revision,
+			"uv": {"shift": Vector2(1, 2), "rotation": 10, "scale": Vector2(0.5, 0.75)}},
+		{"brush_id": id, "face": 1, "topology_revision": pane_brush.topology_revision,
+			"uv": {"shift": Vector2(3, 4), "rotation": 20, "scale": Vector2(1.5, 1.75)}},
+	]
+	checks.check(ui.session.document.apply_face_edits(partial_edits).ok, "prepare mixed UV component values")
+	uv_pane.uv_component_requested.emit("shift_x", 9.0)
+	var partial_a: Dictionary = ui.session.document.get_face_uv(id, 0, pane_brush.topology_revision).value
+	var partial_b: Dictionary = ui.session.document.get_face_uv(id, 1, pane_brush.topology_revision).value
+	checks.check(partial_a.shift == Vector2(9, 2) and partial_a.rotation == 10 and partial_a.scale == Vector2(0.5, 0.75)
+		and partial_b.shift == Vector2(9, 4) and partial_b.rotation == 20 and partial_b.scale == Vector2(1.5, 1.75),
+		"UV field edits preserve every unmentioned value on mixed faces")
 	uv_pane.reset_requested.emit()
-	checks.check(ui.session.document.get_face_uv(id, 0, ui.session.brush(id).topology_revision).value.scale == Vector2.ONE, "UV pane Reset is wired")
+	pane_uv = ui.session.document.get_face_uv(id, 0, ui.session.brush(id).topology_revision).value
+	checks.check(pane_uv.shift == Vector2.ZERO and pane_uv.rotation == 0 and pane_uv.scale == Vector2.ONE, "UV pane Reset is wired")
+	uv_pane.texture_axis_requested.emit("width", Vector2.ONE)
+	checks.check(ui.session.document.get_face_uv(id, 0, ui.session.brush(id).topology_revision).value.scale != Vector2.ONE, "UV pane Width performs proportional native fitting")
+	uv_pane.fit_requested.emit(Vector2(2, 3))
+	pane_uv = ui.session.document.get_face_uv(id, 0, ui.session.brush(id).topology_revision).value
+	checks.check(pane_uv.scale != Vector2.ONE, "UV pane Fit performs a native projection fit")
+	var fitted_pane_scale: Vector2 = pane_uv.scale
+	uv_pane.flip_requested.emit("horizontal")
+	pane_uv = ui.session.document.get_face_uv(id, 0, ui.session.brush(id).topology_revision).value
+	checks.check(is_equal_approx(pane_uv.scale.x, -fitted_pane_scale.x) and is_equal_approx(pane_uv.scale.y, fitted_pane_scale.y), "UV pane Flip U mirrors only the horizontal axis")
+	checks.check(uv_pane.projection_buttons.values().all(func(control): return not control.disabled), "UV projection controls are enabled")
+	uv_pane.projection_requested.emit("ortho")
+	pane_uv = ui.session.document.get_face_uv(id, 0, ui.session.brush(id).topology_revision).value
+	ui.refresh_uv()
+	checks.check(pane_uv.projection == "valve" and uv_pane.shift_x.editable and uv_pane.status_label.text.contains("UV"), "Ortho projection writes editable Valve UVs")
+	uv_pane.projection_requested.emit("cam")
+	pane_uv = ui.session.document.get_face_uv(id, 0, ui.session.brush(id).topology_revision).value
+	checks.check(pane_uv.projection == "valve" and pane_uv.u_axis.is_normalized() and pane_uv.v_axis.is_normalized(), "Cam projection writes the camera-aligned Valve basis")
+	uv_pane.uv_component_requested.emit("shift_y", 13.0)
+	checks.check(ui.session.document.get_face_uv(id, 0, ui.session.brush(id).topology_revision).value.shift.y == 13.0, "Valve UV fields use semantic native edits")
+	uv_pane.projection_requested.emit("axial")
+	checks.check(ui.session.document.get_face_uv(id, 0, ui.session.brush(id).topology_revision).value.projection == "classic", "Axial projection restores classic UVs")
 	ui.set_slot_type(1, "Side Grid")
-	ui.uv_fields[0].value = 7
-	ui.uv_fields[1].value = -3
-	ui.uv_fields[2].value = 30
-	ui.uv_fields[3].value = 0.5
-	ui.uv_fields[4].value = 2
-	ui.apply_uv()
+	ui.apply_uv_transform(Vector2(7, -3), 30, Vector2(0.5, 2))
 	brush = ui.session.brush(id)
 	var uv: Dictionary = ui.session.document.get_face_uv(id, 0, brush.topology_revision).value
 	checks.check(uv.shift == Vector2(7, -3) and uv.rotation == 30 and uv.scale == Vector2(0.5, 2), "UV controls write classic projection")

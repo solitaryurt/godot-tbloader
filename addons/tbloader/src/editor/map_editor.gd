@@ -342,10 +342,15 @@ func create_material_workspace() -> Control:
 	bottom_uv_pane.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	bottom_uv_pane.texture_token_requested.connect(uv_texture_requested)
 	bottom_uv_pane.uv_transform_requested.connect(apply_uv_transform)
+	bottom_uv_pane.uv_component_requested.connect(apply_uv_component)
 	bottom_uv_pane.match_grid_requested.connect(match_uv_grid)
-	bottom_uv_pane.texture_axis_requested.connect(unsupported_uv_axis)
+	bottom_uv_pane.texture_axis_requested.connect(fit_uv_axis)
 	bottom_uv_pane.reset_requested.connect(reset_uv)
-	bottom_uv_pane.fit_requested.connect(unsupported_uv_fit)
+	bottom_uv_pane.fit_requested.connect(fit_uv)
+	bottom_uv_pane.flip_requested.connect(flip_uv)
+	bottom_uv_pane.projection_requested.connect(project_uv)
+	for mode in ["axial", "ortho", "cam"]:
+		bottom_uv_pane.set_projection_supported(mode, true)
 	split.add_child(bottom_uv_pane)
 	return material_workspace
 
@@ -695,10 +700,15 @@ func create_pane(type: String) -> Control:
 		pane = UVPane.new()
 		pane.texture_token_requested.connect(uv_texture_requested)
 		pane.uv_transform_requested.connect(apply_uv_transform)
+		pane.uv_component_requested.connect(apply_uv_component)
 		pane.match_grid_requested.connect(match_uv_grid)
-		pane.texture_axis_requested.connect(unsupported_uv_axis)
+		pane.texture_axis_requested.connect(fit_uv_axis)
 		pane.reset_requested.connect(reset_uv)
-		pane.fit_requested.connect(unsupported_uv_fit)
+		pane.fit_requested.connect(fit_uv)
+		pane.flip_requested.connect(flip_uv)
+		pane.projection_requested.connect(project_uv)
+		for mode in ["axial", "ortho", "cam"]:
+			pane.set_projection_supported(mode, true)
 	elif type == "Entities":
 		pane = EntityPane.new()
 		pane.set_session(session)
@@ -725,11 +735,6 @@ func set_slot_type(slot: int, type: String) -> void:
 	view_slots[slot].add_child(pane)
 	pane.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	view_slots[slot].move_child(slot_menus[slot], -1)
-	if pane.get_script() == UVPane:
-		for control in pane.find_children("*", "Button", true, false):
-			if control.text in ["Width", "Height", "Fit"]:
-				control.disabled = true
-				control.tooltip_text = "Requires a native face-fit projection operation"
 	rebuild_pane_collections()
 	update_slot_menu(slot)
 	if session != null:
@@ -1560,9 +1565,9 @@ func refresh_uv(selection: Dictionary = {}) -> void:
 	var mixed: bool = selection.mixed
 	var first: Dictionary = selection.first
 	var texture: String = selection.texture
-	uv_label.text = "Valve / mixed projection: UV editing unavailable" if valve else ("Mixed UVs — edits replace selected values" if mixed else "Classic UV • %d faces" % targets.size())
+	uv_label.text = "Mixed UVs • component edits preserve each face" if mixed else ("Valve UV • %d faces" % targets.size() if valve else "Classic UV • %d faces" % targets.size())
 	for field in uv_fields:
-		field.editable = not valve
+		field.editable = not targets.is_empty()
 	if not first.is_empty():
 		var values = [first.shift.x, first.shift.y, first.rotation, first.scale.x, first.scale.y]
 		for i in values.size():
@@ -1632,27 +1637,73 @@ func apply_uv_transform(shift: Vector2, rotation: float, scale_value: Vector2, t
 				"uv": {"shift": shift, "rotation": rotation, "scale": scale_value}})
 		return session.apply_face_edits(edits))
 
+func apply_uv_component(component: String, value: float) -> void:
+	if component not in ["shift_x", "shift_y", "rotation", "scale_x", "scale_y"]:
+		return
+	var operation := {"kind": "set"}
+	operation[component] = value
+	apply_uv_operation(operation, "Edit map UV")
+
+func apply_uv_operation(operation: Dictionary, label: String, targets = null) -> void:
+	if targets == null:
+		targets = face_targets()
+	if targets.is_empty():
+		return
+	session.transact(label, func():
+		var edits: Array = []
+		for target in targets:
+			edits.append({"brush_id": target.brush_id, "face": target.index,
+				"topology_revision": target.topology_revision, "uv_op": operation.duplicate(true)})
+		return session.apply_face_edits(edits))
+
 func uv_texture_requested(token: String) -> void:
 	texture_field.text = token
 	assign_texture()
 
 func match_uv_grid() -> void:
-	var targets := face_targets()
-	if targets.is_empty():
+	var scale_value: Vector2 = bottom_uv_pane.current_transform().scale
+	if is_zero_approx(scale_value.x) or is_zero_approx(scale_value.y):
+		set_status("Cannot match texture increments with zero scale.")
 		return
-	var result: Dictionary = session.document.get_face_uv(targets[0].brush_id, targets[0].index, targets[0].topology_revision)
-	if result.ok:
-		var uv: Dictionary = result.value
-		apply_uv_transform(uv.shift.snapped(Vector2.ONE * session.grid), uv.rotation, uv.scale, targets)
+	var horizontal := maxf(0.125, absf(roundf(session.grid / scale_value.x)))
+	var vertical := maxf(0.125, absf(roundf(session.grid / scale_value.y)))
+	bottom_uv_pane.set_shift_steps(horizontal, vertical)
+	for pane in uv_panes:
+		pane.set_shift_steps(horizontal, vertical)
 
 func reset_uv() -> void:
-	apply_uv_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+	apply_uv_operation({"kind": "reset"}, "Reset map UV")
 
-func unsupported_uv_axis(_axis: String) -> void:
-	set_status("Width and Height fitting require native face projection support.")
+func fit_uv_axis(axis: String, repeats: Vector2) -> void:
+	apply_uv_operation({"kind": "fit", "axes": axis, "repeats": repeats}, "Fit map UV %s" % axis)
 
-func unsupported_uv_fit(_scale: Vector2) -> void:
-	set_status("UV fitting requires native face projection support.")
+func fit_uv(scale_value: Vector2) -> void:
+	apply_uv_operation({"kind": "fit", "axes": "both", "repeats": scale_value}, "Fit map UV")
+
+func flip_uv(axis: String) -> void:
+	apply_uv_operation({"kind": "flip", "axis": axis}, "Flip map UV")
+
+func project_uv(mode: String) -> void:
+	var operation := {"kind": "project", "mode": mode}
+	if mode == "ortho":
+		if not is_instance_valid(active_graph):
+			set_status("An orthographic view is required for Ortho projection.")
+			return
+		var axes: Vector2i = active_graph.axes()
+		var u_axis := Vector3.ZERO
+		var v_axis := Vector3.ZERO
+		u_axis[axes.x] = 1.0
+		v_axis[axes.y] = -1.0
+		operation.merge({"u_axis": u_axis, "v_axis": v_axis})
+	elif mode == "cam":
+		if not is_instance_valid(camera_view):
+			set_status("A camera view is required for Cam projection.")
+			return
+		operation.merge({"u_axis": camera_view.preview_direction_to_map(camera_view.camera.global_basis.x),
+			"v_axis": camera_view.preview_direction_to_map(camera_view.camera.global_basis.y)})
+	elif mode != "axial":
+		return
+	apply_uv_operation(operation, "Project map UV %s" % mode.capitalize())
 
 func build_dialogs() -> void:
 	file_dialog = FileDialog.new()

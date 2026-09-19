@@ -1384,6 +1384,34 @@ func face_uv_data(doc, brush: Dictionary) -> Array:
 		result.append(doc.get_face_uv(brush.id, face.index, brush.topology_revision).value)
 	return result
 
+func face_uv_bounds(face: Dictionary, uv: Dictionary) -> Rect2:
+	var u_axis: Vector3
+	var v_axis: Vector3
+	if uv.projection == "valve":
+		u_axis = uv.u_axis
+		v_axis = uv.v_axis
+	else:
+		var normal: Vector3 = face.normal.abs()
+		if normal.z >= normal.y and normal.z >= normal.x:
+			u_axis = Vector3.RIGHT; v_axis = Vector3(0, -1, 0)
+		elif normal.y >= normal.z and normal.y >= normal.x:
+			u_axis = Vector3.RIGHT; v_axis = Vector3(0, 0, -1)
+		else:
+			u_axis = Vector3.UP; v_axis = Vector3(0, 0, -1)
+		var angle := deg_to_rad(float(uv.rotation))
+		var base_u := u_axis
+		var base_v := v_axis
+		u_axis = base_u * cos(angle) - base_v * sin(angle)
+		v_axis = base_u * sin(angle) + base_v * cos(angle)
+	var low := Vector2(INF, INF)
+	var high := Vector2(-INF, -INF)
+	for point in face.winding:
+		var value := Vector2(point.dot(u_axis) / uv.scale.x + uv.shift.x,
+			point.dot(v_axis) / uv.scale.y + uv.shift.y)
+		low = low.min(value)
+		high = high.max(value)
+	return Rect2(low, high - low)
+
 func check_unchanged_brush_geometry(before: Dictionary, after: Dictionary, message: String) -> void:
 	for key in ["id", "entity_id", "aabb_min", "aabb_max", "vertices", "edges", "edge_vertex_indices"]:
 		checks.check(after[key] == before[key], message + " " + key)
@@ -1648,6 +1676,73 @@ func test_apply_face_edits() -> void:
 	check_unchanged_brush_geometry(first_before, first_after, "UV batch preserves first geometry")
 	check_unchanged_brush_geometry(second_before, second_after, "UV batch preserves second geometry")
 
+	var partial := face_edit_target(first_after, 2)
+	partial.uv_op = {"kind": "set", "shift_x": 19.0}
+	expect_ok(doc.apply_face_edits([partial]), "partial UV component edit")
+	var partial_uv: Dictionary = doc.get_face_uv(first, 2, first_after.topology_revision).value
+	checks.check(partial_uv.shift == Vector2(19, -8) and partial_uv.rotation == 15.0 and partial_uv.scale == Vector2(0.5, 2),
+		"partial UV edit preserves every unmentioned component")
+
+	expect_ok(doc.set_texture_sizes({"batch/first": Vector2i(64, 32)}), "fit texture dimensions")
+	first_after = brush_data(doc, first)
+	var fit := face_edit_target(first_after, 0)
+	fit.uv_op = {"kind": "fit", "axes": "both", "repeats": Vector2(2, 3)}
+	expect_ok(doc.apply_face_edits([fit]), "fit face to repeat bounds")
+	first_after = brush_data(doc, first)
+	var fit_uv: Dictionary = doc.get_face_uv(first, 0, first_after.topology_revision).value
+	var fit_bounds := face_uv_bounds(first_after.faces[0], fit_uv)
+	checks.check(fit_bounds.position.is_equal_approx(Vector2.ZERO) and fit_bounds.size.is_equal_approx(Vector2(128, 96)),
+		"fit maps projected face bounds to requested texture repeats")
+	var width_fit := face_edit_target(first_after, 0)
+	width_fit.uv_op = {"kind": "fit", "axes": "width", "repeats": Vector2.ONE}
+	expect_ok(doc.apply_face_edits([width_fit]), "proportional width fit")
+	first_after = brush_data(doc, first)
+	var width_bounds := face_uv_bounds(first_after.faces[0], doc.get_face_uv(first, 0, first_after.topology_revision).value)
+	checks.check(width_bounds.position.is_equal_approx(Vector2.ZERO) and width_bounds.size.is_equal_approx(Vector2(64, 48)),
+		"width fit preserves projected aspect ratio")
+	fit = face_edit_target(first_after, 0)
+	fit.uv_op = {"kind": "fit", "axes": "both", "repeats": Vector2(2, 3)}
+	expect_ok(doc.apply_face_edits([fit]), "restore both-axis fit")
+	first_after = brush_data(doc, first)
+	var height_fit := face_edit_target(first_after, 0)
+	height_fit.uv_op = {"kind": "fit", "axes": "height", "repeats": Vector2.ONE}
+	expect_ok(doc.apply_face_edits([height_fit]), "proportional height fit")
+	first_after = brush_data(doc, first)
+	var height_bounds := face_uv_bounds(first_after.faces[0], doc.get_face_uv(first, 0, first_after.topology_revision).value)
+	checks.check(height_bounds.position.is_equal_approx(Vector2.ZERO) and height_bounds.size.is_equal_approx(Vector2(128.0 / 3.0, 32)),
+		"height fit preserves projected aspect ratio")
+	fit = face_edit_target(first_after, 0)
+	fit.uv_op = {"kind": "fit", "axes": "both", "repeats": Vector2(2, 3)}
+	expect_ok(doc.apply_face_edits([fit]), "restore fit before flip")
+	first_after = brush_data(doc, first)
+	fit_uv = doc.get_face_uv(first, 0, first_after.topology_revision).value
+	fit_bounds = face_uv_bounds(first_after.faces[0], fit_uv)
+	var fitted_scale: Vector2 = fit_uv.scale
+	var flip := face_edit_target(first_after, 0)
+	flip.uv_op = {"kind": "flip", "axis": "horizontal"}
+	expect_ok(doc.apply_face_edits([flip]), "horizontal UV flip")
+	var flipped_uv: Dictionary = doc.get_face_uv(first, 0, first_after.topology_revision).value
+	checks.check(is_equal_approx(flipped_uv.scale.x, -fitted_scale.x) and is_equal_approx(flipped_uv.scale.y, fitted_scale.y)
+		and face_uv_bounds(first_after.faces[0], flipped_uv).is_equal_approx(fit_bounds), "flip mirrors in place without changing projected bounds")
+	first_after = brush_data(doc, first)
+	flip = face_edit_target(first_after, 0)
+	flip.uv_op = {"kind": "flip", "axis": "horizontal"}
+	expect_ok(doc.apply_face_edits([flip]), "second horizontal UV flip")
+	var unflipped_uv: Dictionary = doc.get_face_uv(first, 0, first_after.topology_revision).value
+	checks.check(unflipped_uv.shift.is_equal_approx(fit_uv.shift) and unflipped_uv.scale.is_equal_approx(fit_uv.scale), "two centered flips restore the projection")
+
+	first_after = brush_data(doc, first)
+	var project := face_edit_target(first_after, 0)
+	project.uv_op = {"kind": "project", "mode": "ortho", "u_axis": Vector3.RIGHT, "v_axis": Vector3(0, -1, 0)}
+	expect_ok(doc.apply_face_edits([project]), "orthographic UV projection")
+	var projected_uv: Dictionary = doc.get_face_uv(first, 0, first_after.topology_revision).value
+	checks.check(projected_uv.projection == "valve" and projected_uv.u_axis == Vector3.RIGHT and projected_uv.v_axis == Vector3(0, -1, 0), "ortho projection writes explicit Valve axes")
+	first_after = brush_data(doc, first)
+	project = face_edit_target(first_after, 0)
+	project.uv_op = {"kind": "project", "mode": "axial"}
+	expect_ok(doc.apply_face_edits([project]), "axial UV projection")
+	checks.check(doc.get_face_uv(first, 0, first_after.topology_revision).value.projection == "classic", "axial projection restores classic representation")
+
 	first_before = first_after
 	var stale_revision: int = first_before.topology_revision
 	var combined := face_edit_target(first_before, 4)
@@ -1658,7 +1753,7 @@ func test_apply_face_edits() -> void:
 	expect_ok(result, "combined texture and UV face edit")
 	first_after = brush_data(doc, first)
 	var combined_uv: Dictionary = doc.get_face_uv(first, 4, first_after.topology_revision).value
-	checks.check(result.changed and doc.get_revision() == revision_before + 1 and events == {"map": 3, "preview": 0, "dirty": 0}, "combined edit commits one revision and signal")
+	checks.check(result.changed and doc.get_revision() == revision_before + 1 and events == {"map": 13, "preview": 1, "dirty": 0}, "combined edit commits one revision and signal")
 	checks.check(first_after.faces[4].texture == "combined/material" and combined_uv.shift == Vector2(12, 6) and combined_uv.rotation == 45 and combined_uv.scale == Vector2(2, 3), "combined edit applies both fields")
 	check_unchanged_brush_geometry(first_before, first_after, "combined edit preserves geometry")
 
@@ -1681,6 +1776,9 @@ func test_apply_face_edits() -> void:
 	duplicate_b.texture = "duplicate/b"
 	expect_failure(doc, doc.apply_face_edits([duplicate_a, duplicate_b]), unchanged, "INVALID_ARGUMENT", "apply_face_edits")
 	checks.check(events == events_before, "duplicate rejection emits no signals")
+	var empty_operation := face_edit_target(first_after, 1)
+	empty_operation.uv_op = {"kind": "set"}
+	expect_failure(doc, doc.apply_face_edits([empty_operation]), unchanged, "INVALID_ARGUMENT", "apply_face_edits")
 
 	var valid_before_stale := face_edit_target(first_after, 5)
 	valid_before_stale.texture = "must/not/commit"
@@ -1707,6 +1805,21 @@ func test_apply_face_edits() -> void:
 	valve_uv.uv = {"shift": Vector2.ONE, "rotation": 0, "scale": Vector2.ONE}
 	expect_failure(valve, valve.apply_face_edits([valve_texture, valve_uv]), valve_before, "UNSUPPORTED_PROJECTION", "apply_face_edits")
 	checks.check(valve.get_draw_data()[0].faces[0].texture == valve_brush.faces[0].texture and valve_events == {"map": 0, "preview": 0, "dirty": 0}, "Valve UV rejection is atomic and emits no signals")
+	var valve_partial := face_edit_target(valve_brush, 0)
+	valve_partial.uv_op = {"kind": "set", "shift_x": 17.0, "scale_y": 2.0}
+	expect_ok(valve.apply_face_edits([valve_partial]), "semantic Valve UV edit")
+	var valve_changed: Dictionary = valve.get_face_uv(valve_brush.id, 0, valve_brush.topology_revision).value
+	checks.check(valve_changed.projection == "valve" and valve_changed.shift.x == 17.0 and valve_changed.shift.y == -0.5
+		and valve_changed.scale.x == 1.0 and valve_changed.scale.y == 2.0 and valve_changed.u_axis == Vector3(0, 1, 0),
+		"Valve partial edit preserves axes and unmentioned values")
+	valve_brush = valve.get_draw_data()[0]
+	var valve_reset := face_edit_target(valve_brush, 0)
+	valve_reset.uv_op = {"kind": "reset"}
+	expect_ok(valve.apply_face_edits([valve_reset]), "Valve UV reset")
+	var reset_valve: Dictionary = valve.get_face_uv(valve_brush.id, 0, valve_brush.topology_revision).value
+	checks.check(reset_valve.projection == "valve" and reset_valve.shift == Vector2.ZERO and reset_valve.rotation == 0
+		and reset_valve.scale == Vector2.ONE and reset_valve.u_axis.length_squared() == 1 and reset_valve.v_axis.length_squared() == 1,
+		"Valve reset rebuilds a canonical axial basis")
 
 func test_brush_topology_tokens() -> void:
 	var doc = ClassDB.instantiate("TBMapDocument")
