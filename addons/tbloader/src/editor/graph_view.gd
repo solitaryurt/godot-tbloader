@@ -375,12 +375,12 @@ func update_exact_preview() -> void:
 
 func hit_brush(position: Vector2, prefer_selected := false) -> int:
 	var hit: Dictionary = host.session.document.query_brush_2d_hit(orientation, unproject(position), selector_half_size / zoom,
-		host.session.hidden_brush_ids(), host.session.visibility_filter_mask(), host.session.selected, prefer_selected)
+		host.session.pick_hidden_brush_ids(), host.session.visibility_filter_mask(), host.session.selected, prefer_selected)
 	return hit.get("brush_id", 0)
 
 func hit_brushes(position: Vector2) -> PackedInt64Array:
 	var hit: Dictionary = host.session.document.query_brush_2d_hit(orientation, unproject(position), selector_half_size / zoom,
-		host.session.hidden_brush_ids(), host.session.visibility_filter_mask(), host.session.selected, false)
+		host.session.pick_hidden_brush_ids(), host.session.visibility_filter_mask(), host.session.selected, false)
 	return hit.get("brush_ids", PackedInt64Array())
 
 func hit_point(position: Vector2) -> int:
@@ -415,7 +415,7 @@ func rotate_point(point: Vector3, angle: float) -> Vector3:
 
 func silhouette(position: Vector2) -> Dictionary:
 	for id in host.session.selected:
-		if host.session.hidden.has(id):
+		if host.session.hidden.has(id) or host.session.layer_locked_for_brush(id):
 			continue
 		var brush: Dictionary = host.session.brush(id)
 		for face in brush.faces:
@@ -432,7 +432,7 @@ func pick_component(position: Vector2, mode: String, cycle = false) -> Dictionar
 	var hits: Array = []
 	var face_bodies: Array = []
 	for id in host.session.selected:
-		if host.session.hidden.has(id):
+		if host.session.hidden.has(id) or host.session.layer_locked_for_brush(id):
 			continue
 		var brush: Dictionary = host.session.brush(id)
 		if mode == "Face":
@@ -996,7 +996,7 @@ func finish_left(event: InputEventMouseButton) -> void:
 		var bounds = creation_bounds()
 		if start.distance_to(cursor) > 4 and bounds.size.x > 0 and bounds.size.y > 0 and bounds.size.z > 0:
 			session.transact("Create map brush", func():
-				var r: Dictionary = session.document.create_cuboid(bounds.position, bounds.end, session.texture)
+				var r: Dictionary = session.create_cuboid_in_active_layer(bounds.position, bounds.end, session.texture)
 				if r.ok:
 					session.select(PackedInt64Array([r.value]))
 				return r)
@@ -1004,6 +1004,9 @@ func finish_left(event: InputEventMouseButton) -> void:
 			var id = hit_brush(cursor)
 			session.select(PackedInt64Array([id]) if id else PackedInt64Array())
 	elif gesture in ["move", "resize", "component"] and delta != Vector3.ZERO:
+		if host.reject_locked_edit(session.selected, "translate_brushes"):
+			cancel()
+			return
 		var movement = delta
 		if gesture == "move":
 			var brush_only: bool = session.points.is_empty()
@@ -1025,6 +1028,9 @@ func finish_left(event: InputEventMouseButton) -> void:
 		if current >= 0:
 			session.select(PackedInt64Array([click_cycle_ids[(current + 1) % click_cycle_ids.size()]]))
 	elif gesture == "rotate" and not is_zero_approx(rotation_angle):
+		if host.reject_locked_edit(session.selected, "rotate_brushes"):
+			cancel()
+			return
 		var angle = rotation_angle
 		var pivot = rotation_pivot
 		session.transact("Rotate map selection", func(): return session.document.rotate_brushes(session.selected, pivot, orientation, angle))
@@ -1040,6 +1046,8 @@ func box_select(end: Vector2) -> void:
 	var p := unproject(rect.position)
 	var q := unproject(rect.end)
 	for brush in host.session.visible_brushes_2d(orientation, p.min(q), p.max(q)):
+		if host.session.layer_locked_for_brush(brush.id):
+			continue
 		var contained = true
 		for vertex in brush.vertices:
 			if not rect.has_point(project(vertex)):

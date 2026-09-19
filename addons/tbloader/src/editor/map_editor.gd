@@ -8,12 +8,13 @@ const Browser = preload("res://addons/tbloader/src/editor/material_browser.gd")
 const BakeAction = preload("res://addons/tbloader/src/editor/bake_action.gd")
 const UVPane = preload("res://addons/tbloader/src/editor/uv_pane.gd")
 const EntityPane = preload("res://addons/tbloader/src/editor/entity_pane.gd")
+const LayersPane = preload("res://addons/tbloader/src/editor/layers_pane.gd")
 const POINT_ENTITY_CLASSES := ["info_player_start", "light", "player", "target_speaker"]
 const BRUSH_ENTITY_CLASSES := ["area", "func_group", "nocollision", "trigger_location"]
 const BAKED_STATE_META := &"_tbloader_editor_baked_state"
 const BAKED_STATE_RECORD_LIMIT := 128
 
-const PANE_TYPES := ["Camera", "Top Grid", "Front Grid", "Side Grid", "UV", "Entities"]
+const PANE_TYPES := ["Camera", "Top Grid", "Front Grid", "Side Grid", "UV", "Entities", "Layers"]
 const CMD_UNDO := 100
 const CMD_REDO := 101
 const CMD_CUT := 102
@@ -34,6 +35,7 @@ var graphs: Array[Control] = []
 var cameras: Array[Control] = []
 var uv_panes: Array[Control] = []
 var entity_panes: Array[Control] = []
+var layers_panes: Array[Control] = []
 var active_slot: int = -1
 var maximized_slot := -1
 var visual_slot_order: Array[int] = [0, 2, 1, 3]
@@ -338,7 +340,7 @@ func _ready() -> void:
 		for pane_index in PANE_TYPES.size():
 			pane_menu.get_popup().add_radio_check_item(PANE_TYPES[pane_index], pane_index)
 		var pane_icons := [editor_icon("Camera3D"), custom_icon("grid_xy"), custom_icon("grid_xz"),
-			custom_icon("grid_yz"), editor_icon("Texture2D"), editor_icon("Object")]
+			custom_icon("grid_yz"), editor_icon("Texture2D"), editor_icon("Object"), editor_icon("Node3D")]
 		for pane_index in PANE_TYPES.size():
 			pane_menu.get_popup().set_item_icon(pane_index, pane_icons[pane_index])
 		pane_menu.get_popup().id_pressed.connect(slot_menu_command.bind(index))
@@ -1007,12 +1009,20 @@ func preview_clip(split: bool, owner: Object = null) -> bool:
 	return broadcast_mutation_preview(session.document.preview_clip_brushes(session.selected,
 		plane[0], plane[1], plane[2], split, cut_flip), owner if owner != null else self)
 
+func reject_locked_edit(ids = null, operation := "") -> bool:
+	if session == null:
+		return false
+	var targets: PackedInt64Array = session.selected if ids == null else ids
+	return session.reject_locked_edit(targets, operation)
+
 func apply_clip(split: bool) -> void:
 	if session == null:
 		return
 	var plane := cut_plane()
 	if tool != "Cut" or plane.is_empty():
 		set_status("Place two or three clip points first.")
+		return
+	if reject_locked_edit(session.selected, "clip_brushes"):
 		return
 	var p := plane[0]
 	var q := plane[1]
@@ -1087,6 +1097,9 @@ func create_pane(type: String) -> Control:
 	elif type == "Entities":
 		pane = EntityPane.new()
 		pane.set_session(session)
+	elif type == "Layers":
+		pane = LayersPane.new()
+		pane.set_session(session)
 	else:
 		return null
 	pane.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -1139,6 +1152,7 @@ func update_slot_menu(slot: int) -> void:
 		"Side Grid": custom_icon("grid_yz"),
 		"UV": editor_icon("Texture2D"),
 		"Entities": editor_icon("Object"),
+		"Layers": editor_icon("Node3D"),
 	}
 	slot_menus[slot].icon = pane_icons[slot_types[slot]]
 	slot_menus[slot].tooltip_text = "%s; choose pane type" % slot_types[slot]
@@ -1148,6 +1162,7 @@ func rebuild_pane_collections() -> void:
 	graphs.clear()
 	uv_panes.clear()
 	entity_panes.clear()
+	layers_panes.clear()
 	for pane in slot_views:
 		if not is_instance_valid(pane):
 			continue
@@ -1159,6 +1174,8 @@ func rebuild_pane_collections() -> void:
 			uv_panes.append(pane)
 		elif pane.get_script() == EntityPane:
 			entity_panes.append(pane)
+		elif pane.get_script() == LayersPane:
+			layers_panes.append(pane)
 	graphs.sort_custom(func(a, b): return a.orientation > b.orientation)
 	camera_view = cameras[0] if not cameras.is_empty() else null
 	graph_a = graphs[0] if graphs.size() > 0 else null
@@ -1482,6 +1499,8 @@ func set_session(value: RefCounted) -> void:
 		clear_cut_state()
 		for pane in entity_panes:
 			pane.set_session(null)
+		for pane in layers_panes:
+			pane.set_session(null)
 		if fallback_entity_pane != null:
 			fallback_entity_pane.set_session(null)
 		if texture_field != null:
@@ -1501,6 +1520,8 @@ func set_session(value: RefCounted) -> void:
 		sessions.append(session)
 	clear_cut_state()
 	for pane in entity_panes:
+		pane.set_session(session)
+	for pane in layers_panes:
 		pane.set_session(session)
 	if fallback_entity_pane != null:
 		fallback_entity_pane.set_session(session)
@@ -1522,6 +1543,8 @@ func _session_changed(origin: RefCounted) -> void:
 				graph.queue_selection_redraw()
 			for camera in cameras:
 				camera.refresh()
+			refresh_status()
+		elif origin.change_kind == "status":
 			refresh_status()
 		else:
 			refresh()
@@ -1733,6 +1756,8 @@ func refresh() -> void:
 	sync_material_selection(face_selection)
 	for pane in entity_panes:
 		pane.refresh()
+	for pane in layers_panes:
+		pane.refresh()
 	if inspector != null and inspector.visible:
 		fallback_entity_pane.refresh()
 
@@ -1749,6 +1774,8 @@ func refresh_selection() -> void:
 	sync_material_selection(face_selection)
 	for pane in entity_panes:
 		pane.refresh_selection()
+	for pane in layers_panes:
+		pane.refresh()
 	if inspector != null and inspector.visible:
 		fallback_entity_pane.refresh_selection()
 
@@ -1934,6 +1961,8 @@ func _input(event: InputEvent) -> void:
 func clone_selection(axis: int) -> void:
 	if session == null:
 		return
+	if reject_locked_edit(session.selected, "duplicate_brushes"):
+		return
 	session.transact("Clone map brushes", func():
 		var result: Dictionary = session.document.duplicate_brushes(session.selected)
 		if result.ok and not result.value.is_empty():
@@ -1948,7 +1977,7 @@ func paste_text(text: String) -> void:
 		return
 	cancel_interaction()
 	if session.transact("Paste map brushes", func():
-		var result: Dictionary = session.document.import_selection(text)
+		var result: Dictionary = session.import_selection_in_active_layer(text)
 		if result.ok and not result.value.is_empty():
 			session.select(result.value)
 		return result):
@@ -1968,6 +1997,8 @@ func cut_selection() -> void:
 	if session == null or session.selected.is_empty():
 		set_status("No brushes selected to cut.")
 		return
+	if reject_locked_edit(session.selected, "delete_brushes"):
+		return
 	var selected: PackedInt64Array = session.selected.duplicate()
 	var exported: Dictionary = session.document.export_selection(selected)
 	if not session.report(exported) or exported.value.is_empty():
@@ -1979,6 +2010,8 @@ func cut_selection() -> void:
 
 func delete_selection() -> void:
 	if session == null:
+		return
+	if reject_locked_edit(session.selected, "delete_brushes"):
 		return
 	session.transact("Delete map selection", func():
 		var result: Dictionary = session.document.delete_brushes(session.selected)
@@ -1992,6 +2025,8 @@ func make_prism(sides: int) -> void:
 	if not is_instance_valid(active_graph):
 		set_status("A grid pane is required to choose the prism axis.")
 		return
+	if reject_locked_edit(session.selected, "make_prism"):
+		return
 	session.transact("Make %d-sided map prism" % sides, func():
 		for id in session.selected:
 			var result: Dictionary = session.document.make_prism(id, sides, active_graph.orientation)
@@ -2003,6 +2038,19 @@ func merge_selection() -> void:
 	if session == null:
 		return
 	var ids: PackedInt64Array = session.selected.duplicate()
+	if reject_locked_edit(ids, "merge_brushes"):
+		return
+	var owners: Dictionary = {}
+	var any_layer := false
+	for id in ids:
+		var owner: Dictionary = session.document.get_brush_owner(id)
+		if not owner.ok:
+			continue
+		owners[int(owner.value.id)] = true
+		any_layer = any_layer or bool(owner.value.get("eligible", false))
+	if owners.size() > 1 and any_layer:
+		set_status("Merge requires every brush to share one layer. Move them to the same layer first.")
+		return
 	session.transact("Merge map brushes", func():
 		var result: Dictionary = session.document.merge_brushes(ids)
 		if result.ok and result.changed:
@@ -2175,6 +2223,8 @@ func sync_material_selection(selection: Dictionary = {}) -> void:
 
 func assign_texture(targets = null) -> void:
 	session.texture = texture_field.text.strip_edges()
+	if reject_locked_edit(session.selected, "set_brush_texture"):
+		return
 	if targets == null:
 		targets = face_targets()
 	var component_mode: bool = not session.components.is_empty()

@@ -155,6 +155,13 @@ class TBMapDocument : public RefCounted {
 		int primitive;
 	};
 	std::unordered_map<int64_t, LiveLocation> live_ids;
+	struct OwnerIndexEntry {
+		int entity_index;
+		int64_t entity_id;
+		StringName classname;
+	};
+	std::unordered_map<int64_t, OwnerIndexEntry> brush_owners;
+	std::unordered_map<int64_t, int> entity_indices;
 	struct BrushGeometryView {
 		const LMBrush *brush = nullptr;
 		const LMEditorBrushGeometry *compact = nullptr;
@@ -206,6 +213,9 @@ class TBMapDocument : public RefCounted {
 	Dictionary preview_edit(const LMMapEdit &edit, const StringName &operation, const Dictionary &sources) const;
 	void stage_preview_brushes(const PackedInt64Array &ids, LMMapEdit &edit) const;
 	Dictionary preview_fragments(const LMMapEdit &before, const LMMapEdit &after, const StringName &operation, const Dictionary &sources) const;
+	int64_t resolved_world_owner_id(int64_t owner_id) const;
+	Dictionary check_world_geometry_owner(int64_t owner_id, const StringName &operation) const;
+	Dictionary world_geometry_owner_descriptor(int entity_index) const;
 	Dictionary check_brushes(const PackedInt64Array &ids, const StringName &operation) const;
 	Dictionary check_face(int64_t id, int face, int64_t token, const StringName &operation) const;
 	Dictionary move_components(const Array &components, Vector3 delta, const StringName &operation);
@@ -288,7 +298,7 @@ public:
 			double vertical_fov, Vector2 position, double aperture, const PackedInt64Array &hidden_ids, int filter_mask) const;
 	Array query_ray(Vector3 origin, Vector3 direction, double max_distance = 1e30) const;
 	Dictionary query_ray_nearest_visible(Vector3 origin, Vector3 direction, double max_distance, const PackedInt64Array &hidden_ids, int filter_mask) const;
-	Dictionary create_cuboid(Vector3 mins, Vector3 maxs, const String &texture);
+	Dictionary create_cuboid(Vector3 mins, Vector3 maxs, const String &texture, int64_t owner_id = 0);
 	Dictionary duplicate_brushes(const PackedInt64Array &ids);
 	Dictionary merge_brushes(const PackedInt64Array &ids);
 	Dictionary delete_brushes(const PackedInt64Array &ids);
@@ -304,7 +314,12 @@ public:
 	Dictionary apply_face_edits(const Array &edits);
 	Dictionary set_texture_sizes(const Dictionary &sizes);
 	Dictionary export_selection(const PackedInt64Array &ids) const;
-	Dictionary import_selection(const String &text);
+	Dictionary import_selection(const String &text, int64_t world_owner_id = 0);
+	Dictionary create_func_group(const String &targetname);
+	Dictionary move_brushes_to_owner(const PackedInt64Array &ids, int64_t owner_id);
+	Dictionary get_world_geometry_owners() const;
+	Dictionary get_brush_owner(int64_t brush_id) const;
+	Dictionary delete_func_group_layer(int64_t entity_id);
 	Dictionary create_point_entity(const String &classname, Vector3 origin);
 	Dictionary set_entity_property(int64_t id, const String &key, const String &value);
 	Dictionary remove_entity_property(int64_t id, const String &key);

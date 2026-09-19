@@ -301,7 +301,7 @@ func run() -> void:
 	for pane_index in ui.slot_menus[0].get_popup().item_count:
 		var pane_label: String = ui.slot_menus[0].get_popup().get_item_text(pane_index)
 		slot_command_row = slot_command_row or pane_label in ["Undo", "Cut", "Hide"]
-	checks.check(ui.slot_menus[0].get_popup().item_count == ui.PANE_TYPES.size() and ui.PANE_TYPES.size() == 6
+	checks.check(ui.slot_menus[0].get_popup().item_count == ui.PANE_TYPES.size() and ui.PANE_TYPES.size() == 7
 		and not slot_command_row,
 		"slot pane menus stay pane-type radios without edit command rows")
 	ui.set_slot_type(1, "Side Grid")
@@ -1235,6 +1235,7 @@ func run() -> void:
 	ui.set_scene_active(false)
 	precision_journey()
 	visibility_filter_journey()
+	layers_pane_journey()
 	await grid_draw_batch_regression()
 	step5_native_editor_journey()
 	await phase5_journey()
@@ -2883,6 +2884,121 @@ func precision_journey() -> void:
 	graph.orientation = 1
 	graph.zoom = 1
 	ui.set_tool("Brush")
+	ui.graph_a.grab_focus()
+
+func layers_pane_journey() -> void:
+	print("TB_UI_STAGE: func_group layers pane")
+	var plugin = find_tb_plugin(get_tree().root)
+	checks.check(ui.PANE_TYPES == ["Camera", "Top Grid", "Front Grid", "Side Grid", "UV", "Entities", "Layers"]
+		and ui.PANE_TYPES.size() == 7 and ui.slot_menus[0].get_popup().item_count == 7,
+		"Layers is pane type ID 6 with seven slot radios")
+	var layers_bottom := false
+	if plugin != null:
+		for child in plugin.get_children():
+			layers_bottom = layers_bottom or String(child.name).contains("Layer")
+	checks.check(plugin.entities_panel != null and plugin.uv_panel != null and not layers_bottom,
+		"Layers is not registered as a bottom panel")
+	var original = ui.session
+	var scratch = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	ui.set_session(scratch)
+	var graph = ui.graph_a
+	graph.orientation = 2
+	graph.origin = Vector3.ZERO
+	graph.zoom = 1
+	graph.grab_focus()
+	ui.set_slot_type(1, "Layers")
+	ui.apply_layout(4)
+	var pane = ui.slot_views[1]
+	checks.check(pane.find_child("PaneHeader", false, false) != null
+		and pane.find_child("LayerSearch", true, false) != null
+		and pane.layer_tree != null and pane.new_button.accessibility_name == "New Layer",
+		"Layers pane has header, search, tree, and accessible commands")
+	var world_id: int = scratch.worldspawn_layer_id()
+	checks.check(scratch.layers().size() == 1 and scratch.layer_display_name(scratch.layers()[0]) == "Worldspawn"
+		and scratch.active_layer_id == world_id,
+		"Worldspawn is the default active layer row")
+	var history_before: int = scratch.history_action_count()
+	pane.create_named_layer("Walls")
+	var walls_id: int = scratch.active_layer_id
+	checks.check(walls_id != world_id and scratch.layer_display_name(scratch.layer_by_id(walls_id)) == "Walls"
+		and scratch.history_action_count() == history_before + 1,
+		"named layer is authored and adds one history event")
+	pane.selected_layer_id = walls_id
+	pane.rename_selected("")
+	checks.check(scratch.layer_display_name(scratch.layer_by_id(walls_id)).begins_with("Unnamed Layer #")
+		and scratch.history_action_count() == history_before + 2,
+		"empty rename removes targetname and uses the fallback label")
+	pane.rename_selected("Walls")
+	var canonical: String = text()
+	var revision: int = scratch.document.get_revision()
+	var history_version: int = map_history_version()
+	scratch.set_layer_eye(walls_id, false)
+	scratch.set_layer_lock(world_id, true)
+	scratch.show_only_layer(world_id)
+	scratch.set_layer_search("wall")
+	checks.check(text() == canonical and scratch.document.get_revision() == revision
+		and map_history_version() == history_version and scratch.document.is_dirty() == true,
+		"eye, lock, isolation, and search are transient")
+	checks.check(not ui.workspace_state().has("active_layer_id") and not ui.workspace_state().has("layer_locked"),
+		"workspace_state omits transient layer fields")
+	scratch.set_layer_search("")
+	scratch.clear_layer_isolation()
+	scratch.set_layer_lock(world_id, false)
+	scratch.set_layer_eye(walls_id, true)
+	scratch.set_active_layer(walls_id)
+	select_none()
+	ui.set_tool("Brush")
+	checks.check(scratch.active_layer_id == walls_id and not scratch.active_owner_locked(), "active layer is unlocked Walls")
+	scratch.transact("Create map brush", func():
+		var r: Dictionary = scratch.create_cuboid_in_active_layer(Vector3.ZERO, Vector3(32, 32, 32), "common/caulk")
+		if r.ok:
+			scratch.select(PackedInt64Array([int(r.value)]))
+		return r)
+	var created: int = scratch.selected[0] if not scratch.selected.is_empty() else 0
+	checks.check(created != 0 and int(scratch.layer_for_brush(created).get("id", 0)) == walls_id, "drawn cuboid uses the active layer")
+	if created != 0:
+		scratch.select(PackedInt64Array([created]))
+		var origin_min: Vector3 = scratch.brush(created).aabb_min
+		scratch.set_layer_lock(walls_id, true)
+		checks.check(scratch.selected.is_empty(), "locking prunes member selection immediately")
+		checks.check(graph.hit_brush(graph.project(Vector3(16, 16, 0))) == 0, "locked members are unpickable")
+		checks.check(ui.camera_view.triangle_count == 12, "locked geometry still draws")
+		var stale_move: Dictionary = scratch.translate_brushes(PackedInt64Array([created]), Vector3(16, 0, 0))
+		checks.check(not stale_move.ok and stale_move.error.code == &"LOCKED_LAYER"
+			and scratch.brush(created).aabb_min == origin_min, "stale locked IDs reject UI transforms without mutation")
+		scratch.set_layer_lock(walls_id, false)
+		scratch.select(PackedInt64Array([created]))
+		var exported: String = scratch.document.export_selection(scratch.selected).value
+		checks.check(exported.contains('"classname" "worldspawn"') and not exported.contains("func_group"),
+			"copying a layer member flattens to worldspawn")
+		scratch.set_active_layer(world_id)
+		paste_map_clipboard(exported)
+		var pasted: int = scratch.selected[0] if not scratch.selected.is_empty() else 0
+		checks.check(pasted != 0 and int(scratch.layer_for_brush(pasted).get("id", 0)) == world_id, "neutral paste uses the active layer")
+		if pasted != 0:
+			scratch.select(PackedInt64Array([created, pasted]))
+			ui.merge_selection()
+			checks.check(ui.notice.text.contains("Merge requires every brush to share one layer"),
+				"cross-layer merge is rejected with a layer-specific notice")
+			checks.check(not scratch.brush(created).is_empty() and not scratch.brush(pasted).is_empty(),
+				"rejected merge does not mutate either brush")
+		pane.selected_layer_id = walls_id
+		scratch.select(PackedInt64Array([created]))
+		checks.check(scratch.move_selection_to_layer(world_id), "Add Selection moves eligible brushes")
+		checks.check(int(scratch.layer_for_brush(created).get("id", 0)) == world_id, "moved brush is now worldspawn-owned")
+		scratch.select(PackedInt64Array([created]))
+		scratch.set_active_layer(walls_id)
+		checks.check(scratch.move_selection_to_layer(walls_id), "restore member for delete")
+		var before_delete: int = scratch.history_action_count()
+		pane.selected_layer_id = walls_id
+		pane.delete_selected()
+		checks.check(scratch.layer_by_id(walls_id).is_empty() and int(scratch.brush(created).get("entity_id", 0)) == world_id
+			and scratch.active_layer_id == world_id and scratch.history_action_count() == before_delete + 1,
+			"Delete Layer rehomes geometry, activates Worldspawn, and records one history event")
+	scratch.save_enabled = false
+	ui.set_slot_type(1, "Side Grid")
+	ui.apply_layout(3)
+	ui.set_session(original)
 	ui.graph_a.grab_focus()
 
 func visibility_filter_journey() -> void:

@@ -142,7 +142,56 @@ func state() -> Dictionary:
 		"inspector_rect": [ui.inspector.position.x, ui.inspector.position.y, ui.inspector.size.x, ui.inspector.size.y],
 		"inspector_close_rect": [get_tree().root.position.x + ui.inspector.position.x + ui.inspector.size.x - 28, get_tree().root.position.y + ui.inspector.position.y - 28, 24, 24],
 		"dirty_dialog": ui.dirty_dialog.visible, "file_dialog": ui.file_dialog.visible, "file_name_rect": rect(ui.file_dialog.get_line_edit()),
-		"file_ok_rect": rect(ui.file_dialog.get_ok_button()), "notice": ui.notice.text}
+		"file_ok_rect": rect(ui.file_dialog.get_ok_button()), "notice": ui.notice.text,
+		"layers": layer_snapshot()}
+
+func layer_snapshot() -> Dictionary:
+	if ui == null or ui.session == null:
+		return {}
+	var rows: Array = []
+	for layer in ui.session.layers():
+		var entity_id: int = int(layer.id)
+		rows.append({
+			"id": entity_id,
+			"classname": String(layer.classname),
+			"name": ui.session.layer_display_name(layer),
+			"brush_count": int(layer.brush_count),
+			"patch_count": int(layer.patch_count),
+			"visible": ui.session.layer_visible(entity_id),
+			"locked": ui.session.is_layer_locked(entity_id),
+			"active": ui.session.active_layer_id == entity_id,
+		})
+	var visible_ids: Array = []
+	for brush in ui.session.draw_data():
+		if ui.session.brush_visible(brush):
+			visible_ids.append(int(brush.id))
+	var panes: Array = []
+	for pane in ui.layers_panes:
+		if not is_instance_valid(pane) or not pane.is_visible_in_tree():
+			continue
+		var item_rects: Array = []
+		if pane.layer_tree != null:
+			var item: TreeItem = pane.layer_tree.get_root().get_first_child() if pane.layer_tree.get_root() != null else null
+			while item != null:
+				var area: Rect2 = pane.layer_tree.get_item_area_rect(item)
+				item_rects.append({"id": int(item.get_metadata(3)), "text": item.get_text(3), "rect": [area.position.x, area.position.y, area.size.x, area.size.y]})
+				item = item.get_next()
+		panes.append({
+			"rect": rect(pane),
+			"search_rect": rect(pane.search_field) if pane.search_field != null else [0, 0, 0, 0],
+			"tree_rect": rect(pane.layer_tree) if pane.layer_tree != null else [0, 0, 0, 0],
+			"selected_layer_id": pane.selected_layer_id,
+			"rows": item_rects,
+		})
+	return {
+		"active_layer_id": ui.session.active_layer_id,
+		"isolated_layer_id": ui.session.isolated_layer_id,
+		"layer_search": ui.session.layer_search,
+		"rows": rows,
+		"panes": panes,
+		"visible_brush_ids": visible_ids,
+		"pick_hidden_ids": Array(ui.session.pick_hidden_brush_ids()),
+	}
 
 func write_json(path: String, value: Variant) -> void:
 	var file = FileAccess.open(path + ".tmp", FileAccess.WRITE)

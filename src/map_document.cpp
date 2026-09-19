@@ -346,16 +346,24 @@ void TBMapDocument::assign_ids(LMMapData &candidate) {
 }
 void TBMapDocument::rebuild_live_index() {
 	live_ids.clear();
+	brush_owners.clear();
+	entity_indices.clear();
 	size_t total_ids = 0;
 	for (int e = 0; e < map->entity_count; ++e) total_ids += size_t(1) + size_t(map->entities[e].primitive_count);
-	if (total_ids) live_ids.reserve(total_ids);
+	if (total_ids) {
+		live_ids.reserve(total_ids);
+		entity_indices.reserve(size_t(map->entity_count));
+	}
 	for (int e = 0; e < map->entity_count; ++e) {
-		const auto &entity = map->entities[e];
+		auto &entity = map->entities[e];
+		const StringName classname = entity.get_property("classname");
 		live_ids[entity.id] = {'e', e, -1, -1};
+		entity_indices[entity.id] = e;
 		for (int p = 0; p < entity.primitive_count; ++p) {
 			const auto &primitive = entity.primitives[p];
 			const int64_t id = primitive.is_patch ? entity.patches[primitive.index].id : entity.brushes[primitive.index].id;
 			live_ids[id] = {primitive.is_patch ? 'p' : 'b', e, primitive.index, p};
+			if (!primitive.is_patch) brush_owners[id] = {e, entity.id, classname};
 		}
 	}
 }
@@ -853,7 +861,7 @@ void TBMapDocument::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("query_brush_camera_hit", "origin", "forward", "right", "up", "viewport_size", "vertical_fov", "position", "aperture", "hidden_ids", "filter_mask"), &TBMapDocument::query_brush_camera_hit);
 	ClassDB::bind_method(D_METHOD("query_ray", "origin", "direction", "max_distance"), &TBMapDocument::query_ray, DEFVAL(1e30));
 	ClassDB::bind_method(D_METHOD("query_ray_nearest_visible", "origin", "direction", "max_distance", "hidden_ids", "filter_mask"), &TBMapDocument::query_ray_nearest_visible);
-	ClassDB::bind_method(D_METHOD("create_cuboid", "mins", "maxs", "texture"), &TBMapDocument::create_cuboid);
+	ClassDB::bind_method(D_METHOD("create_cuboid", "mins", "maxs", "texture", "owner_id"), &TBMapDocument::create_cuboid, DEFVAL(int64_t(0)));
 	ClassDB::bind_method(D_METHOD("duplicate_brushes", "ids"), &TBMapDocument::duplicate_brushes);
 	ClassDB::bind_method(D_METHOD("merge_brushes", "ids"), &TBMapDocument::merge_brushes);
 	ClassDB::bind_method(D_METHOD("delete_brushes", "ids"), &TBMapDocument::delete_brushes);
@@ -869,7 +877,12 @@ void TBMapDocument::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("apply_face_edits", "edits"), &TBMapDocument::apply_face_edits);
 	ClassDB::bind_method(D_METHOD("set_texture_sizes", "sizes"), &TBMapDocument::set_texture_sizes);
 	ClassDB::bind_method(D_METHOD("export_selection", "ids"), &TBMapDocument::export_selection);
-	ClassDB::bind_method(D_METHOD("import_selection", "text"), &TBMapDocument::import_selection);
+	ClassDB::bind_method(D_METHOD("import_selection", "text", "world_owner_id"), &TBMapDocument::import_selection, DEFVAL(int64_t(0)));
+	ClassDB::bind_method(D_METHOD("create_func_group", "targetname"), &TBMapDocument::create_func_group);
+	ClassDB::bind_method(D_METHOD("move_brushes_to_owner", "ids", "owner_id"), &TBMapDocument::move_brushes_to_owner);
+	ClassDB::bind_method(D_METHOD("get_world_geometry_owners"), &TBMapDocument::get_world_geometry_owners);
+	ClassDB::bind_method(D_METHOD("get_brush_owner", "brush_id"), &TBMapDocument::get_brush_owner);
+	ClassDB::bind_method(D_METHOD("delete_func_group_layer", "entity_id"), &TBMapDocument::delete_func_group_layer);
 	ClassDB::bind_method(D_METHOD("create_point_entity", "classname", "origin"), &TBMapDocument::create_point_entity);
 	ClassDB::bind_method(D_METHOD("set_entity_property", "id", "key", "value"), &TBMapDocument::set_entity_property);
 	ClassDB::bind_method(D_METHOD("remove_entity_property", "id", "key"), &TBMapDocument::remove_entity_property);

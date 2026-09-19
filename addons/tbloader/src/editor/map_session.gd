@@ -19,6 +19,11 @@ var points = PackedInt64Array()
 var components: Array = []
 var hidden: Dictionary = {}
 var visibility_filters := {"entities": false, "caulk": false, "clips": false, "hint_skip": false}
+var active_layer_id := 0
+var layer_hidden: Dictionary = {}
+var layer_locked: Dictionary = {}
+var isolated_layer_id := 0
+var layer_search := ""
 var workzone = AABB(Vector3(-64, -64, -64), Vector3(128, 128, 128))
 var loader: WeakRef = weakref(null)
 var scene: WeakRef = weakref(null)
@@ -47,6 +52,16 @@ var _points_generation_state := PackedInt64Array()
 var _components_generation_state: Array = []
 var _hidden_generation_state: Dictionary = {}
 var _filters_generation_state := {"entities": false, "caulk": false, "clips": false, "hint_skip": false}
+var _layer_hidden_generation_state: Dictionary = {}
+var _isolated_generation_state := 0
+var _layer_epoch := -1
+var _layer_generation := -1
+var _layer_cache: Array = []
+var _layer_ids: Dictionary = {}
+var _worldspawn_layer_id := 0
+var _pick_hidden_cache := PackedInt64Array()
+var _pick_hidden_cache_gen := -1
+var _pick_hidden_lock_state: Dictionary = {}
 var _draw_cache: Array = []
 var _draw_index: Dictionary = {}
 var _entity_cache: Array = []
@@ -88,9 +103,15 @@ func notify_changed(kind: String = "content") -> void:
 func _init() -> void:
 	document.map_changed.connect(_map_changed)
 	document.preview_changed.connect(_preview_changed)
+	_layer_epoch = document.get_epoch()
+	layers()
 
 func _map_changed(_revision: int) -> void:
 	pristine_empty = false
+	_layer_generation = -1
+	if document.get_epoch() != _layer_epoch:
+		_reset_layer_transient()
+		_layer_epoch = document.get_epoch()
 	var change: Dictionary = document.get_last_change()
 	if not _pending_brush_translation.is_empty() and _draw_valid:
 		patch_draw_translation(_pending_brush_translation.ids, _pending_brush_translation.delta)
@@ -141,14 +162,18 @@ func _sync_selection_generation() -> bool:
 	return true
 
 func _sync_visibility_generation() -> bool:
-	if hidden == _hidden_generation_state and visibility_filters == _filters_generation_state:
+	if (hidden == _hidden_generation_state and visibility_filters == _filters_generation_state
+			and layer_hidden == _layer_hidden_generation_state and isolated_layer_id == _isolated_generation_state):
 		return false
 	_visibility_generation += 1
 	_hidden_generation_state = hidden.duplicate()
 	_filters_generation_state = visibility_filters.duplicate()
+	_layer_hidden_generation_state = layer_hidden.duplicate()
+	_isolated_generation_state = isolated_layer_id
 	_brush_visibility_cache.clear()
 	_brush_visibility_vis_gen = -1
 	_hidden_ids_cache_gen = -1
+	_pick_hidden_cache_gen = -1
 	return true
 
 func patch_draw_translation(ids: PackedInt64Array, movement: Vector3) -> void:
@@ -178,6 +203,9 @@ func patch_draw_translation(ids: PackedInt64Array, movement: Vector3) -> void:
 		_draw_changed_entries += 1
 
 func translate_brushes(ids: PackedInt64Array, movement: Vector3) -> Dictionary:
+	var locked := reject_locked_ids(ids, "translate_brushes")
+	if not locked.ok:
+		return locked
 	_pending_brush_translation = {"ids": ids, "delta": movement}
 	var result: Dictionary = document.translate_brushes(ids, movement)
 	_pending_brush_translation.clear()
@@ -522,13 +550,13 @@ func visible_brushes_2d(hidden_axis: int, mins: Vector3, maxs: Vector3) -> Array
 func visible_ray_hits(origin: Vector3, direction: Vector3, max_distance: float = 1e30) -> Array:
 	var result: Array = []
 	for hit in document.query_ray(origin, direction, max_distance):
-		if triangle_visible(hit.brush_id, hit.texture):
+		if triangle_visible(hit.brush_id, hit.texture) and not layer_locked_for_brush(hit.brush_id):
 			result.append(hit)
 	return result
 
 func nearest_visible_ray_hit(origin: Vector3, direction: Vector3, max_distance: float = 1e30) -> Dictionary:
 	return document.query_ray_nearest_visible(origin, direction, max_distance,
-		hidden_brush_ids(), visibility_filter_mask())
+		pick_hidden_brush_ids(), visibility_filter_mask())
 
 func apply_face_edits(edits: Array) -> Dictionary:
 	var result: Dictionary = document.apply_face_edits(edits)
@@ -540,10 +568,16 @@ func hidden_brush_ids() -> PackedInt64Array:
 	_sync_visibility_generation()
 	if _hidden_ids_cache_gen == _visibility_generation:
 		return _hidden_ids_cache
+	var ids: Dictionary = hidden.duplicate()
+	if isolated_layer_id != 0 or not layer_hidden.is_empty():
+		layers()
+		for item in draw_data():
+			if not _layer_allows_owner(int(item.get("entity_id", 0))):
+				ids[item.id] = true
 	_hidden_ids_cache = PackedInt64Array()
-	_hidden_ids_cache.resize(hidden.size())
+	_hidden_ids_cache.resize(ids.size())
 	var cursor := 0
-	for id in hidden:
+	for id in ids:
 		_hidden_ids_cache[cursor] = id
 		cursor += 1
 	_hidden_ids_cache_gen = _visibility_generation
@@ -582,6 +616,13 @@ func select_component(component: Dictionary, toggle: bool) -> void:
 	notify_changed("selection")
 
 func move_components(movement: Vector3) -> Dictionary:
+	var ids := PackedInt64Array()
+	for component in components:
+		if not ids.has(component.brush_id):
+			ids.append(component.brush_id)
+	var locked := reject_locked_ids(ids, "translate_components")
+	if not locked.ok:
+		return locked
 	var old: Dictionary = {}
 	for component in components:
 		old[component.brush_id] = brush(component.brush_id)
@@ -619,7 +660,7 @@ func prune(sync_generations := true) -> void:
 			hidden.erase(id)
 	var valid = PackedInt64Array()
 	for id in selected:
-		if existing.has(id) and brush_visible(brush(id)):
+		if existing.has(id) and brush_visible(brush(id)) and not layer_locked_for_brush(id):
 			valid.append(id)
 	selected = valid
 	components = components.filter(func(c): return component_valid(c, brush(c.brush_id)))
@@ -646,7 +687,7 @@ func prune_selection(sync_generation := true) -> void:
 	var valid := PackedInt64Array()
 	for id in selected:
 		var item: Dictionary = brush(id)
-		if brush_visible(item):
+		if brush_visible(item) and not layer_locked_for_brush(id):
 			valid.append(id)
 	selected = valid
 	components = components.filter(func(c): return component_valid(c, brush(c.brush_id)))
@@ -721,6 +762,8 @@ func material_filtered(texture: String) -> bool:
 func brush_visible(item: Dictionary) -> bool:
 	if item.is_empty() or hidden.has(item.id):
 		return false
+	if not _layer_allows_owner(int(item.get("entity_id", 0))):
+		return false
 	var doc_gen: int = _draw_generation if _draw_valid else document.get_state_generation()
 	_sync_visibility_generation()
 	if doc_gen != _brush_visibility_doc_gen or _visibility_generation != _brush_visibility_vis_gen:
@@ -739,7 +782,7 @@ func brush_visible(item: Dictionary) -> bool:
 
 func triangle_visible(brush_id: int, texture: String) -> bool:
 	var item := brush(brush_id)
-	if item.is_empty() or hidden.has(brush_id) or visibility_filters.entities and brush_has_entity_owner(item):
+	if item.is_empty() or hidden.has(brush_id) or not _layer_allows_owner(int(item.get("entity_id", 0))) or visibility_filters.entities and brush_has_entity_owner(item):
 		return false
 	return not material_filtered(texture)
 
@@ -752,7 +795,8 @@ func brush_has_entity_owner(item: Dictionary) -> bool:
 	return _brush_entity_ids.has(owner_id)
 
 func hidden_count() -> int:
-	if not visibility_filters.entities and not visibility_filters.caulk and not visibility_filters.clips and not visibility_filters.hint_skip:
+	if (not visibility_filters.entities and not visibility_filters.caulk and not visibility_filters.clips
+			and not visibility_filters.hint_skip and layer_hidden.is_empty() and isolated_layer_id == 0):
 		return hidden.size()
 	var ids: Dictionary = hidden.duplicate()
 	for item in draw_data():
@@ -802,3 +846,323 @@ func point_markers() -> Array:
 
 func success() -> Dictionary:
 	return {"ok": true, "changed": false, "value": null, "error": {}}
+
+func failure_result(code: String, message_text: String, operation: String) -> Dictionary:
+	return {"ok": false, "changed": false, "value": null, "error": {
+		"code": StringName(code), "message": message_text, "operation": StringName(operation),
+		"path": "", "line": 0, "column": 0, "entity_id": 0, "brush_id": 0, "face": -1}}
+
+func _reset_layer_transient() -> void:
+	active_layer_id = 0
+	layer_hidden.clear()
+	layer_locked.clear()
+	isolated_layer_id = 0
+	layer_search = ""
+	_layer_generation = -1
+	_layer_cache.clear()
+	_layer_ids.clear()
+	_worldspawn_layer_id = 0
+	_pick_hidden_cache_gen = -1
+
+func layers() -> Array:
+	var generation: int = document.get_state_generation()
+	if _layer_generation == generation:
+		return _layer_cache
+	var result: Dictionary = document.get_world_geometry_owners()
+	_layer_cache = result.value if result.ok else []
+	_layer_generation = generation
+	_layer_ids.clear()
+	_worldspawn_layer_id = 0
+	for layer in _layer_cache:
+		_layer_ids[int(layer.id)] = true
+		if String(layer.classname) == "worldspawn":
+			_worldspawn_layer_id = int(layer.id)
+	_prune_layer_transient()
+	return _layer_cache
+
+func _prune_layer_transient() -> void:
+	for id in layer_hidden.keys():
+		if not _layer_ids.has(id):
+			layer_hidden.erase(id)
+	for id in layer_locked.keys():
+		if not _layer_ids.has(id):
+			layer_locked.erase(id)
+	if isolated_layer_id != 0 and not _layer_ids.has(isolated_layer_id):
+		isolated_layer_id = 0
+	if active_layer_id == 0 or not _layer_ids.has(active_layer_id):
+		active_layer_id = _worldspawn_layer_id
+
+func layer_by_id(entity_id: int) -> Dictionary:
+	for layer in layers():
+		if int(layer.id) == entity_id:
+			return layer
+	return {}
+
+func layer_for_brush(brush_id: int) -> Dictionary:
+	var result: Dictionary = document.get_brush_owner(brush_id)
+	if not result.ok:
+		return {}
+	var owner: Dictionary = result.value
+	if not owner.get("eligible", false):
+		return owner
+	return layer_by_id(int(owner.id))
+
+func layer_display_name(layer: Dictionary) -> String:
+	if String(layer.get("classname", "")) == "worldspawn":
+		return "Worldspawn"
+	var targetname := String(layer.get("targetname", "")).strip_edges()
+	if not targetname.is_empty():
+		return targetname
+	return "Unnamed Layer #%d" % int(layer.id)
+
+func _layer_allows_owner(owner_id: int) -> bool:
+	layers()
+	var is_layer: bool = _layer_ids.has(owner_id)
+	if isolated_layer_id != 0:
+		return is_layer and owner_id == isolated_layer_id
+	if not is_layer:
+		return true
+	return not layer_hidden.get(owner_id, false)
+
+func layer_visible(entity_id: int) -> bool:
+	layers()
+	if not _layer_ids.has(entity_id):
+		return true
+	if isolated_layer_id != 0 and entity_id != isolated_layer_id:
+		return false
+	return not layer_hidden.get(entity_id, false)
+
+func worldspawn_layer_id() -> int:
+	layers()
+	return _worldspawn_layer_id
+
+func is_layer_locked(entity_id: int) -> bool:
+	return bool(layer_locked.get(entity_id, false))
+
+func layer_locked_for_brush(brush_id: int) -> bool:
+	var owner: Dictionary = layer_for_brush(brush_id)
+	return not owner.is_empty() and bool(owner.get("eligible", true)) and is_layer_locked(int(owner.id))
+
+func set_active_layer(entity_id: int) -> void:
+	layers()
+	if not _layer_ids.has(entity_id) or active_layer_id == entity_id:
+		return
+	active_layer_id = entity_id
+	notify_changed("status")
+
+func set_layer_eye(entity_id: int, visible: bool) -> void:
+	layers()
+	if not _layer_ids.has(entity_id):
+		return
+	var hidden_now: bool = layer_hidden.get(entity_id, false)
+	if visible == (not hidden_now):
+		return
+	if visible:
+		layer_hidden.erase(entity_id)
+	else:
+		layer_hidden[entity_id] = true
+	prune(false)
+	_sync_selection_generation()
+	_sync_visibility_generation()
+	notify_changed("visibility")
+
+func set_layer_lock(entity_id: int, locked: bool) -> void:
+	layers()
+	if not _layer_ids.has(entity_id):
+		return
+	var locked_now: bool = is_layer_locked(entity_id)
+	if locked == locked_now:
+		return
+	if locked:
+		layer_locked[entity_id] = true
+	else:
+		layer_locked.erase(entity_id)
+	_pick_hidden_cache_gen = -1
+	prune_selection(false)
+	_sync_selection_generation()
+	notify_changed("selection")
+
+func show_only_layer(entity_id: int) -> void:
+	layers()
+	if not _layer_ids.has(entity_id) or isolated_layer_id == entity_id:
+		return
+	isolated_layer_id = entity_id
+	prune(false)
+	_sync_selection_generation()
+	_sync_visibility_generation()
+	notify_changed("visibility")
+
+func clear_layer_isolation() -> void:
+	if isolated_layer_id == 0:
+		return
+	isolated_layer_id = 0
+	prune(false)
+	_sync_selection_generation()
+	_sync_visibility_generation()
+	notify_changed("visibility")
+
+func set_layer_search(query: String) -> void:
+	if layer_search == query:
+		return
+	layer_search = query
+	notify_changed("status")
+
+func pick_hidden_brush_ids() -> PackedInt64Array:
+	_sync_visibility_generation()
+	if _pick_hidden_cache_gen == _visibility_generation and _pick_hidden_lock_state == layer_locked:
+		return _pick_hidden_cache
+	var ids: Dictionary = {}
+	for id in hidden_brush_ids():
+		ids[id] = true
+	for layer in layers():
+		if not is_layer_locked(int(layer.id)):
+			continue
+		for brush_id in layer.brush_ids:
+			ids[brush_id] = true
+	_pick_hidden_cache = PackedInt64Array()
+	_pick_hidden_cache.resize(ids.size())
+	var cursor := 0
+	for id in ids:
+		_pick_hidden_cache[cursor] = id
+		cursor += 1
+	_pick_hidden_cache_gen = _visibility_generation
+	_pick_hidden_lock_state = layer_locked.duplicate()
+	return _pick_hidden_cache
+
+func reject_locked_ids(ids: PackedInt64Array, operation: String) -> Dictionary:
+	for id in ids:
+		if layer_locked_for_brush(id):
+			return failure_result("LOCKED_LAYER", "Locked layer members cannot be edited. Unlock the layer first.", operation)
+	return success()
+
+func reject_locked_edit(ids: PackedInt64Array, operation: String) -> bool:
+	var locked := reject_locked_ids(ids, operation)
+	if not locked.ok:
+		report(locked)
+		return true
+	return false
+
+func active_owner_locked() -> bool:
+	layers()
+	return is_layer_locked(active_layer_id)
+
+func create_cuboid_in_active_layer(mins: Vector3, maxs: Vector3, texture_name: String) -> Dictionary:
+	if active_owner_locked():
+		return failure_result("LOCKED_LAYER", "The active layer is locked; unlock it or choose another layer before creating brushes.", "create_cuboid")
+	return document.create_cuboid(mins, maxs, texture_name, active_layer_id)
+
+func import_selection_in_active_layer(text_value: String) -> Dictionary:
+	if active_owner_locked():
+		return failure_result("LOCKED_LAYER", "The active layer is locked; unlock it or choose another layer before pasting.", "import_selection")
+	return document.import_selection(text_value, active_layer_id)
+
+func ineligible_move_category(ids: PackedInt64Array) -> String:
+	for id in ids:
+		var result: Dictionary = document.get_brush_owner(id)
+		if not result.ok:
+			return "unknown"
+		if not result.value.get("eligible", false):
+			var classname := String(result.value.get("classname", ""))
+			return classname if not classname.is_empty() else "gameplay entity"
+	return ""
+
+func create_layer(targetname: String) -> bool:
+	var created_id := 0
+	var ok := transact("Create map layer", func():
+		var result: Dictionary = document.create_func_group(targetname)
+		if result.ok:
+			created_id = int(result.value)
+			active_layer_id = created_id
+			layer_hidden.erase(created_id)
+			layer_locked.erase(created_id)
+		return result)
+	return ok
+
+func rename_layer(entity_id: int, targetname: String) -> bool:
+	return transact("Rename map layer", func():
+		var layer := layer_by_id(entity_id)
+		if layer.is_empty() or String(layer.classname) != "func_group":
+			return failure_result("INELIGIBLE_OWNER", "Only func_group layers can be renamed.", "rename_layer")
+		if targetname.strip_edges().is_empty():
+			return document.remove_entity_property(entity_id, "targetname")
+		return document.set_entity_property(entity_id, "targetname", targetname))
+
+func delete_layer(entity_id: int) -> bool:
+	var ok := transact("Delete map layer", func():
+		var result: Dictionary = document.delete_func_group_layer(entity_id)
+		if result.ok:
+			layer_hidden.erase(entity_id)
+			layer_locked.erase(entity_id)
+			if isolated_layer_id == entity_id:
+				isolated_layer_id = 0
+			if active_layer_id == entity_id:
+				layers()
+				active_layer_id = _worldspawn_layer_id
+		return result)
+	return ok
+
+func move_selection_to_layer(owner_id: int) -> bool:
+	var ids: PackedInt64Array = selected.duplicate()
+	if ids.is_empty():
+		return false
+	var locked := reject_locked_ids(ids, "move_brushes_to_owner")
+	if not locked.ok:
+		report(locked)
+		return false
+	var category := ineligible_move_category(ids)
+	if not category.is_empty():
+		message.emit("Cannot move a mixed selection that includes %s; move only worldspawn or func_group brushes." % category)
+		return false
+	return transact("Move brushes to layer", func(): return document.move_brushes_to_owner(ids, owner_id))
+
+func remove_selection_from_layer(owner_id: int) -> bool:
+	var layer := layer_by_id(owner_id)
+	if layer.is_empty() or String(layer.classname) != "func_group":
+		message.emit("Remove Selection is only available on func_group layers.")
+		return false
+	var members: Dictionary = {}
+	for brush_id in layer.brush_ids:
+		members[int(brush_id)] = true
+	var ids := PackedInt64Array()
+	for id in selected:
+		if members.has(id):
+			ids.append(id)
+	if ids.is_empty():
+		return false
+	var locked := reject_locked_ids(ids, "move_brushes_to_owner")
+	if not locked.ok:
+		report(locked)
+		return false
+	var category := ineligible_move_category(ids)
+	if not category.is_empty():
+		message.emit("Cannot move a mixed selection that includes %s; move only worldspawn or func_group brushes." % category)
+		return false
+	return transact("Remove brushes from layer", func(): return document.move_brushes_to_owner(ids, _worldspawn_layer_id))
+
+func select_layer_members(owner_id: int, add := false) -> void:
+	var layer := layer_by_id(owner_id)
+	if layer.is_empty():
+		return
+	var ids := PackedInt64Array()
+	var omitted_hidden := 0
+	var omitted_locked := 0
+	var locked_layer := is_layer_locked(owner_id)
+	for brush_id in layer.brush_ids:
+		var item := brush(int(brush_id))
+		if locked_layer or layer_locked_for_brush(int(brush_id)):
+			omitted_locked += 1
+			continue
+		if not brush_visible(item):
+			omitted_hidden += 1
+			continue
+		ids.append(int(brush_id))
+	if add:
+		var combined: PackedInt64Array = selected.duplicate()
+		for id in ids:
+			if not combined.has(id):
+				combined.append(id)
+		select(combined)
+	else:
+		select(ids)
+	if omitted_hidden > 0 or omitted_locked > 0:
+		message.emit("Selected %d members; omitted %d hidden and %d locked." % [ids.size(), omitted_hidden, omitted_locked])

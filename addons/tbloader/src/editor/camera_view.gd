@@ -1825,10 +1825,19 @@ func finish_camera_left() -> void:
 		else:
 			apply_pick(camera_hit.brush_id, 0, camera_hit.face_index, false)
 	elif gesture == "move" and not movement.is_zero_approx():
+		if host.reject_locked_edit(host.session.selected, "translate_brushes"):
+			cancel_gesture()
+			return
 		host.session.transact("Move map selection", func(): return host.session.translate_brushes(host.session.selected, movement), "brush_translation")
 	elif gesture == "component" and not movement.is_zero_approx():
+		if host.reject_locked_edit(host.session.selected, "translate_components"):
+			cancel_gesture()
+			return
 		host.session.transact("Move map components", func(): return host.session.move_components(movement))
 	elif gesture == "rotate" and not is_zero_approx(angle):
+		if host.reject_locked_edit(host.session.selected, "rotate_brushes"):
+			cancel_gesture()
+			return
 		var pivot := camera_rotation_pivot
 		var axis := camera_rotation_axis
 		host.session.transact("Rotate map selection", func(): return host.session.document.rotate_brushes(host.session.selected, pivot, axis, angle))
@@ -1910,7 +1919,7 @@ func brush_aperture_hit(position: Vector2) -> Dictionary:
 		camera_map_position(scale_value), camera_map_direction(),
 		preview_direction_to_map(camera.global_basis.x), preview_direction_to_map(camera.global_basis.y),
 		size, camera.fov, position, selector_half_size,
-		host.session.hidden_brush_ids(), host.session.visibility_filter_mask())
+		host.session.pick_hidden_brush_ids(), host.session.visibility_filter_mask())
 
 func selected_aperture_face_hit(position: Vector2, ranked_ids: PackedInt64Array) -> Dictionary:
 	if host.session.selected.is_empty() or ranked_ids.is_empty():
@@ -2035,6 +2044,9 @@ func finish_ctrl_gesture() -> void:
 			host.session.components.clear()
 		apply_pick(component.get("brush_id", 0), 0, component.get("index", -1), true, false, true)
 	elif ctrl_gesture == "resize" and not ctrl_resize_delta.is_zero_approx():
+		if host.reject_locked_edit(host.session.selected, "translate_components"):
+			cancel_gesture()
+			return
 		var components := ctrl_resize_components.duplicate(true)
 		var movement := ctrl_resize_delta
 		var session = host.session

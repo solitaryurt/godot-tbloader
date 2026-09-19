@@ -88,6 +88,15 @@ std::vector<int64_t> unique(const PackedInt64Array &ids) {
 	for (int64_t id : ids) if (seen.insert(id).second) out.push_back(id);
 	return out;
 }
+bool world_geometry_classname(const char *classname) {
+	return classname && (std::strcmp(classname, "worldspawn") == 0 || std::strcmp(classname, "func_group") == 0);
+}
+bool world_geometry_classname(const std::string &classname) {
+	return world_geometry_classname(classname.c_str());
+}
+bool world_geometry_classname(const StringName &classname) {
+	return classname == StringName("worldspawn") || classname == StringName("func_group");
+}
 size_t map_geometry_work(const LMMapData &data) {
 	size_t work = 0;
 	for (int e = 0; e < data.entity_count; ++e) {
@@ -523,10 +532,13 @@ Dictionary TBMapDocument::check_face(int64_t id, int face, int64_t token, const 
 	}
 	PackedInt64Array ids; ids.push_back(id); return check_brushes(ids, operation);
 }
-Dictionary TBMapDocument::create_cuboid(Vector3 mins, Vector3 maxs, const String &texture) {
+Dictionary TBMapDocument::create_cuboid(Vector3 mins, Vector3 maxs, const String &texture, int64_t owner_id) {
 	if (!valid(mins) || !valid(maxs) || mins.x >= maxs.x || mins.y >= maxs.y || mins.z >= maxs.z || !token(texture)) return failure("INVALID_ARGUMENT", "Expected finite increasing bounds and a texture name", "create_cuboid");
+	auto owner = check_world_geometry_owner(owner_id, "create_cuboid"); if (!bool(owner["ok"])) return owner;
 	LMMapEdit edit(*materialize_current_source()); auto p = lm_edit_cuboid(native(mins), native(maxs), bytes(texture)); p.id = next_id;
-	edit.world().primitives.push_back(p); return finish_edit(edit, "create_cuboid", p.id);
+	LMEditEntity *entity = owner_id == 0 ? &edit.world() : edit.entity(int64_t(owner["value"]));
+	if (!entity) return failure("INVALID_ID", "Unknown entity handle", "create_cuboid");
+	entity->primitives.push_back(p); return finish_edit(edit, "create_cuboid", p.id);
 }
 Dictionary TBMapDocument::duplicate_brushes(const PackedInt64Array &ids) {
 	auto r = check_brushes(ids, "duplicate_brushes"); if (!bool(r["ok"])) return r;
@@ -1067,22 +1079,164 @@ Dictionary TBMapDocument::set_texture_sizes(const Dictionary &sizes) {
 }
 Dictionary TBMapDocument::export_selection(const PackedInt64Array &ids) const {
 	auto r = check_brushes(ids, "export_selection"); if (!bool(r["ok"])) return r;
-	LMMapEdit edit(*materialize_current_source()); auto list = unique(ids); std::set<int64_t> selected(list.begin(), list.end());
-	for (auto &e : edit.entities) e.primitives.erase(std::remove_if(e.primitives.begin(), e.primitives.end(), [&](const LMEditPrimitive &p) { return !selected.count(p.id); }), e.primitives.end());
-	edit.entities.erase(std::remove_if(edit.entities.begin(), edit.entities.end(), [](const LMEditEntity &e) { return e.primitives.empty(); }), edit.entities.end());
-	return success(false, text(edit.text()));
+	LMMapEdit source(*materialize_current_source()); auto list = unique(ids);
+	LMMapEdit clip;
+	LMEditEntity world_clip; world_clip.epairs.emplace_back("classname", "worldspawn");
+	std::vector<int64_t> gameplay_order;
+	std::unordered_map<int64_t, LMEditEntity> gameplay;
+	for (int64_t id : list) {
+		const auto *location = live_location(id, 'b');
+		auto &entity = source.entities[location->entity];
+		const LMEditPrimitive &primitive = entity.primitives[location->primitive];
+		if (world_geometry_classname(entity.property("classname"))) world_clip.primitives.push_back(primitive);
+		else {
+			if (!gameplay.count(entity.id)) {
+				gameplay_order.push_back(entity.id);
+				LMEditEntity copy; copy.epairs = entity.epairs; gameplay.emplace(entity.id, std::move(copy));
+			}
+			gameplay[entity.id].primitives.push_back(primitive);
+		}
+	}
+	if (!world_clip.primitives.empty()) clip.entities.push_back(std::move(world_clip));
+	for (int64_t id : gameplay_order) clip.entities.push_back(std::move(gameplay[id]));
+	return success(false, text(clip.text()));
 }
-Dictionary TBMapDocument::import_selection(const String &source) {
+Dictionary TBMapDocument::import_selection(const String &source, int64_t world_owner_id) {
 	if (source.strip_edges().is_empty()) return success(false, PackedInt64Array());
+	auto owner = check_world_geometry_owner(world_owner_id, "import_selection"); if (!bool(owner["ok"])) return owner;
 	std::shared_ptr<LMMapData> candidate; auto r = prepare(bytes(source), candidate, "import_selection", path); if (!bool(r["ok"])) return r;
 	LMMapEdit incoming(*candidate), edit(*materialize_current_source()); PackedInt64Array out; int64_t id = next_id;
+	LMEditEntity *world_target = world_owner_id == 0 ? &edit.world() : edit.entity(int64_t(owner["value"]));
+	if (!world_target) return failure("INVALID_ID", "Unknown entity handle", "import_selection");
 	for (auto &e : incoming.entities) {
 		for (auto &p : e.primitives) { if (p.patch) return failure("UNSUPPORTED_SYNTAX", "Patch clipboard import is unsupported", "import_selection"); p.id = id++; out.push_back(p.id); }
 		if (e.primitives.empty()) continue;
-		if (e.property("classname") == "worldspawn") { auto &world = edit.world(); world.primitives.insert(world.primitives.end(), e.primitives.begin(), e.primitives.end()); }
+		if (e.property("classname") == "worldspawn") world_target->primitives.insert(world_target->primitives.end(), e.primitives.begin(), e.primitives.end());
 		else { e.id = id++; edit.entities.push_back(e); }
 	}
 	return finish_edit(edit, "import_selection", out);
+}
+int64_t TBMapDocument::resolved_world_owner_id(int64_t owner_id) const {
+	if (owner_id != 0) return owner_id;
+	for (int e = 0; e < map->entity_count; ++e) if (std::strcmp(map->entities[e].get_property("classname"), "worldspawn") == 0) return map->entities[e].id;
+	return 0;
+}
+Dictionary TBMapDocument::check_world_geometry_owner(int64_t owner_id, const StringName &operation) const {
+	const int64_t id = resolved_world_owner_id(owner_id);
+	const auto *location = live_location(id, 'e');
+	if (!location) {
+		Dictionary r = failure("INVALID_ID", "Unknown entity handle", operation); Dictionary error = r["error"]; error["entity_id"] = id; return r;
+	}
+	if (!world_geometry_classname(StringName(map->entities[location->entity].get_property("classname")))) {
+		Dictionary r = failure("INELIGIBLE_OWNER", "Owner must be worldspawn or func_group", operation); Dictionary error = r["error"]; error["entity_id"] = id; return r;
+	}
+	return success(false, id);
+}
+Dictionary TBMapDocument::world_geometry_owner_descriptor(int entity_index) const {
+	auto &entity = map->entities[entity_index];
+	Dictionary out;
+	out["id"] = entity.id;
+	out["classname"] = String::utf8(entity.get_property("classname"));
+	out["targetname"] = String::utf8(entity.get_property("targetname"));
+	PackedInt64Array brush_ids;
+	int patch_count = 0;
+	for (int p = 0; p < entity.primitive_count; ++p) {
+		if (entity.primitives[p].is_patch) ++patch_count;
+		else brush_ids.push_back(entity.brushes[entity.primitives[p].index].id);
+	}
+	out["brush_ids"] = brush_ids;
+	out["brush_count"] = int64_t(brush_ids.size());
+	out["patch_count"] = int64_t(patch_count);
+	out["source_index"] = entity_index;
+	return out;
+}
+Dictionary TBMapDocument::create_func_group(const String &targetname) {
+	if (!token(targetname, true)) return failure("INVALID_ARGUMENT", "Invalid epair", "create_func_group");
+	LMMapEdit edit(*materialize_current_source()); LMEditEntity entity; entity.id = next_id; entity.epairs.emplace_back("classname", "func_group");
+	if (!targetname.is_empty()) entity.epairs.emplace_back("targetname", bytes(targetname));
+	edit.entities.push_back(entity); return finish_edit(edit, "create_func_group", entity.id);
+}
+Dictionary TBMapDocument::move_brushes_to_owner(const PackedInt64Array &ids, int64_t owner_id) {
+	auto owner = check_world_geometry_owner(owner_id, "move_brushes_to_owner"); if (!bool(owner["ok"])) return owner;
+	const int64_t target_id = int64_t(owner["value"]);
+	const auto list = unique(ids);
+	if (list.empty()) return success();
+	for (int64_t id : list) {
+		auto found = live_ids.find(id);
+		if (found == live_ids.end()) {
+			Dictionary r = failure("INVALID_ID", "Unknown brush handle", "move_brushes_to_owner"); Dictionary error = r["error"]; error["brush_id"] = id; return r;
+		}
+		if (found->second.kind == 'p') {
+			Dictionary r = failure("INVALID_ARGUMENT", "Cannot move patches", "move_brushes_to_owner"); Dictionary error = r["error"]; error["brush_id"] = id; return r;
+		}
+		if (found->second.kind != 'b') {
+			Dictionary r = failure("INVALID_ARGUMENT", "Expected a brush handle", "move_brushes_to_owner"); Dictionary error = r["error"]; error["brush_id"] = id; return r;
+		}
+		auto owned = brush_owners.find(id);
+		if (owned == brush_owners.end() || !world_geometry_classname(owned->second.classname)) {
+			Dictionary r = failure("INELIGIBLE_OWNER", "Brush must be owned by worldspawn or func_group", "move_brushes_to_owner"); Dictionary error = r["error"]; error["brush_id"] = id; return r;
+		}
+	}
+	LMMapEdit edit(*materialize_current_source());
+	LMEditEntity *target = edit.entity(target_id); if (!target) return failure("INVALID_ID", "Unknown entity handle", "move_brushes_to_owner");
+	std::vector<LMEditPrimitive> moved; std::set<int64_t> moving;
+	for (int64_t id : list) {
+		const auto *location = live_location(id, 'b');
+		if (edit.entities[location->entity].id == target_id) continue;
+		moved.push_back(edit.entities[location->entity].primitives[location->primitive]);
+		moving.insert(id);
+	}
+	if (moving.empty()) return finish_edit(edit, "move_brushes_to_owner", PackedInt64Array(ids));
+	for (auto &entity : edit.entities) if (entity.id != target_id) {
+		entity.primitives.erase(std::remove_if(entity.primitives.begin(), entity.primitives.end(), [&](const LMEditPrimitive &p) { return moving.count(p.id); }), entity.primitives.end());
+	}
+	target->primitives.insert(target->primitives.end(), moved.begin(), moved.end());
+	PackedInt64Array out; for (int64_t id : list) out.push_back(id);
+	return finish_edit(edit, "move_brushes_to_owner", out);
+}
+Dictionary TBMapDocument::get_world_geometry_owners() const {
+	Array owners;
+	int world_index = -1;
+	for (int e = 0; e < map->entity_count; ++e) if (std::strcmp(map->entities[e].get_property("classname"), "worldspawn") == 0) { world_index = e; break; }
+	if (world_index >= 0) owners.push_back(world_geometry_owner_descriptor(world_index));
+	for (int e = 0; e < map->entity_count; ++e) if (std::strcmp(map->entities[e].get_property("classname"), "func_group") == 0) owners.push_back(world_geometry_owner_descriptor(e));
+	return success(false, owners);
+}
+Dictionary TBMapDocument::get_brush_owner(int64_t brush_id) const {
+	const auto *location = live_location(brush_id, 'b');
+	if (!location) {
+		Dictionary r = failure("INVALID_ID", "Unknown brush handle", "get_brush_owner"); Dictionary error = r["error"]; error["brush_id"] = brush_id; return r;
+	}
+	auto &entity = map->entities[location->entity];
+	Dictionary out;
+	out["id"] = entity.id;
+	out["classname"] = String::utf8(entity.get_property("classname"));
+	out["eligible"] = world_geometry_classname(entity.get_property("classname"));
+	out["entity_index"] = location->entity;
+	out["primitive_index"] = location->primitive;
+	out["source_index"] = location->entity;
+	return success(false, out);
+}
+Dictionary TBMapDocument::delete_func_group_layer(int64_t entity_id) {
+	LMMapEdit edit(*materialize_current_source()); auto entity = edit_entity(edit, entity_id);
+	if (!entity) {
+		Dictionary r = failure("INVALID_ID", "Unknown entity handle", "delete_func_group_layer"); Dictionary error = r["error"]; error["entity_id"] = entity_id; return r;
+	}
+	const std::string classname = entity->property("classname");
+	if (classname == "worldspawn") {
+		Dictionary r = failure("INVALID_ARGUMENT", "Cannot delete worldspawn", "delete_func_group_layer"); Dictionary error = r["error"]; error["entity_id"] = entity_id; return r;
+	}
+	if (classname != "func_group") {
+		Dictionary r = failure("INELIGIBLE_OWNER", "Layer delete requires a func_group", "delete_func_group_layer"); Dictionary error = r["error"]; error["entity_id"] = entity_id; return r;
+	}
+	for (const auto &primitive : entity->primitives) if (primitive.patch) {
+		Dictionary r = failure("UNSUPPORTED_SYNTAX", "Cannot delete patch-owning entities", "delete_func_group_layer"); Dictionary error = r["error"]; error["entity_id"] = entity_id; return r;
+	}
+	std::vector<LMEditPrimitive> moved;
+	for (const auto &primitive : entity->primitives) if (!primitive.patch) moved.push_back(primitive);
+	edit.entities.erase(std::remove_if(edit.entities.begin(), edit.entities.end(), [&](const LMEditEntity &item) { return item.id == entity_id; }), edit.entities.end());
+	if (!moved.empty()) { auto &world = edit.world(); world.primitives.insert(world.primitives.end(), moved.begin(), moved.end()); }
+	return finish_edit(edit, "delete_func_group_layer");
 }
 Dictionary TBMapDocument::create_point_entity(const String &classname, Vector3 origin) {
 	if (!token(classname) || classname == "worldspawn" || !valid(origin)) return failure("INVALID_ARGUMENT", "Expected non-world classname and finite origin", "create_point_entity");
