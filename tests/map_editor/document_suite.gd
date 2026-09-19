@@ -182,14 +182,32 @@ func test_spatial_queries() -> void:
 	var exact_second: int = exact_doc.create_cuboid(Vector3(-10, -10, -10), Vector3(10, 10, 10), "stone").value
 	var no_ids := PackedInt64Array()
 	var exact_hit: Dictionary = exact_doc.query_brush_2d_hit(2, Vector3.ZERO, 0.0, no_ids, 0, no_ids, false)
-	checks.check(exact_hit.get("brush_id", 0) == exact_second, "exact 2D hit preserves reverse source draw order")
+	checks.check(exact_hit.get("brush_id", 0) == exact_second and exact_hit.brush_ids == PackedInt64Array([exact_second, exact_first]),
+		"exact 2D hit exposes deterministic ranked overlap candidates")
 	exact_hit = exact_doc.query_brush_2d_hit(2, Vector3.ZERO, 0.0, no_ids, 0, PackedInt64Array([exact_first]), true)
 	checks.check(exact_hit.get("brush_id", 0) == exact_first, "exact 2D hit gives selected overlap priority")
 	exact_hit = exact_doc.query_brush_2d_hit(2, Vector3.ZERO, 0.0, PackedInt64Array([exact_second]), 0, no_ids, false)
 	checks.check(exact_hit.get("brush_id", 0) == exact_first, "exact 2D hit passes through explicitly hidden brushes")
-	checks.check(exact_doc.query_brush_2d_hit(2, Vector3(15, 0, 0), 6.0, no_ids, 0, no_ids, false).get("brush_id", 0) == exact_second
-		and exact_doc.query_brush_2d_hit(2, Vector3(17, 0, 0), 6.0, no_ids, 0, no_ids, false).is_empty(),
-		"exact 2D edge tolerance includes near misses and rejects farther points")
+	checks.check(exact_doc.query_brush_2d_hit(2, Vector3(16, 16, 0), 6.0, no_ids, 0, no_ids, false).get("brush_id", 0) == exact_second
+		and exact_doc.query_brush_2d_hit(2, Vector3(16.01, 16.01, 0), 6.0, no_ids, 0, no_ids, false).is_empty(),
+		"exact 2D tolerance is a half-size square including its corners")
+	var ranked_doc = ClassDB.instantiate("TBMapDocument")
+	var indirect_far: int = ranked_doc.create_cuboid(Vector3(4, -5, 100), Vector3(14, 5, 110), "stone").value
+	var indirect_near: int = ranked_doc.create_cuboid(Vector3(2, -5, 0), Vector3(12, 5, 10), "stone").value
+	var direct_deep: int = ranked_doc.create_cuboid(Vector3(-1, -1, -100), Vector3(1, 1, -90), "stone").value
+	var ranked: PackedInt64Array = ranked_doc.query_brush_2d_hit(2, Vector3.ZERO, 12.0, no_ids, 0, no_ids, false).brush_ids
+	checks.check(ranked == PackedInt64Array([direct_deep, indirect_near, indirect_far]),
+		"2D geometric ranking puts interiors first, then edge distance before hidden-axis depth")
+	var depth_doc = ClassDB.instantiate("TBMapDocument")
+	var depth_near: int = depth_doc.create_cuboid(Vector3(-5, -5, 20), Vector3(5, 5, 30), "stone").value
+	var depth_far: int = depth_doc.create_cuboid(Vector3(-5, -5, -30), Vector3(5, 5, -20), "stone").value
+	checks.check(depth_doc.query_brush_2d_hit(2, Vector3.ZERO, 12.0, no_ids, 0, no_ids, false).brush_ids
+		== PackedInt64Array([depth_near, depth_far]), "2D overlap ranking uses orthographic hidden-axis depth, not source order")
+	var front_near: int = depth_doc.create_cuboid(Vector3(-5, -50, -5), Vector3(5, -40, 5), "stone").value
+	var front_far: int = depth_doc.create_cuboid(Vector3(-5, 40, -5), Vector3(5, 50, 5), "stone").value
+	checks.check(depth_doc.query_brush_2d_hit(1, Vector3.ZERO, 12.0, no_ids, 0, no_ids, false).brush_ids
+		== PackedInt64Array([front_near, front_far]),
+		"Front grid depth follows NRC's opposite hidden-axis view direction")
 	expect_ok(exact_doc.rotate_brushes(PackedInt64Array([exact_second]), Vector3.ZERO, 2, PI / 4.0), "rotate exact 2D narrow-phase fixture")
 	exact_hit = exact_doc.query_brush_2d_hit(2, Vector3(13.5, 13.5, 0), 0.0, PackedInt64Array([exact_first]), 0, no_ids, false)
 	checks.check(exact_doc.query_brushes_2d(2, Vector3(13.5, 13.5, 0), Vector3(13.5, 13.5, 0)).has(exact_second) and exact_hit.is_empty(),
@@ -200,8 +218,51 @@ func test_spatial_queries() -> void:
 		"exact 2D hit excludes brushes whose every face is material-filtered")
 	var filtered_brush: Dictionary = brush_data(filtered_doc, filtered)
 	expect_ok(filtered_doc.set_face_texture(filtered, 0, "stone", filtered_brush.topology_revision), "make mixed exact-hit fixture")
-	checks.check(filtered_doc.query_brush_2d_hit(2, Vector3(5, 5, 0), 0.0, no_ids, 2, no_ids, false).get("brush_id", 0) == filtered,
-		"exact 2D hit preserves mixed-brush visibility")
+	checks.check(filtered_doc.query_brush_2d_hit(2, Vector3(5, 5, 0), 0.0, no_ids, 2, no_ids, false).is_empty()
+		and filtered_doc.query_brush_2d_hit(0, Vector3(0, 5, 5), 0.0, no_ids, 2, no_ids, false).get("brush_id", 0) == filtered,
+		"exact 2D hit tests only visible faces of a mixed filtered brush")
+
+	var camera_args := [Vector3.ZERO, Vector3.BACK, Vector3.RIGHT, Vector3.UP, Vector2(100, 100), 90.0]
+	var aperture_doc = ClassDB.instantiate("TBMapDocument")
+	var aperture_id: int = aperture_doc.create_cuboid(Vector3(20, -5, 100), Vector3(30, 5, 110), "stone").value
+	var camera_hit: Dictionary = aperture_doc.query_brush_camera_hit(camera_args[0], camera_args[1], camera_args[2], camera_args[3],
+		camera_args[4], camera_args[5], Vector2(77, 50), 12.0, no_ids, 0)
+	checks.check(camera_hit.get("brush_id", 0) == aperture_id and not camera_hit.direct
+		and aperture_doc.query_brush_camera_hit(camera_args[0], camera_args[1], camera_args[2], camera_args[3],
+			camera_args[4], camera_args[5], Vector2(77.1, 50), 12.0, no_ids, 0).is_empty(),
+		"camera hit uses an inclusive 12px projected square aperture for edge near-misses")
+	var camera_rank_doc = ClassDB.instantiate("TBMapDocument")
+	var edge_near: int = camera_rank_doc.create_cuboid(Vector3(8, -5, 40), Vector3(12, 5, 50), "stone").value
+	var interior_deep: int = camera_rank_doc.create_cuboid(Vector3(-2, -2, 100), Vector3(2, 2, 110), "stone").value
+	camera_hit = camera_rank_doc.query_brush_camera_hit(camera_args[0], camera_args[1], camera_args[2], camera_args[3],
+		camera_args[4], camera_args[5], Vector2(50, 50), 12.0, no_ids, 0)
+	checks.check(camera_hit.brush_ids == PackedInt64Array([interior_deep, edge_near]),
+		"camera ranking puts polygon interiors before closer nearby edges")
+	var camera_depth_doc = ClassDB.instantiate("TBMapDocument")
+	var depth_near_camera: int = camera_depth_doc.create_cuboid(Vector3(-5, -5, 20), Vector3(5, 5, 30), "stone").value
+	var depth_far_camera: int = camera_depth_doc.create_cuboid(Vector3(-5, -5, 60), Vector3(5, 5, 70), "stone").value
+	camera_hit = camera_depth_doc.query_brush_camera_hit(camera_args[0], camera_args[1], camera_args[2], camera_args[3],
+		camera_args[4], camera_args[5], Vector2(50, 50), 12.0, no_ids, 0)
+	checks.check(camera_hit.brush_ids == PackedInt64Array([depth_near_camera, depth_far_camera]),
+		"camera overlap candidates are ranked nearest-first for deterministic cycling")
+	checks.check(camera_depth_doc.query_brush_camera_hit(camera_args[0], camera_args[1], camera_args[2], camera_args[3],
+		camera_args[4], camera_args[5], Vector2(50, 50), 12.0, PackedInt64Array([depth_near_camera]), 0).brush_ids
+		== PackedInt64Array([depth_far_camera]), "camera aperture excludes explicitly hidden brushes")
+	var camera_filter_doc = ClassDB.instantiate("TBMapDocument")
+	camera_filter_doc.create_cuboid(Vector3(-5, -5, 20), Vector3(5, 5, 30), "common/caulk")
+	checks.check(camera_filter_doc.query_brush_camera_hit(camera_args[0], camera_args[1], camera_args[2], camera_args[3],
+		camera_args[4], camera_args[5], Vector2(50, 50), 12.0, no_ids, 2).is_empty(),
+		"camera aperture candidates cannot be contributed by material-filtered faces")
+	var behind_doc = ClassDB.instantiate("TBMapDocument")
+	behind_doc.create_cuboid(Vector3(-5, -5, -30), Vector3(5, 5, -20), "stone")
+	checks.check(behind_doc.query_brush_camera_hit(camera_args[0], camera_args[1], camera_args[2], camera_args[3],
+		camera_args[4], camera_args[5], Vector2(50, 50), 12.0, no_ids, 0).is_empty(),
+		"camera projection rejects geometry wholly behind the camera")
+	var enclosing_doc = ClassDB.instantiate("TBMapDocument")
+	enclosing_doc.create_cuboid(Vector3(-10, -10, -10), Vector3(10, 10, 10), "stone")
+	checks.check(enclosing_doc.query_brush_camera_hit(camera_args[0], camera_args[1], camera_args[2], camera_args[3],
+		camera_args[4], camera_args[5], Vector2(50, 50), 12.0, no_ids, 0).is_empty(),
+		"filled camera aperture rejects back-facing exit faces when the camera is inside a brush")
 
 	var ray_doc = ClassDB.instantiate("TBMapDocument")
 	var ray_first: int = ray_doc.create_cuboid(Vector3.ZERO, Vector3(10, 10, 10), "first/texture").value
@@ -1186,7 +1247,11 @@ func test_document() -> void:
 	checks.check(FileAccess.get_file_as_string("user://document.map") == saved_text, "failed Save As retains original file")
 	# Force rename failure after a complete sibling-temp write, retaining destination.
 	var blocked = "user://destination-directory"
-	checks.check(DirAccess.make_dir_absolute(blocked) == OK, "create blocked destination")
+	var blocked_absolute := ProjectSettings.globalize_path(blocked)
+	if not DirAccess.dir_exists_absolute(blocked_absolute):
+		checks.check(DirAccess.make_dir_absolute(blocked_absolute) == OK, "create blocked destination")
+	else:
+		checks.check(true, "create blocked destination")
 	write_text(blocked + "/sentinel", "keep")
 	expect_failure(doc, doc.save_map(blocked), before, "IO_WRITE", "save_map")
 	checks.check(FileAccess.get_file_as_string(blocked + "/sentinel") == "keep", "rename failure preserves destination")
@@ -1204,7 +1269,9 @@ func test_document() -> void:
 	checks.check(foreign.export_text().value == saved_text, "reopen semantic content")
 	var target_absolute = ProjectSettings.globalize_path("user://save-as.map")
 	var link_absolute = ProjectSettings.globalize_path("user://linked.map")
-	checks.check(OS.execute("ln", ["-s", target_absolute, link_absolute]) == 0, "create path alias fixture")
+	if FileAccess.file_exists(link_absolute) or DirAccess.dir_exists_absolute(link_absolute):
+		DirAccess.remove_absolute(link_absolute)
+	checks.check(OS.execute("ln", PackedStringArray(["-sfn", target_absolute, link_absolute])) == 0, "create path alias fixture")
 	expect_ok(foreign.load_map("user://linked.map"), "load via symlink")
 	var foreign_before = state(foreign)
 	write_text("user://save-as.map", "external alias change")

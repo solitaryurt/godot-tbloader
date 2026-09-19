@@ -17,6 +17,8 @@ var anchor = Vector3.ZERO
 var delta = Vector3.ZERO
 var resize_face: Dictionary = {}
 var drag_component: Dictionary = {}
+var click_cycle_ids := PackedInt64Array()
+var click_cycle_id := 0
 var clip_points: Array[Vector3]:
 	get:
 		return host.cut_points if is_instance_valid(host) else []
@@ -77,6 +79,8 @@ var visible_query_misses := 0
 var sparse_edge_buffer := PackedVector2Array()
 var selection_edge_buffer := PackedVector2Array()
 var selection_mask_buffer := PackedVector2Array()
+var edge_handle_buffer := PackedVector3Array()
+var overlay_font: Font
 var selection_redraw_count := 0
 var selection_mask_point_count := 0
 var camera_redraw_count := 0
@@ -89,6 +93,12 @@ const DENSE_EDGE_POINT_BYTES = 8
 const DENSE_EDGE_RANGE_BYTES = 16
 const CONTEXT_DRAG_THRESHOLD = 4.0
 const TRACKPAD_ZOOM_FACTOR = 1.25
+@export_range(2.0, 64.0, 1.0) var selector_half_size = 12.0
+
+func _overlay_font() -> Font:
+	if overlay_font == null:
+		overlay_font = ThemeDB.fallback_font
+	return overlay_font
 
 func _ready() -> void:
 	focus_mode = Control.FOCUS_ALL
@@ -96,6 +106,7 @@ func _ready() -> void:
 	custom_minimum_size = Vector2(240, 180)
 	clip_contents = true
 	tooltip_text = "Components: Shift-click adds/toggles; Alt-click cycles overlapping handles. Drag a selected handle to move the group; hold Shift during motion to constrain an axis."
+	_overlay_font()
 	static_layer = create_draw_layer("StaticMap")
 	selection_layer = create_draw_layer("SelectionTools")
 	camera_layer = create_draw_layer("CameraMarker")
@@ -331,6 +342,8 @@ func frame_selection() -> void:
 
 func cancel() -> void:
 	gesture = ""
+	click_cycle_ids.clear()
+	click_cycle_id = 0
 	delta = Vector3.ZERO
 	rotation_angle = 0.0
 	resize_face.clear()
@@ -361,9 +374,14 @@ func update_exact_preview() -> void:
 			preview_result(host.session.document.preview_translate_components(host.session.components, delta))
 
 func hit_brush(position: Vector2, prefer_selected := false) -> int:
-	var hit: Dictionary = host.session.document.query_brush_2d_hit(orientation, unproject(position), 6.0 / zoom,
+	var hit: Dictionary = host.session.document.query_brush_2d_hit(orientation, unproject(position), selector_half_size / zoom,
 		host.session.hidden_brush_ids(), host.session.visibility_filter_mask(), host.session.selected, prefer_selected)
 	return hit.get("brush_id", 0)
+
+func hit_brushes(position: Vector2) -> PackedInt64Array:
+	var hit: Dictionary = host.session.document.query_brush_2d_hit(orientation, unproject(position), selector_half_size / zoom,
+		host.session.hidden_brush_ids(), host.session.visibility_filter_mask(), host.session.selected, false)
+	return hit.get("brush_ids", PackedInt64Array())
 
 func hit_point(position: Vector2) -> int:
 	if not host.session.marker_visible():
@@ -749,6 +767,19 @@ func selected_edge_data(map_space := true) -> PackedVector2Array:
 			result.append(map_edge_point(q) if map_space else project(q))
 	return result
 
+func _local_pointer(event: InputEvent) -> Variant:
+	var bounds := Rect2(Vector2.ZERO, size)
+	if bounds.has_point(event.position):
+		return event.position
+	if event is InputEventMouse:
+		var from_global: Vector2 = event.global_position - global_position
+		if bounds.has_point(from_global):
+			return from_global
+		from_global = event.position - global_position
+		if bounds.has_point(from_global):
+			return from_global
+	return event.position
+
 func _gui_input(event: InputEvent) -> void:
 	if event is InputEventKey:
 		if host.route_key(event, self):
@@ -762,6 +793,12 @@ func _gui_input(event: InputEvent) -> void:
 			cancel()
 			return
 		if event.pressed:
+			var local = _local_pointer(event)
+			if typeof(local) != TYPE_VECTOR2:
+				return
+			if local != event.position:
+				event = event.duplicate()
+				event.position = local
 			grab_focus()
 			host.active_graph = self
 			host.refresh_status()
@@ -805,7 +842,7 @@ func _gui_input(event: InputEvent) -> void:
 	elif event is InputEventMouseMotion and gesture != "":
 		cursor = event.position
 		shift_drag = event.shift_pressed
-		ctrl_drag = event.ctrl_pressed
+		ctrl_drag = event.is_command_or_control_pressed()
 		if gesture == "paint_select":
 			if event.shift_pressed:
 				paint_select(cursor)
@@ -857,7 +894,7 @@ func begin_left(event: InputEventMouseButton) -> void:
 	anchor = unproject(start)
 	delta = Vector3.ZERO
 	shift_drag = event.shift_pressed
-	ctrl_drag = event.ctrl_pressed
+	ctrl_drag = event.is_command_or_control_pressed()
 	if host.tool == "Cut":
 		host.add_cut_point(snap_point(anchor), orientation)
 		host.preview_clip(false, self)
@@ -884,8 +921,9 @@ func begin_left(event: InputEventMouseButton) -> void:
 			gesture = "rotate"
 		queue_selection_redraw()
 		return
-	if (host.tool in ["Face", "Vertex", "Edge"] or event.ctrl_pressed) and not host.session.selected.is_empty():
-		var component = pick_component(start, "Face" if event.ctrl_pressed else host.tool, event.alt_pressed)
+	var quick_face := event.is_command_or_control_pressed()
+	if (host.tool in ["Face", "Vertex", "Edge"] or quick_face) and not host.session.selected.is_empty():
+		var component = pick_component(start, "Face" if quick_face else host.tool, event.alt_pressed)
 		host.session.select_component(component, event.shift_pressed)
 		if not component.is_empty() and not event.shift_pressed:
 			drag_component = component.duplicate()
@@ -893,6 +931,8 @@ func begin_left(event: InputEventMouseButton) -> void:
 		return
 	var point_id = hit_point(start)
 	var id = hit_brush(start, not event.shift_pressed)
+	click_cycle_ids = hit_brushes(start) if not event.shift_pressed and not point_id else PackedInt64Array()
+	click_cycle_id = id if host.session.selected.has(id) else 0
 	if event.shift_pressed:
 		var ids = host.session.selected.duplicate()
 		var points = host.session.points.duplicate()
@@ -980,6 +1020,10 @@ func finish_left(event: InputEventMouseButton) -> void:
 				return session.document.translate_face(component.brush_id, component.index, movement, component.topology_revision))
 		else:
 			session.transact("Move map components", func(): return session.move_components(movement))
+	elif gesture == "move" and click_cycle_id and click_cycle_ids.size() > 1:
+		var current := click_cycle_ids.find(click_cycle_id)
+		if current >= 0:
+			session.select(PackedInt64Array([click_cycle_ids[(current + 1) % click_cycle_ids.size()]]))
 	elif gesture == "rotate" and not is_zero_approx(rotation_angle):
 		var angle = rotation_angle
 		var pivot = rotation_pivot
@@ -1229,11 +1273,15 @@ func draw_selection_layer(canvas: Control) -> void:
 			if host.tool in ["Vertex", "Edge"]:
 				var vertices: PackedVector3Array = brush.vertices
 				if host.tool == "Edge":
-					vertices = PackedVector3Array()
+					var handle_count: int = brush.edge_vertex_indices.size() / 2
+					edge_handle_buffer.resize(handle_count)
 					for i in range(0, brush.edge_vertex_indices.size(), 2):
-						vertices.append((brush.vertices[brush.edge_vertex_indices[i]] + brush.vertices[brush.edge_vertex_indices[i + 1]]) * 0.5)
+						edge_handle_buffer[i / 2] = (brush.vertices[brush.edge_vertex_indices[i]] + brush.vertices[brush.edge_vertex_indices[i + 1]]) * 0.5
+					vertices = edge_handle_buffer
 				for p in vertices:
-					canvas.draw_circle(project(p), 4, color)
+					var screen := project(p)
+					if query.rect.has_point(screen):
+						canvas.draw_circle(screen, 4, color)
 			for component in host.session.components:
 				if component.brush_id != brush.id or not host.session.component_valid(component, brush):
 					continue
@@ -1255,9 +1303,11 @@ func draw_selection_layer(canvas: Control) -> void:
 	if host.session.marker_visible():
 		for marker in host.session.point_markers():
 			var p = project(marker.origin + (delta if gesture == "move" and host.session.points.has(marker.id) else Vector3.ZERO))
+			if not query.rect.has_point(p):
+				continue
 			var color = Color("ffb657") if host.session.points.has(marker.id) else Color("83dfbd")
 			canvas.draw_rect(Rect2(p - Vector2.ONE * 6, Vector2.ONE * 12), color, false, 2)
-			canvas.draw_string(ThemeDB.fallback_font, p + Vector2(10, -5), marker.classname, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, color)
+			canvas.draw_string(_overlay_font(), p + Vector2(10, -5), marker.classname, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, color)
 
 func draw_tool_layer(canvas: Control) -> void:
 	if gesture in ["create", "box"]:
@@ -1272,15 +1322,15 @@ func draw_tool_layer(canvas: Control) -> void:
 		canvas.draw_line(pivot - Vector2(0, 11), pivot + Vector2(0, 11), Color("ffda8e"), 1, true)
 		if gesture == "rotate":
 			canvas.draw_line(pivot, cursor, Color("ffda8e"), 2, true)
-			canvas.draw_string(ThemeDB.fallback_font, pivot + Vector2(12, -12), "%d°" % roundi(rad_to_deg(rotation_angle)), HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("ffda8e"))
+			canvas.draw_string(_overlay_font(), pivot + Vector2(12, -12), "%d°" % roundi(rad_to_deg(rotation_angle)), HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("ffda8e"))
 	for i in clip_points.size():
 		var p = project(clip_points[i])
 		canvas.draw_circle(p, 5, Color("fc7373"))
-		canvas.draw_string(ThemeDB.fallback_font, p + Vector2(8, -8), str(i + 1), HORIZONTAL_ALIGNMENT_LEFT, -1, 14)
+		canvas.draw_string(_overlay_font(), p + Vector2(8, -8), str(i + 1), HORIZONTAL_ALIGNMENT_LEFT, -1, 14)
 		if i:
 			canvas.draw_line(project(clip_points[i - 1]), p, Color("fc7373"), 2, true)
 	canvas.draw_rect(Rect2(0, 0, size.x, 36), Color(0.08, 0.1, 0.14, 0.95))
-	canvas.draw_string(ThemeDB.fallback_font, Vector2(38, 23), "Ctrl+Tab  •  %.3f px/u%s" % [zoom, "  • ACTIVE" if has_focus() else ""], HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("b9cfdf"))
+	canvas.draw_string(_overlay_font(), Vector2(38, 23), "Ctrl+Tab  •  %.3f px/u%s" % [zoom, "  • ACTIVE" if has_focus() else ""], HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("b9cfdf"))
 
 func draw_camera_layer(canvas: Control) -> void:
 	if not camera_pose_valid:

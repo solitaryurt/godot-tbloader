@@ -90,14 +90,19 @@ const LMBrush &TBMapDocument::current_brush(int entity, int brush) const {
 	return base;
 }
 
-std::string TBMapDocument::current_face_texture(int entity, int brush, int face) const {
+const char *TBMapDocument::current_face_texture_cstr(int entity, int brush, int face) const {
 	const LMBrush &base = map->entities[entity].brushes[brush];
 	if (editor) {
 		auto found = editor->brushes.find(base.id);
-		if (found != editor->brushes.end()) return found->second->materials[face];
+		if (found != editor->brushes.end()) return found->second->materials[face].c_str();
 	}
 	const int texture = base.faces[face].texture_idx;
-	return texture >= 0 && texture < map->texture_count ? std::string(map->textures[texture].name) : std::string();
+	return texture >= 0 && texture < map->texture_count ? map->textures[texture].name : "";
+}
+
+std::string TBMapDocument::current_face_texture(int entity, int brush, int face) const {
+	const char *name = current_face_texture_cstr(entity, brush, face);
+	return name ? std::string(name) : std::string();
 }
 
 TBMapDocument::BrushGeometryView TBMapDocument::current_brush_geometry(int entity, int brush) const {
@@ -515,6 +520,24 @@ Dictionary TBMapDocument::save_map(const String &target) {
 }
 
 Dictionary TBMapDocument::export_text() const { return success(false, string(canonical_text())); }
+bool TBMapDocument::copy_identities(const LMMapData &from, LMMapData &to) const {
+	if (from.entity_count != to.entity_count) return false;
+	for (int i = 0; i < from.entity_count; ++i) {
+		const auto &src = from.entities[i];
+		auto &dst = to.entities[i];
+		if (src.primitive_count != dst.primitive_count) return false;
+		dst.id = src.id;
+		for (int k = 0; k < src.primitive_count; ++k) {
+			const auto &sp = src.primitives[k];
+			const auto &dp = dst.primitives[k];
+			if (sp.is_patch != dp.is_patch) return false;
+			if (sp.is_patch) dst.patches[dp.index].id = src.patches[sp.index].id;
+			else dst.brushes[dp.index].id = src.brushes[sp.index].id;
+		}
+	}
+	return true;
+}
+
 Dictionary TBMapDocument::identities(const LMMapData &data) const {
 	Array entities;
 	for (int i = 0; i < data.entity_count; ++i) {
@@ -747,15 +770,16 @@ Dictionary TBMapDocument::apply_document_change(const Ref<TBMapDocumentChange> &
 }
 Dictionary TBMapDocument::rebuild() {
 	std::shared_ptr<LMMapData> candidate;
-	const std::string current_text = canonical_text();
+	const std::string &current_text = canonical_text();
+	const std::shared_ptr<const std::string> kept = (!editor || editor->brushes.empty()) ? canonical : materialized_canonical;
 	Dictionary result = prepare(current_text, candidate, "rebuild", path);
 	if (!bool(result["ok"])) return result;
-	apply_identities(*candidate, identities(*map));
+	copy_identities(*map, *candidate);
 	std::shared_ptr<const TBMapDocumentState::BaseEditorGeometry> geometry;
 	result = build_base_editor_geometry(*candidate, texture_sizes, geometry, "rebuild", path); if (!bool(result["ok"])) return result;
 	++topology;
 	for (int i = 0; i < candidate->entity_count; ++i) for (int b = 0; b < candidate->entities[i].brush_count; ++b) candidate->entities[i].brushes[b].topology_revision = topology;
-	map = candidate; base_geometry = std::move(geometry); canonical = std::make_shared<const std::string>(current_text); clear_editor_state();
+	map = candidate; base_geometry = std::move(geometry); canonical = kept ? kept : std::make_shared<const std::string>(current_text); clear_editor_state();
 	rebuild_live_index();
 	invalidate_spatial_index();
 	invalidate_preview_cache();
@@ -826,6 +850,7 @@ void TBMapDocument::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_preview_chunk", "chunk_id"), &TBMapDocument::get_preview_chunk);
 	ClassDB::bind_method(D_METHOD("query_brushes_2d", "hidden_axis", "mins", "maxs"), &TBMapDocument::query_brushes_2d);
 	ClassDB::bind_method(D_METHOD("query_brush_2d_hit", "hidden_axis", "point", "tolerance", "hidden_ids", "filter_mask", "selected_ids", "prefer_selected"), &TBMapDocument::query_brush_2d_hit);
+	ClassDB::bind_method(D_METHOD("query_brush_camera_hit", "origin", "forward", "right", "up", "viewport_size", "vertical_fov", "position", "aperture", "hidden_ids", "filter_mask"), &TBMapDocument::query_brush_camera_hit);
 	ClassDB::bind_method(D_METHOD("query_ray", "origin", "direction", "max_distance"), &TBMapDocument::query_ray, DEFVAL(1e30));
 	ClassDB::bind_method(D_METHOD("query_ray_nearest_visible", "origin", "direction", "max_distance", "hidden_ids", "filter_mask"), &TBMapDocument::query_ray_nearest_visible);
 	ClassDB::bind_method(D_METHOD("create_cuboid", "mins", "maxs", "texture"), &TBMapDocument::create_cuboid);

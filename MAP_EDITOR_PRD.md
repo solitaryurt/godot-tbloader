@@ -161,7 +161,7 @@ Dispatch is first-match (`XYWnd::XY_MouseDown`). Simultaneous buttons ignored.
 | LMB on selected brush body | Translate in view plane (hidden axis locked), snap to grid. Shift: axis constrain. Ctrl: snap AABB edges to grid. |
 | LMB on 2D silhouette (miss body, hit edge-on face) | QE4 resize: temporarily select those faces, translate planes in view plane, clear temp components on mouse up. |
 | Shift+LMB | Additive / paint select primitives. |
-| Ctrl+LMB | Face select outside clipper mode. In clipper mode, LMB places clip points. Quick clipper is deferred to avoid modifier ambiguity. |
+| Ctrl+LMB (Command+LMB on macOS) | Face select outside clipper mode. In clipper mode, LMB places clip points. Quick clipper is deferred to avoid modifier ambiguity. |
 | Shift+RMB drag | Box select. Device-space drag direction: right+up select, left+down deselect, other diagonals toggle. |
 | Ctrl+MMB / MMB | Camera place/orient (camera view only; skip in v1 graph if needed). |
 

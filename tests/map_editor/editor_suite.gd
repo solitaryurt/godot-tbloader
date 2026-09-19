@@ -63,6 +63,9 @@ func key(code: int, ctrl = false, shift = false) -> void:
 	event.shift_pressed = shift
 	ui._input(event)
 
+func paste_map_clipboard(exported: String) -> void:
+	ui.paste_text(exported)
+
 func text() -> String:
 	return ui.session.document.export_text().value
 
@@ -127,11 +130,8 @@ func run() -> void:
 		and plugin.map_control.get_child(1).tooltip_text == "Open Radiant Editor",
 		"spatial toolbar uses Build Meshes text and an accessible Radiant icon")
 	checks.check(plugin.map_control.get_child(0).disabled and plugin.map_control.get_child(1).disabled, "spatial loader actions are disabled without a selected TBLoader")
-	var map_toolbar: Control
-	for child in ui.get_children():
-		if child is HFlowContainer:
-			map_toolbar = child
-			break
+	var map_toolbar: Control = ui.find_child("MapToolbar", true, false)
+	var chrome: MarginContainer = ui.find_child("MapEditorChrome", true, false)
 	var toolbar_labels: Array[String] = []
 	for child in map_toolbar.find_children("*", "Button", true, false):
 		toolbar_labels.append(child.text)
@@ -140,14 +140,24 @@ func run() -> void:
 	checks.check(ui.tool_buttons.Vertex.tooltip_text == "Vertex Tool (V)" and ui.tool_buttons.Edge.tooltip_text == "Edge Tool (E)" and ui.tool_buttons.Texture.tooltip_text == "Texture Tool", "tooltips show existing shortcuts without inventing missing bindings")
 	checks.check(["New", "Open…", "Save", "Save As…"].all(func(command): return not toolbar_labels.has(command)), "map toolbar omits redundant document controls")
 	checks.check(map_toolbar.get_child(0).is_ancestor_of(ui.file_menu) and ui.file_menu.text.is_empty() and ui.file_menu.icon != null, "icon file command menu starts the grouped map toolbar")
-	checks.check(ui.file_menu.get_popup().item_count == 3 and ui.file_menu.get_popup().get_item_text(0) == "Open…" and ui.file_menu.get_popup().get_item_text(1) == "Save" and ui.file_menu.get_popup().get_item_text(2) == "Save As…", "file menu contains only Open, Save, and Save As")
+	checks.check(ui.file_menu.get_popup().item_count == 4 and ui.file_menu.get_popup().get_item_text(0) == "Open…"
+		and ui.file_menu.get_popup().is_item_separator(1)
+		and ui.file_menu.get_popup().get_item_text(2) == "Save" and ui.file_menu.get_popup().get_item_text(3) == "Save As…",
+		"file menu separates Open from Save operations")
 	checks.check(ui.document_tabs.get_index() == ui.scene_tabs.get_index() + 1 and ui.document_tabs.get_tab_title(ui.document_tabs.tab_count - 1) == "+", "document tabs sit below scene tabs with a trailing new tab")
+	checks.check(chrome != null and chrome.get_theme_constant("margin_left") > 0 and chrome.get_theme_constant("margin_right") > 0
+		and ui.document_tabs.get_parent().get_parent().name == "MapTabsPanel"
+		and map_toolbar.get_parent().name == "MapToolbarPanel"
+		and ui.document_tabs.get_parent().get_parent() != map_toolbar.get_parent()
+		and ui.binding_label.get_parent() == chrome.get_child(0),
+		"map tabs, toolbar, and binding status are separate inset chrome panels")
 	checks.check(not ui.rebuild_on_save.button_pressed, "Build meshes on save defaults off")
 	checks.check(ui.rebuild_on_save is Button and ui.rebuild_on_save.toggle_mode and ui.rebuild_on_save.icon != null and ui.rebuild_on_save.tooltip_text == "Build meshes on save", "Build meshes on save is a compact independent icon toggle")
 	checks.check(ui.loader_actions.BindLoader.disabled and ui.loader_actions.DetachLoader.disabled and ui.loader_actions.UpdateLoaderPath.disabled and ui.loader_actions.BuildMeshes.disabled and ui.rebuild_on_save.disabled, "unselected and unbound loader actions start disabled")
 	checks.check(ui.loader_actions.BuildMeshes.tooltip_text == "Build Meshes from saved map" and ui.loader_actions.BuildMeshes.accessibility_name == "Build Meshes from saved map", "map toolbar exposes Build Meshes terminology to tooltip and accessibility APIs")
 	checks.check(not ui.radiant_camera_behavior and not ui.camera_behavior_button.button_pressed
-		and ui.camera_behavior_button.text == "Godot Camera" and not ui.camera_view.radiant_camera_behavior,
+		and ui.camera_behavior_button.icon != null and ui.camera_behavior_button.accessibility_name == "Godot Camera"
+		and not ui.camera_view.radiant_camera_behavior,
 		"camera behavior defaults to Godot mode")
 	checks.check(ui.camera_behavior_button.get_parent() == ui.layout_menu.get_parent()
 		and ui.camera_behavior_button.get_index() == ui.layout_menu.get_index() + 1,
@@ -168,7 +178,7 @@ func run() -> void:
 	ui.camera_view.camera_transform_changed()
 	ui.set_radiant_camera_behavior(true)
 	ui.active_graph.grab_focus()
-	checks.check(ui.camera_behavior_button.button_pressed and ui.camera_behavior_button.text == "Radiant Camera"
+	checks.check(ui.camera_behavior_button.button_pressed and ui.camera_behavior_button.accessibility_name == "Radiant Camera"
 		and ui.camera_view.radiant_camera_behavior, "camera behavior toggle enables Radiant controls")
 	checks.check(ui.view_layout == 3 and ui.visible_graphs().size() == 2 and not ui.view_slots[1].visible, "three-view layout changes visibility without changing pane types")
 	ui.apply_layout(2)
@@ -211,8 +221,10 @@ func run() -> void:
 	checks.check(ui.camera_view.get_parent() == ui.view_slots[0] and ui.visible_graphs().size() == 2, "layout changes restore camera-left three-view arrangement")
 	checks.check(ui.camera_view.find_children("FrameSelection", "Button", true, false).size() == 1 and ui.graph_a.find_children("FrameSelection", "Button", true, false).size() == 1, "camera and grid panes expose compact frame buttons")
 	checks.check(ui.camera_view.find_children("BuiltAppearance", "Button", true, false).size() == 1
-		and ui.camera_view.built_appearance_button.toggle_mode and not ui.camera_view.built_appearance_button.button_pressed,
+		and ui.camera_view.built_appearance_button.toggle_mode and not ui.camera_view.built_appearance_button.button_pressed
+		and ui.camera_view.built_appearance_button.get_parent().name == "CameraTitlebarActions",
 		"camera exposes a local Built appearance toggle which defaults off")
+	checks.check(ui.camera_view.selector_half_size == 12.0, "camera brush selector defaults to a 12px half-size")
 	checks.check(ui.camera_view.find_children("PreviewSunlight", "Button", true, false).size() == 1
 		and ui.camera_view.find_children("PreviewWorldEnvironment", "Button", true, false).size() == 1
 		and ui.camera_view.find_children("CameraGrid", "Button", true, false).size() == 1
@@ -250,9 +262,9 @@ func run() -> void:
 		"camera uses its studio environment when the active document has no bound scene sky")
 	checks.check(ui.camera_view.find_child("FrameSelection", true, false).icon != null and ui.graph_a.find_child("FrameSelection", true, false).icon != null,
 		"camera and grid frame-selection buttons use the custom frame icon")
-	checks.check(ui.camera_view.find_child("FrameSelection", true, false).anchor_left == 1.0
-		and ui.camera_view.find_child("FrameSelection", true, false).offset_right <= 0.0
-		and ui.camera_view.find_child("FrameSelection", true, false).offset_left < 0.0
+	checks.check(ui.camera_view.find_child("FrameSelection", true, false).get_parent().name == "CameraTitlebarActions"
+		and ui.camera_view.find_child("FrameSelection", true, false).get_parent().anchor_left == 1.0
+		and ui.camera_view.built_appearance_button.get_index() < ui.camera_view.find_child("FrameSelection", true, false).get_index()
 		and ui.graph_a.find_child("FrameSelection", true, false).anchor_left == 1.0
 		and ui.graph_a.find_child("FrameSelection", true, false).offset_right <= 0.0
 		and ui.graph_a.find_child("FrameSelection", true, false).offset_left < 0.0,
@@ -379,6 +391,15 @@ func run() -> void:
 	var id: int = ui.session.selected[0]
 	var brush: Dictionary = ui.session.brush(id)
 	checks.check(brush.aabb_min == Vector3(-64, -48, -64) and brush.aabb_max == Vector3(64, 48, 64), "snapped negative cuboid and default workzone thickness")
+	graph.set_orientation(1)
+	graph.origin = Vector3(10000, 10000, 10000)
+	graph.zoom = 0.01
+	graph.set_orientation(2)
+	key(KEY_TAB, true)
+	var selected_center: Vector3 = (brush.aabb_min + brush.aabb_max) * 0.5
+	checks.check(graph.orientation == 1 and graph.project(selected_center).distance_to(graph.size * 0.5) < 1.0,
+		"Ctrl Tab keeps selected brushes centered in the new grid angle")
+	graph.set_orientation(2)
 	checks.check(ui.tokens.size() == 1, "one gesture one action")
 	checks.check(manager.get_object_history_id(ui.session) == EditorUndoRedoManager.GLOBAL_HISTORY, "map session uses real global editor history")
 	checks.check(ui.camera_view.triangle_count == 12, "camera generated from native preview")
@@ -395,9 +416,11 @@ func run() -> void:
 	checks.check(ui.camera_view.map_geometry.get_children() == preview_nodes, "camera marker update does not rebuild preview geometry")
 	var created = text()
 	key(KEY_Z, true)
-	checks.check(text() == before and ui.session.selected.is_empty(), "router undo restores geometry and selection")
+	checks.check(text() == before and ui.session.selected.is_empty() and ui.notice.text == "Undid: Create map brush",
+		"router undo restores geometry and reports the action")
 	key(KEY_Y, true)
-	checks.check(text() == created and ui.session.selected == PackedInt64Array([id]), "router redo uses origin snapshot")
+	checks.check(text() == created and ui.session.selected == PackedInt64Array([id]) and ui.notice.text == "Redid: Create map brush",
+		"router redo uses origin snapshot and reports the action")
 	# A real viewport dispatch must not execute the global editor shortcut twice.
 	var dispatched = InputEventKey.new()
 	dispatched.keycode = KEY_Z
@@ -469,9 +492,20 @@ func run() -> void:
 	checks.check(ui.session.selected[0] != id and ui.session.document.get_draw_data().size() == 2, "Space clone fresh ID")
 	var clone: int = ui.session.selected[0]
 	checks.check(ui.session.brush(clone).aabb_min == ui.session.brush(id).aabb_min + Vector3(16, 0, 0), "clone nudged on active horizontal axis")
-	var clipboard: String = ui.session.document.export_selection(ui.session.selected).value
-	ui.paste_text(clipboard)
-	checks.check(ui.session.document.get_draw_data().size() == 3 and ui.session.selected[0] != clone, "paste imports native map clipboard in place")
+	key(KEY_C, true)
+	var exported: String = ui.session.document.export_selection(ui.session.selected).value
+	checks.check(not exported.is_empty() and ui.notice.text == "Copied 1 brush.",
+		"Ctrl C exports the selected brush to the map clipboard")
+	paste_map_clipboard(exported)
+	checks.check(ui.session.document.get_draw_data().size() == 3 and ui.session.selected[0] != clone
+		and ui.notice.text == "Pasted 1 brush.", "Ctrl V imports and selects a fresh brush in place")
+	key(KEY_X, true)
+	checks.check(ui.session.document.get_draw_data().size() == 2 and ui.session.selected.is_empty()
+		and ui.notice.text == "Cut 1 brush.",
+		"Ctrl X copies and removes selected brushes in one action")
+	key(KEY_Z, true)
+	checks.check(ui.session.document.get_draw_data().size() == 3 and not ui.session.selected.is_empty()
+		and ui.notice.text == "Undid: Cut map brushes", "cut undo restores geometry and selection")
 	key(KEY_DELETE)
 	checks.check(ui.session.document.get_draw_data().size() == 2, "Delete handler")
 	key(KEY_Z, true)
@@ -664,13 +698,20 @@ func run() -> void:
 	mouse(graph, entity_click, true, MOUSE_BUTTON_RIGHT)
 	mouse(graph, entity_click, false, MOUSE_BUTTON_RIGHT)
 	checks.check(ui.entity_menu.visible and ui.entity_menu_point == graph.snap_point(Vector3(32, 48,
-		ui.session.workzone.get_center().z)) and ui.entity_menu.is_item_disabled(ui.entity_menu.get_item_index(5)),
+		ui.session.workzone.get_center().z)) and ui.entity_menu.is_item_separator(4)
+		and ui.entity_menu.is_item_disabled(ui.entity_menu.get_item_index(5)),
 		"RMB grid click opens entity menu at the snapped workzone point and disables brush classes without a brush selection")
 	ui.entity_menu_selected(1)
 	ui.entity_menu.hide()
 	var point_id: int = ui.session.points[0]
 	checks.check(ui.session.point_markers().size() == 1, "grid entity menu creates and selects a point entity")
 	graph.grab_focus()
+	key(KEY_C, true)
+	checks.check(ui.notice.text == "No brushes selected to copy.",
+		"copy with only a point entity selected preserves the clipboard")
+	key(KEY_X, true)
+	checks.check(ui.session.points == PackedInt64Array([point_id]) and ui.notice.text == "No brushes selected to cut.",
+		"brush cut does not remove unsupported point entities")
 	var marker: Dictionary = ui.session.point_markers()[0]
 	checks.check(graph.hit_point(graph.project(marker.origin)) == point_id, "point marker graph picking")
 	drag(graph, marker.origin, marker.origin + Vector3(16, 32, 0))
@@ -749,10 +790,19 @@ func run() -> void:
 	var left = InputEventMouseButton.new()
 	left.pressed = true
 	left.button_index = MOUSE_BUTTON_LEFT
-	left.position = Vector2.ZERO
+	left.position = camera.size * 0.5
 	ui.session.select(PackedInt64Array())
 	camera._gui_input(left)
-	checks.check(not expected_hits.is_empty() and ui.session.selected == PackedInt64Array([expected_hits[0].brush_id]), "camera LMB selects the brush under the crosshair instead of the mouse position")
+	checks.check(not expected_hits.is_empty() and ui.session.selected == PackedInt64Array([expected_hits[0].brush_id]), "camera LMB selects the brush under the cursor")
+	var left_release := left.duplicate()
+	left_release.pressed = false
+	camera._gui_input(left_release)
+	ui.session.select(PackedInt64Array([expected_hits[0].brush_id]))
+	left.position = Vector2.ZERO
+	camera._gui_input(left)
+	checks.check(ui.session.selected.is_empty(), "ordinary camera cursor miss clears instead of falling back to the crosshair")
+	left.position = camera.size * 0.5
+	ui.session.select(PackedInt64Array([expected_hits[0].brush_id]))
 	ui.set_tool("Select")
 	var face_click = InputEventMouseButton.new()
 	face_click.pressed = true
@@ -761,6 +811,29 @@ func run() -> void:
 	face_click.ctrl_pressed = true
 	camera._gui_input(face_click)
 	checks.check(ui.session.components.size() == 1 and ui.session.components[0].kind == "face" and ui.session.components[0].index == expected_hits[0].face_index, "camera Ctrl+LMB quick-selects the pointed face")
+	camera.finish_ctrl_gesture()
+	ui.session.components.clear()
+	ui.session.select(PackedInt64Array([expected_hits[0].brush_id]))
+	camera._gui_input(left)
+	checks.check(camera.camera_gesture == "move_pending" and camera.camera_hit.get("face_index", -1) == expected_hits[0].face_index,
+		"selected brush center hit keeps exact face data and gets direct drag priority")
+	var ranked_under_cursor: PackedInt64Array = camera.brush_aperture_hit(camera.size * 0.5).get("brush_ids", PackedInt64Array())
+	if ranked_under_cursor.size() > 1:
+		camera._gui_input(left_release)
+		checks.check(ui.session.selected == PackedInt64Array([ranked_under_cursor[1]]),
+			"stationary repeated camera click cycles to the next ranked overlapping brush")
+	else:
+		camera.cancel_gesture()
+		var cycle_fixture_ids := PackedInt64Array(ui.session.draw_data().map(func(brush): return brush.id))
+		if cycle_fixture_ids.size() > 1:
+			ui.session.select(PackedInt64Array([cycle_fixture_ids[0]]))
+			camera.camera_hit = {"brush_id": cycle_fixture_ids[0], "face_index": -1}
+			camera.camera_click_cycle_ids = cycle_fixture_ids.slice(0, 2)
+			camera.camera_click_cycle_id = cycle_fixture_ids[0]
+			camera.camera_gesture = "cycle_pending"
+			camera.finish_camera_left()
+			checks.check(ui.session.selected == PackedInt64Array([cycle_fixture_ids[1]]),
+				"stationary camera click advances through its ranked candidate list")
 	camera.grab_focus()
 	var right = InputEventMouseButton.new()
 	right.pressed = true
@@ -795,6 +868,23 @@ func run() -> void:
 	var camera_position: Vector3 = camera.camera.position
 	camera._process(0.25)
 	checks.check(camera.camera.position.distance_to(camera_position) > 1, "fly movement frame delta")
+	var before_fly_undo := text()
+	var fly_undo := InputEventKey.new()
+	fly_undo.keycode = KEY_Z
+	fly_undo.ctrl_pressed = true
+	fly_undo.pressed = true
+	ui._input(fly_undo)
+	checks.check(text() != before_fly_undo and not camera.flying,
+		"Radiant fly mode routes Ctrl Z to history and releases camera capture")
+	var mac_redo := InputEventKey.new()
+	mac_redo.keycode = KEY_Y
+	mac_redo.meta_pressed = true
+	mac_redo.pressed = true
+	ui._input(mac_redo)
+	checks.check(text() == before_fly_undo, "Command Y restores the action undone from Radiant fly mode")
+	camera._gui_input(right)
+	camera._input(right_release)
+	checks.check(camera.flying, "Radiant camera can re-enter fly mode after history navigation")
 	camera._input(right)
 	camera._input(right_release)
 	checks.check(not camera.flying and camera.held.is_empty() and not camera.crosshair.is_visible_in_tree(), "second RMB click-release exits FLY mode")
@@ -831,6 +921,13 @@ func run() -> void:
 			"camera Shift+LMB drag paints crossed brushes without toggling revisits")
 		brush_trace.pressed = false
 		camera._gui_input(brush_trace)
+		camera.cancel_gesture()
+		ui.session.select(PackedInt64Array())
+		camera.camera_gesture = "brush_paint"
+		camera.brush_paint_select = true
+		camera.update_camera_gesture(camera.size * 0.5)
+		checks.check(not ui.session.selected.is_empty() and not camera.brush_aperture_hit(camera.size * 0.5).is_empty(),
+			"camera paint motion selects through the projected square aperture")
 	camera.start_fly()
 	var escape = InputEventKey.new()
 	escape.keycode = KEY_ESCAPE
@@ -1161,7 +1258,8 @@ func binding_journey(plugin: EditorPlugin) -> void:
 		and probe_volume.reflection_threads == OS.get_processor_count(),
 		"Steam Audio probe baking uses all available processor threads")
 	checks.check(probe_volume.generated, "Steam Audio probes are generated during map bake")
-	skybox_branch.free()
+	skybox_branch.queue_free()
+	await get_tree().process_frame
 	checks.check(not loader.find_children("*", "CollisionShape3D", true, false).is_empty(), "real baked collision output")
 	var bake_action = ui.last_bake_action.get_ref()
 	checks.check(bake_action != null and bake_action.get_retention_counters().packed_snapshot_count == 0
@@ -1724,12 +1822,20 @@ func focus_regression() -> void:
 			mouse(graph, synthetic.position, false)
 			checks.check(text() == before and ui.session.document.get_revision() == revision and history.get_version() == version, "window/application focus cancellation has no doc/revision/history mutation in pane %s" % graph.orientation)
 		# Invoke actual native Viewport notification with mouse_focus acquired via input.
+		var local: Vector2 = graph.project(center)
 		var press = InputEventMouseButton.new()
-		press.position = graph.global_position + graph.project(center)
+		press.position = graph.global_position + local
+		press.global_position = press.position
 		press.button_index = MOUSE_BUTTON_LEFT
 		press.pressed = true
-		get_viewport().push_input(press)
-		motion(graph, graph.project(center) + Vector2(32, 0))
+		graph.get_viewport().push_input(press)
+		if graph.gesture == "":
+			var local_press := InputEventMouseButton.new()
+			local_press.position = local
+			local_press.button_index = MOUSE_BUTTON_LEFT
+			local_press.pressed = true
+			graph._gui_input(local_press)
+		motion(graph, local + Vector2(32, 0))
 		var before = text()
 		var version = history.get_version()
 		checks.check(graph.gesture == "move" and graph.delta != Vector3.ZERO, "viewport dispatch acquired moved graph gesture")
@@ -2093,11 +2199,18 @@ func step5_native_editor_journey() -> void:
 	doc.create_cuboid(Vector3(230, 0, 0), Vector3(300, 40, 40), "baseline/checker")
 	scratch.changed.emit()
 	var overlap_position: Vector2 = graph.project(Vector3(32, 32, 0))
-	checks.check(graph.hit_brush(overlap_position) == second, "native 2D candidates retain reverse-source overlap pick order")
+	checks.check(graph.selector_half_size == 12.0 and graph.hit_brush(overlap_position) == second,
+		"grid brush selector defaults to a 12px half-size and deterministic overlap ranking")
 	scratch.select(PackedInt64Array([first]))
 	ui.set_tool("Brush")
 	mouse(graph, overlap_position, true)
 	checks.check(graph.gesture == "move" and scratch.selected == PackedInt64Array([first]), "selected overlapping brush retains direct-manipulation priority")
+	mouse(graph, overlap_position, false)
+	checks.check(scratch.selected == PackedInt64Array([second]), "repeated ordinary click cycles to the next ranked overlapping brush")
+	mouse(graph, overlap_position, true)
+	motion(graph, overlap_position + Vector2(16, 0))
+	checks.check(graph.gesture == "move" and scratch.selected == PackedInt64Array([second]),
+		"dragging a selected overlap manipulates it instead of cycling")
 	graph.cancel()
 	scratch.hidden[second] = true
 	checks.check(graph.hit_brush(overlap_position) == first, "hidden broad-phase hit passes through to the next visible brush")

@@ -253,14 +253,22 @@ bool ray_triangle(vec3 origin, vec3 direction, vec3 a, vec3 b, vec3 c, double ma
 	return true;
 }
 
-double projected_segment_distance_squared(vec3 point, vec3 a, vec3 b, int hidden_axis) {
+struct ProjectedSegmentPoint {
+	double distance_squared;
+	double delta_u;
+	double delta_v;
+	double depth;
+};
+
+ProjectedSegmentPoint projected_segment_point(vec3 point, vec3 a, vec3 b, int hidden_axis) {
 	const int u = hidden_axis == 0 ? 1 : 0, v = hidden_axis == 2 ? 1 : 2;
 	const double ab_u = component(b, u) - component(a, u), ab_v = component(b, v) - component(a, v);
 	const double ap_u = component(point, u) - component(a, u), ap_v = component(point, v) - component(a, v);
 	const double length_squared = ab_u * ab_u + ab_v * ab_v;
 	const double t = length_squared > 0 ? std::clamp((ap_u * ab_u + ap_v * ab_v) / length_squared, 0.0, 1.0) : 0.0;
 	const double du = ap_u - ab_u * t, dv = ap_v - ab_v * t;
-	return du * du + dv * dv;
+	return {du * du + dv * dv, std::abs(du), std::abs(dv),
+		component(a, hidden_axis) + (component(b, hidden_axis) - component(a, hidden_axis)) * t};
 }
 
 bool projected_face_contains(const LMEditorBrushGeometry &geometry, const LMEditorBrushFace &face, vec3 point, int hidden_axis) {
@@ -270,7 +278,7 @@ bool projected_face_contains(const LMEditorBrushGeometry &geometry, const LMEdit
 	for (uint32_t i = 0, previous = face.corner_count - 1; i < face.corner_count; previous = i++) {
 		const vec3 a = geometry.positions[geometry.corners[face.corner_begin + previous].position];
 		const vec3 b = geometry.positions[geometry.corners[face.corner_begin + i].position];
-		if (projected_segment_distance_squared(point, a, b, hidden_axis) <= 1e-18) return true;
+		if (projected_segment_point(point, a, b, hidden_axis).distance_squared <= 1e-18) return true;
 		const double ay = component(a, v), by = component(b, v), py = component(point, v);
 		if ((ay > py) != (by > py) && component(point, u) <
 				(component(b, u) - component(a, u)) * (py - ay) / (by - ay) + component(a, u)) inside = !inside;
@@ -386,8 +394,20 @@ Dictionary TBMapDocument::query_brush_2d_hit(int hidden_axis, Vector3 point, dou
 		for (int i = 0; i < ids.size(); ++i) if (ids[i] == id) return true;
 		return false;
 	};
-	const double tolerance_squared = tolerance * tolerance;
-	int best = -1, best_selected = -1;
+	struct Hit {
+		int entry;
+		bool direct;
+		double distance_squared;
+		double depth;
+	};
+	auto closer = [&](const Hit &a, const Hit &b) {
+		if (a.direct != b.direct) return a.direct;
+		if (!a.direct && a.distance_squared != b.distance_squared) return a.distance_squared < b.distance_squared;
+		if (a.depth != b.depth) return a.depth > b.depth;
+		return index.entries[a.entry].source_order > index.entries[b.entry].source_order;
+	};
+	auto view_depth = [hidden_axis](double depth) { return hidden_axis == 1 ? -depth : depth; };
+	std::vector<Hit> hits;
 	std::vector<int> stack;
 	stack.reserve(64);
 	stack.push_back(0);
@@ -399,27 +419,206 @@ Dictionary TBMapDocument::query_brush_2d_hit(int hidden_axis, Vector3 point, dou
 			const int candidate = index.order[i]; const auto &entry = index.entries[candidate];
 			if (!overlap_2d(entry.bounds, query_mins, query_maxs, hidden_axis) || contains(hidden_ids, hidden_lookup, entry.brush_id) ||
 					((filter_mask & 1) && entry.owned) || !entry.geometry) continue;
-			bool all_faces_filtered = entry.brush->face_count > 0;
-			for (int f = 0; f < entry.brush->face_count; ++f) if (!(filter_mask & index.face_filters[entry.face_filter_begin + f])) {
-				all_faces_filtered = false; break;
+			Hit best{candidate, false, 0, 0};
+			bool found = false;
+			for (int f = 0; f < entry.brush->face_count; ++f) {
+				if (filter_mask & index.face_filters[entry.face_filter_begin + f]) continue;
+				const auto &face = entry.geometry->faces[f];
+				if (face.corner_count == 0) continue;
+				const auto &plane = entry.brush->faces[f];
+				if (std::abs(component(plane.plane_normal, hidden_axis)) > 1e-12 &&
+						projected_face_contains(*entry.geometry, face, query_point, hidden_axis)) {
+					double depth = plane.plane_dist;
+					for (int axis = 0; axis < 3; ++axis) if (axis != hidden_axis)
+						depth -= component(plane.plane_normal, axis) * component(query_point, axis);
+					depth /= component(plane.plane_normal, hidden_axis);
+					const Hit face_hit{candidate, true, 0, view_depth(depth)};
+					if (!found || closer(face_hit, best)) best = face_hit;
+					found = true;
+				}
+				for (uint32_t corner = 0, previous = face.corner_count - 1; corner < face.corner_count; previous = corner++) {
+					const vec3 a = entry.geometry->positions[entry.geometry->corners[face.corner_begin + previous].position];
+					const vec3 b = entry.geometry->positions[entry.geometry->corners[face.corner_begin + corner].position];
+					const auto edge = projected_segment_point(query_point, a, b, hidden_axis);
+					if (edge.delta_u > tolerance + 1e-9 || edge.delta_v > tolerance + 1e-9) continue;
+					const Hit edge_hit{candidate, false, edge.distance_squared, view_depth(edge.depth)};
+					if (!found || closer(edge_hit, best)) best = edge_hit;
+					found = true;
+				}
 			}
-			if (all_faces_filtered) continue;
-			bool hit = false;
-			for (const auto &face : entry.geometry->faces) if (projected_face_contains(*entry.geometry, face, query_point, hidden_axis)) {
-				hit = true; break;
-			}
-			if (!hit) for (const auto &edge : entry.geometry->edges) if (projected_segment_distance_squared(query_point,
-					entry.geometry->positions[edge.a], entry.geometry->positions[edge.b], hidden_axis) < tolerance_squared) {
-				hit = true; break;
-			}
-			if (!hit) continue;
-			if (best < 0 || entry.source_order > index.entries[best].source_order) best = candidate;
-			if (prefer_selected && contains(selected_ids, selected_lookup, entry.brush_id) &&
-					(best_selected < 0 || entry.source_order > index.entries[best_selected].source_order)) best_selected = candidate;
+			if (found) hits.push_back(best);
 		}
 	}
-	const int selected = best_selected >= 0 ? best_selected : best;
-	if (selected >= 0) result["brush_id"] = index.entries[selected].brush_id;
+	std::sort(hits.begin(), hits.end(), closer);
+	PackedInt64Array ranked_ids;
+	for (const Hit &hit : hits) ranked_ids.push_back(index.entries[hit.entry].brush_id);
+	if (!hits.empty()) {
+		int selected = hits.front().entry;
+		if (prefer_selected) for (const Hit &hit : hits) if (contains(selected_ids, selected_lookup, index.entries[hit.entry].brush_id)) {
+			selected = hit.entry;
+			break;
+		}
+		result["brush_id"] = index.entries[selected].brush_id;
+		result["brush_ids"] = ranked_ids;
+	}
+	return result;
+}
+
+Dictionary TBMapDocument::query_brush_camera_hit(Vector3 origin, Vector3 forward, Vector3 right, Vector3 up,
+		Vector2 viewport_size, double vertical_fov, Vector2 position, double aperture,
+		const PackedInt64Array &hidden_ids, int filter_mask) const {
+	Dictionary result;
+	if (!origin.is_finite() || !forward.is_finite() || !right.is_finite() || !up.is_finite() ||
+			!viewport_size.is_finite() || !position.is_finite() || viewport_size.x <= 0 || viewport_size.y <= 0 ||
+			!std::isfinite(vertical_fov) || vertical_fov <= 0 || vertical_fov >= 179 ||
+			!std::isfinite(aperture) || aperture < 0 || filter_mask < 0 || (filter_mask & ~15)) return result;
+	forward = forward.normalized(); right = right.normalized(); up = up.normalized();
+	if (forward.is_zero_approx() || right.is_zero_approx() || up.is_zero_approx()) return result;
+	const vec3 camera_origin = native(origin), camera_forward = native(forward), camera_right = native(right), camera_up = native(up);
+	const double focal = viewport_size.y * 0.5 / std::tan(vertical_fov * 0.5 * 3.14159265358979323846 / 180.0);
+	const double near_depth = 1e-7;
+	auto camera_point = [&](vec3 point) {
+		const vec3 relative = vec3_sub(point, camera_origin);
+		return vec3{vec3_dot(relative, camera_right), vec3_dot(relative, camera_up), vec3_dot(relative, camera_forward)};
+	};
+	auto project = [&](vec3 point) {
+		return Vector2(viewport_size.x * 0.5 + focal * point.x / point.z,
+			viewport_size.y * 0.5 - focal * point.y / point.z);
+	};
+	const Vector2 aperture_min = position - Vector2(aperture, aperture), aperture_max = position + Vector2(aperture, aperture);
+	auto bounds_overlap = [&](const SpatialIndex::Bounds &bounds) {
+		vec3 camera_corners[8];
+		double minimum_depth = INFINITY, maximum_depth = -INFINITY;
+		for (int bits = 0; bits < 8; ++bits) {
+			const vec3 world{bits & 1 ? bounds.maxs.x : bounds.mins.x, bits & 2 ? bounds.maxs.y : bounds.mins.y,
+				bits & 4 ? bounds.maxs.z : bounds.mins.z};
+			camera_corners[bits] = camera_point(world);
+			minimum_depth = std::min(minimum_depth, camera_corners[bits].z);
+			maximum_depth = std::max(maximum_depth, camera_corners[bits].z);
+		}
+		if (maximum_depth <= near_depth) return false;
+		// A box crossing the camera plane cannot be safely rejected by projected corners.
+		if (minimum_depth <= near_depth) return true;
+		Vector2 low, high; bool first = true;
+		for (vec3 camera : camera_corners) {
+			const Vector2 screen = project(camera);
+			if (first) { low = high = screen; first = false; }
+			else { low = low.min(screen); high = high.max(screen); }
+		}
+		return high.x >= aperture_min.x && low.x <= aperture_max.x && high.y >= aperture_min.y && low.y <= aperture_max.y;
+	};
+	std::unordered_set<int64_t> hidden_lookup;
+	if (hidden_ids.size() > 8) { hidden_lookup.reserve(hidden_ids.size()); for (int64_t id : hidden_ids) hidden_lookup.insert(id); }
+	auto hidden = [&](int64_t id) {
+		if (!hidden_lookup.empty()) return hidden_lookup.count(id) != 0;
+		for (int64_t value : hidden_ids) if (value == id) return true;
+		return false;
+	};
+	auto screen_segment = [](Vector2 point, Vector2 a, Vector2 b) {
+		const Vector2 ab = b - a;
+		const double length_squared = ab.length_squared();
+		const double t = length_squared > 0 ? std::clamp(static_cast<double>((point - a).dot(ab)) / length_squared, 0.0, 1.0) : 0.0;
+		return std::pair<double, double>{t, point.distance_squared_to(a + ab * t)};
+	};
+	auto polygon_contains = [&](const std::vector<Vector2> &polygon, Vector2 point) {
+		bool inside = false;
+		for (size_t i = 0, previous = polygon.size() - 1; i < polygon.size(); previous = i++) {
+			const Vector2 a = polygon[previous], b = polygon[i];
+			if (screen_segment(point, a, b).second <= 1e-12) return true;
+			if ((a.y > point.y) != (b.y > point.y) && point.x < (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
+		}
+		return inside;
+	};
+	struct Hit { int entry; bool direct; double distance_squared; double depth; };
+	const auto &index = get_spatial_index();
+	auto closer = [&](const Hit &a, const Hit &b) {
+		if (a.direct != b.direct) return a.direct;
+		if (!a.direct && a.distance_squared != b.distance_squared) return a.distance_squared < b.distance_squared;
+		if (a.depth != b.depth) return a.depth < b.depth;
+		return index.entries[a.entry].source_order < index.entries[b.entry].source_order;
+	};
+	std::vector<Hit> hits;
+	if (index.nodes.empty() || !bounds_overlap(index.nodes[0].bounds)) return result;
+	std::vector<int> stack{0};
+	while (!stack.empty()) {
+		const auto &node = index.nodes[stack.back()]; stack.pop_back();
+		if (!bounds_overlap(node.bounds)) continue;
+		if (!node.count) { stack.push_back(node.left); stack.push_back(node.right); continue; }
+		for (int i = node.begin; i < node.begin + node.count; ++i) {
+			const int candidate = index.order[i]; const auto &entry = index.entries[candidate];
+			if (!entry.geometry || hidden(entry.brush_id) || ((filter_mask & 1) && entry.owned) || !bounds_overlap(entry.bounds)) continue;
+			Hit best{candidate, false, 0, 0}; bool found = false;
+			for (int f = 0; f < entry.brush->face_count; ++f) {
+				if (filter_mask & index.face_filters[entry.face_filter_begin + f]) continue;
+				const auto &face = entry.geometry->faces[f];
+				if (face.corner_count < 2) continue;
+				const auto &plane = entry.brush->faces[f];
+				const vec3 first_world = entry.geometry->positions[entry.geometry->corners[face.corner_begin].position];
+				if (vec3_dot(plane.plane_normal, vec3_sub(first_world, camera_origin)) >= -1e-12) continue;
+				std::vector<vec3> source;
+				source.reserve(face.corner_count);
+				for (uint32_t corner = 0; corner < face.corner_count; ++corner)
+					source.push_back(camera_point(entry.geometry->positions[entry.geometry->corners[face.corner_begin + corner].position]));
+				std::vector<vec3> clipped;
+				clipped.reserve(face.corner_count + 1);
+				for (uint32_t corner = 0, previous = face.corner_count - 1; corner < face.corner_count; previous = corner++) {
+					const vec3 a = source[previous], b = source[corner];
+					const bool a_inside = a.z > near_depth, b_inside = b.z > near_depth;
+					if (a_inside != b_inside) {
+						const double t = (near_depth - a.z) / (b.z - a.z);
+						const vec3 delta = vec3_sub(b, a);
+						clipped.push_back({a.x + delta.x * t, a.y + delta.y * t, a.z + delta.z * t});
+					}
+					if (b_inside) clipped.push_back(b);
+				}
+				if (clipped.size() < 2) continue;
+				std::vector<Vector2> polygon; polygon.reserve(clipped.size());
+				for (vec3 point : clipped) polygon.push_back(project(point));
+				if (polygon.size() >= 3 && polygon_contains(polygon, position)) {
+					const double nx = vec3_dot(plane.plane_normal, camera_right), ny = vec3_dot(plane.plane_normal, camera_up), nz = vec3_dot(plane.plane_normal, camera_forward);
+					const double screen_x = (position.x - viewport_size.x * 0.5) / focal;
+					const double screen_y = (viewport_size.y * 0.5 - position.y) / focal;
+					const double denominator = nx * screen_x + ny * screen_y + nz;
+					const double numerator = plane.plane_dist - vec3_dot(plane.plane_normal, camera_origin);
+					if (std::abs(denominator) > 1e-12 && numerator / denominator > near_depth) {
+						const Hit hit{candidate, true, 0, numerator / denominator};
+						if (!found || closer(hit, best)) best = hit;
+						found = true;
+					}
+				}
+				for (size_t edge = 0, previous = source.size() - 1; edge < source.size(); previous = edge++) {
+					vec3 a_camera = source[previous], b_camera = source[edge];
+					if (a_camera.z <= near_depth && b_camera.z <= near_depth) continue;
+					if (a_camera.z <= near_depth) {
+						const double t = (near_depth - a_camera.z) / (b_camera.z - a_camera.z);
+						a_camera = {a_camera.x + (b_camera.x - a_camera.x) * t, a_camera.y + (b_camera.y - a_camera.y) * t, near_depth};
+					} else if (b_camera.z <= near_depth) {
+						const double t = (near_depth - a_camera.z) / (b_camera.z - a_camera.z);
+						b_camera = {a_camera.x + (b_camera.x - a_camera.x) * t, a_camera.y + (b_camera.y - a_camera.y) * t, near_depth};
+					}
+					const Vector2 a = project(a_camera), b = project(b_camera);
+					const auto [t, distance_squared] = screen_segment(position, a, b);
+					const Vector2 nearest = a + (b - a) * t;
+					if (std::abs(nearest.x - position.x) > aperture + 1e-9 || std::abs(nearest.y - position.y) > aperture + 1e-9) continue;
+					const double inverse_depth = (1.0 - t) / a_camera.z + t / b_camera.z;
+					const Hit hit{candidate, false, distance_squared, 1.0 / inverse_depth};
+					if (!found || closer(hit, best)) best = hit;
+					found = true;
+				}
+			}
+			if (found) hits.push_back(best);
+		}
+	}
+	std::sort(hits.begin(), hits.end(), closer);
+	PackedInt64Array ids;
+	for (const Hit &hit : hits) ids.push_back(index.entries[hit.entry].brush_id);
+	if (!hits.empty()) {
+		result["brush_id"] = index.entries[hits.front().entry].brush_id;
+		result["brush_ids"] = ids;
+		result["direct"] = hits.front().direct;
+		result["screen_distance"] = std::sqrt(hits.front().distance_squared);
+		result["depth"] = hits.front().depth;
+	}
 	return result;
 }
 

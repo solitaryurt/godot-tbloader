@@ -619,10 +619,9 @@ Dictionary TBMapDocument::local_brush_transaction(const std::vector<int64_t> &id
 		// affecting canonical text changed. Text/size is materialized lazily
 		// below only when binary says changed.
 		if (brush_source_equal(draft.faces, draft.materials, before_records[i]->faces, before_records[i]->materials)) continue;
-		const std::string before_text = brush_source_text(before_records[i]->faces, before_records[i]->materials);
-		const std::string after_text = brush_source_text(draft.faces, draft.materials);
-		if (after_text == before_text) continue;
-		size_delta += int64_t(after_text.size()) - int64_t(before_text.size()); changed.push_back(draft.id);
+		size_delta += int64_t(brush_source_text(draft.faces, draft.materials).size())
+				- int64_t(brush_source_text(before_records[i]->faces, before_records[i]->materials).size());
+		changed.push_back(draft.id);
 		std::vector<LMEditorTextureSize> sizes(draft.faces.size());
 		for (size_t f = 0; f < draft.faces.size(); ++f) {
 			draft.faces[f].texture_idx = f;

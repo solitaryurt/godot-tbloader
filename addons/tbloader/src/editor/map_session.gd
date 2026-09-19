@@ -64,6 +64,12 @@ var _draw_full_reads = 0
 var _draw_full_iterations = 0
 var _draw_full_duplicates = 0
 var _preview_uv_cache_retentions = 0
+var _material_basename_cache: Dictionary = {}
+var _brush_visibility_cache: Dictionary = {}
+var _brush_visibility_doc_gen := -1
+var _brush_visibility_vis_gen := -1
+var _hidden_ids_cache := PackedInt64Array()
+var _hidden_ids_cache_gen := -1
 var change_kind = ""
 
 func notify_changed(kind: String = "content") -> void:
@@ -103,6 +109,8 @@ func _invalidate_draw_cache(count_reset := false) -> void:
 	_draw_generation = -1
 	_draw_cache.clear()
 	_draw_index.clear()
+	_brush_visibility_cache.clear()
+	_brush_visibility_doc_gen = -1
 
 func _patch_draw_changes(change: Dictionary) -> void:
 	for item in change.brushes:
@@ -131,6 +139,9 @@ func _sync_visibility_generation() -> bool:
 	_visibility_generation += 1
 	_hidden_generation_state = hidden.duplicate()
 	_filters_generation_state = visibility_filters.duplicate()
+	_brush_visibility_cache.clear()
+	_brush_visibility_vis_gen = -1
+	_hidden_ids_cache_gen = -1
 	return true
 
 func patch_draw_translation(ids: PackedInt64Array, movement: Vector3) -> void:
@@ -379,10 +390,17 @@ func apply_face_edits(edits: Array) -> Dictionary:
 	return result
 
 func hidden_brush_ids() -> PackedInt64Array:
-	var result := PackedInt64Array()
+	_sync_visibility_generation()
+	if _hidden_ids_cache_gen == _visibility_generation:
+		return _hidden_ids_cache
+	_hidden_ids_cache = PackedInt64Array()
+	_hidden_ids_cache.resize(hidden.size())
+	var cursor := 0
 	for id in hidden:
-		result.append(id)
-	return result
+		_hidden_ids_cache[cursor] = id
+		cursor += 1
+	_hidden_ids_cache_gen = _visibility_generation
+	return _hidden_ids_cache
 
 func visibility_filter_mask() -> int:
 	return (int(visibility_filters.entities) | int(visibility_filters.caulk) << 1
@@ -537,8 +555,16 @@ func set_visibility_filter(category: String, hide: bool) -> void:
 	_sync_visibility_generation()
 	notify_changed("visibility")
 
-func material_filtered(texture: String) -> bool:
+func material_basename(texture: String) -> String:
+	var cached = _material_basename_cache.get(texture)
+	if cached != null:
+		return cached
 	var name := texture.to_lower().replace("\\", "/").get_file().get_basename()
+	_material_basename_cache[texture] = name
+	return name
+
+func material_filtered(texture: String) -> bool:
+	var name := material_basename(texture)
 	if visibility_filters.caulk and name == "caulk":
 		return true
 	if visibility_filters.hint_skip and name == "hint_skip":
@@ -548,11 +574,21 @@ func material_filtered(texture: String) -> bool:
 func brush_visible(item: Dictionary) -> bool:
 	if item.is_empty() or hidden.has(item.id):
 		return false
+	var doc_gen: int = _draw_generation if _draw_valid else document.get_state_generation()
+	_sync_visibility_generation()
+	if doc_gen != _brush_visibility_doc_gen or _visibility_generation != _brush_visibility_vis_gen:
+		_brush_visibility_cache.clear()
+		_brush_visibility_doc_gen = doc_gen
+		_brush_visibility_vis_gen = _visibility_generation
+	if _brush_visibility_cache.has(item.id):
+		return _brush_visibility_cache[item.id]
+	var visible := true
 	if visibility_filters.entities and brush_has_entity_owner(item):
-		return false
-	if item.faces.is_empty():
-		return true
-	return not item.faces.all(func(face): return material_filtered(face.texture))
+		visible = false
+	elif not item.faces.is_empty() and item.faces.all(func(face): return material_filtered(face.texture)):
+		visible = false
+	_brush_visibility_cache[item.id] = visible
+	return visible
 
 func triangle_visible(brush_id: int, texture: String) -> bool:
 	var item := brush(brush_id)

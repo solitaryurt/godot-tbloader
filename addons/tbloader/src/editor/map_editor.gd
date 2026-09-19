@@ -31,6 +31,7 @@ var browser: Control
 var bottom_uv_pane: Control
 var status: Label
 var notice: Label
+var notice_generation := 0
 var binding_label: Label
 var texture_field: LineEdit
 var uv_fields: Array[SpinBox] = []
@@ -88,6 +89,10 @@ var history_total_budget = 128 * 1024 * 1024
 var history_session_budget = 64 * 1024 * 1024
 var history_action_budget = 128
 var resolver_config: Array = []
+var _icon_cache: Dictionary = {}
+var _icon_cache_scale := 0.0
+var _icon_cache_color := ""
+var _document_tab_signature: Array = []
 var shutting_down = false
 const RECOVERY_PATH = "user://tbloader-map-recovery.json"
 const RECOVERY_META = "tbloader_map_recovery"
@@ -116,20 +121,49 @@ func _ready() -> void:
 	uv_fields.assign([bottom_uv_pane.shift_x, bottom_uv_pane.shift_y, bottom_uv_pane.rotation_field,
 		bottom_uv_pane.scale_x, bottom_uv_pane.scale_y])
 	uv_label = bottom_uv_pane.status_label
+	var chrome := MarginContainer.new()
+	chrome.name = "MapEditorChrome"
+	chrome.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	chrome.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+	var side := editor_scaled(8)
+	chrome.add_theme_constant_override("margin_left", side)
+	chrome.add_theme_constant_override("margin_right", side)
+	chrome.add_theme_constant_override("margin_top", editor_scaled(6))
+	chrome.add_theme_constant_override("margin_bottom", editor_scaled(4))
+	add_child(chrome)
+	var chrome_column := VBoxContainer.new()
+	chrome_column.name = "MapEditorChromeColumn"
+	chrome_column.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	chrome_column.add_theme_constant_override("separation", editor_scaled(4))
+	chrome.add_child(chrome_column)
+	var tabs_panel := PanelContainer.new()
+	tabs_panel.name = "MapTabsPanel"
+	tabs_panel.add_theme_stylebox_override("panel", chrome_stylebox("dark_color_1", Color(0.1, 0.11, 0.13)))
+	chrome_column.add_child(tabs_panel)
+	var tabs_column := VBoxContainer.new()
+	tabs_column.name = "MapTabs"
+	tabs_column.add_theme_constant_override("separation", 0)
+	tabs_panel.add_child(tabs_column)
 	scene_tabs = TabBar.new()
 	scene_tabs.name = "SceneLoaderTabs"
 	scene_tabs.tab_changed.connect(scene_tab_changed)
 	scene_tabs.hide()
-	add_child(scene_tabs)
+	tabs_column.add_child(scene_tabs)
 	document_tabs = TabBar.new()
 	document_tabs.name = "MapDocumentTabs"
 	document_tabs.tooltip_text = "Open Map documents"
 	document_tabs.tab_changed.connect(document_tab_changed)
 	document_tabs.tab_button_pressed.connect(close_document_tab)
-	add_child(document_tabs)
+	tabs_column.add_child(document_tabs)
+	var toolbar_panel := PanelContainer.new()
+	toolbar_panel.name = "MapToolbarPanel"
+	toolbar_panel.add_theme_stylebox_override("panel", chrome_stylebox("dark_color_2", Color(0.14, 0.16, 0.18)))
+	chrome_column.add_child(toolbar_panel)
 	var toolbar = HFlowContainer.new()
 	toolbar.name = "MapToolbar"
-	add_child(toolbar)
+	toolbar.add_theme_constant_override("h_separation", editor_scaled(6))
+	toolbar.add_theme_constant_override("v_separation", editor_scaled(4))
+	toolbar_panel.add_child(toolbar)
 	var file_group := toolbar_group(toolbar)
 	file_menu = MenuButton.new()
 	file_menu.icon = editor_icon("GuiTabMenu")
@@ -137,6 +171,7 @@ func _ready() -> void:
 	file_menu.accessibility_name = "Map file commands"
 	file_menu.theme_type_variation = "FlatMenuButton"
 	file_menu.get_popup().add_item("Open…", 0)
+	file_menu.get_popup().add_separator()
 	file_menu.get_popup().add_item("Save", 1)
 	file_menu.get_popup().add_item("Save As…", 2)
 	file_menu.get_popup().id_pressed.connect(file_menu_command)
@@ -180,11 +215,12 @@ func _ready() -> void:
 	camera_behavior_button.name = "CameraBehavior"
 	camera_behavior_button.toggle_mode = true
 	camera_behavior_button.theme_type_variation = "FlatButton"
+	camera_behavior_button.icon = custom_icon("camera_behavior")
 	camera_behavior_button.toggled.connect(set_radiant_camera_behavior)
 	layout_group.add_child(camera_behavior_button)
 	update_camera_behavior_button()
 	binding_label = Label.new()
-	add_child(binding_label)
+	chrome_column.add_child(binding_label)
 	var geometry_group := toolbar_group(toolbar)
 	icon_button(geometry_group, "Clip", "Apply clip (Enter)", custom_icon("clip"), func(): apply_clip(false))
 	icon_button(geometry_group, "Split", "Split brushes (Shift+Enter)", custom_icon("split"), func(): apply_clip(true))
@@ -320,19 +356,52 @@ func button(parent: Node, text: String, callback: Callable) -> Button:
 	parent.add_child(control)
 	return control
 
+func editor_scaled(value: float) -> int:
+	return int(round(value * plugin.get_editor_interface().get_editor_scale()))
+
+func editor_color(name: String, fallback: Color) -> Color:
+	var base := plugin.get_editor_interface().get_base_control()
+	if base.has_theme_color(name, "Editor"):
+		return base.get_theme_color(name, "Editor")
+	return fallback
+
+func chrome_stylebox(color_name: String, fallback: Color) -> StyleBoxFlat:
+	var box := StyleBoxFlat.new()
+	box.bg_color = editor_color(color_name, fallback)
+	var pad := editor_scaled(6)
+	box.content_margin_left = pad
+	box.content_margin_right = pad
+	box.content_margin_top = editor_scaled(3)
+	box.content_margin_bottom = editor_scaled(3)
+	box.set_corner_radius_all(editor_scaled(4))
+	var border := editor_color("contrast_color_1", Color(1, 1, 1))
+	border.a = 0.16
+	box.border_color = border
+	box.set_border_width_all(1)
+	return box
+
 func editor_icon(name: String) -> Texture2D:
 	return plugin.get_editor_interface().get_base_control().get_theme_icon(name, "EditorIcons")
 
 func custom_icon(name: String) -> Texture2D:
+	var scale := plugin.get_editor_interface().get_editor_scale()
+	var color := plugin.get_editor_interface().get_base_control().get_theme_color("font_color", "Button").to_html(false)
+	if scale != _icon_cache_scale or color != _icon_cache_color:
+		_icon_cache.clear()
+		_icon_cache_scale = scale
+		_icon_cache_color = color
+	if _icon_cache.has(name):
+		return _icon_cache[name]
 	var path := "res://addons/tbloader/icons/map_toolbar/%s.svg" % name
 	var svg := FileAccess.get_file_as_string(path)
 	if svg.is_empty():
 		return editor_icon("Node3D")
-	var neutral := plugin.get_editor_interface().get_base_control().get_theme_color("font_color", "Button").to_html(false)
 	var image := Image.new()
-	if image.load_svg_from_string(svg.replace("#e0e0e0", "#%s" % neutral), plugin.get_editor_interface().get_editor_scale()) != OK:
+	if image.load_svg_from_string(svg.replace("#e0e0e0", "#%s" % color), scale) != OK:
 		return editor_icon("Node3D")
-	return ImageTexture.create_from_image(image)
+	var texture := ImageTexture.create_from_image(image)
+	_icon_cache[name] = texture
+	return texture
 
 func toolbar_group(parent: Control) -> HBoxContainer:
 	var panel := PanelContainer.new()
@@ -376,7 +445,7 @@ func open_entity_menu(graph: Control, screen_position: Vector2) -> void:
 		entity_menu.add_item("Point: " + classname, id)
 		entity_menu_actions[id] = {"kind": "point", "classname": classname}
 		id += 1
-	entity_menu.add_separator("Brush entities")
+	entity_menu.add_separator()
 	for classname in BRUSH_ENTITY_CLASSES:
 		entity_menu.add_item("Brush: " + classname, id)
 		entity_menu.set_item_disabled(entity_menu.get_item_index(id), session.selected.is_empty())
@@ -599,10 +668,10 @@ func update_camera_behavior_button() -> void:
 	if camera_behavior_button == null:
 		return
 	camera_behavior_button.set_pressed_no_signal(radiant_camera_behavior)
-	camera_behavior_button.text = "Radiant Camera" if radiant_camera_behavior else "Godot Camera"
+	camera_behavior_button.text = ""
 	camera_behavior_button.tooltip_text = ("Use Radiant camera controls: RMB click toggles fly, RMB drag pans"
 		if radiant_camera_behavior else "Use Godot 3D editor camera controls: hold RMB to freelook, MMB to orbit")
-	camera_behavior_button.accessibility_name = camera_behavior_button.text
+	camera_behavior_button.accessibility_name = "Radiant Camera" if radiant_camera_behavior else "Godot Camera"
 
 func slot_menu_command(pane_id: int, slot: int) -> void:
 	if pane_id >= 0 and pane_id < PANE_TYPES.size():
@@ -901,6 +970,7 @@ func cancel_interaction() -> void:
 		camera.cancel_interaction()
 
 func set_status(text: String) -> void:
+	notice_generation += 1
 	if notice != null:
 		notice.text = text
 
@@ -960,8 +1030,18 @@ func refresh_status() -> void:
 	var loader = session.loader.get_ref()
 	binding_label.text = "Bound: %s — %s" % [loader.name, loader.map_resource] if is_instance_valid(loader) else "Standalone document • Select a TBLoader, then explicitly Bind"
 	update_loader_action_state()
+	var tab_signature: Array = []
+	for origin in sessions:
+		if origin.scene_managed and origin.scene.get_ref() == null:
+			continue
+		tab_signature.append([origin.get_instance_id(), origin.document.get_path(), origin.recovery_source, origin.has_unsaved_changes(), origin == session])
+	if tab_signature == _document_tab_signature:
+		return
+	_document_tab_signature = tab_signature
 	changing_document_tabs = true
+	document_tabs.set_block_signals(true)
 	document_tabs.clear_tabs()
+	var active_index := -1
 	for origin in sessions:
 		if origin.scene_managed and origin.scene.get_ref() == null:
 			continue
@@ -975,9 +1055,12 @@ func refresh_status() -> void:
 		var path: String = origin.document.get_path()
 		document_tabs.set_tab_tooltip(index, path if not path.is_empty() else "Untitled Map document")
 		if origin == session:
-			document_tabs.current_tab = index
+			active_index = index
 	document_tabs.add_tab("+")
 	document_tabs.set_tab_tooltip(document_tabs.tab_count - 1, "New Map document")
+	if active_index >= 0:
+		document_tabs.current_tab = active_index
+	document_tabs.set_block_signals(false)
 	changing_document_tabs = false
 
 func document_tab_changed(index: int) -> void:
@@ -1094,7 +1177,9 @@ func set_tool(value: String) -> void:
 		refresh()
 
 func route_key(event: InputEventKey, graph: Control) -> bool:
-	if not event.pressed or event.echo or cameras.any(func(camera): return camera.flying):
+	var command_or_control := event.ctrl_pressed or event.meta_pressed
+	var history_shortcut := command_or_control and event.keycode in [KEY_Z, KEY_Y]
+	if not event.pressed or event.echo or (cameras.any(func(camera): return camera.flying) and not history_shortcut):
 		return false
 	var focus = get_viewport().gui_get_focus_owner()
 	if focus is LineEdit or focus is TextEdit or browser.has_browser_focus() or file_dialog.visible or dirty_dialog.visible or inspector.visible:
@@ -1115,22 +1200,30 @@ func route_key(event: InputEventKey, graph: Control) -> bool:
 	if is_instance_valid(graph):
 		active_graph = graph
 	var key = event.keycode
-	if event.ctrl_pressed:
+	if command_or_control:
 		match key:
 			KEY_Z, KEY_Y:
 				cancel_interaction()
 				var history = plugin.get_undo_redo().get_history_undo_redo(EditorUndoRedoManager.GLOBAL_HISTORY)
-				if key == KEY_Y or event.shift_pressed:
-					history.redo()
-				else:
-					history.undo()
+				var redoing := key == KEY_Y or event.shift_pressed
+				if (redoing and not history.has_redo()) or (not redoing and not history.has_undo()):
+					set_status("Nothing to redo." if redoing else "Nothing to undo.")
+					return true
+				var action_index: int = history.get_current_action() + (1 if redoing else 0)
+				var action_name: String = history.get_action_name(action_index)
+				var message_generation := notice_generation
+				var changed: bool = history.redo() if redoing else history.undo()
+				if changed and notice_generation == message_generation:
+					set_status("%s: %s" % ["Redid" if redoing else "Undid", action_name])
 			KEY_TAB:
 				if is_instance_valid(graph):
 					graph.cycle_orientation()
+					if not session.selected.is_empty():
+						graph.frame_selection()
 			KEY_C:
-				var result: Dictionary = session.document.export_selection(session.selected)
-				if session.report(result):
-					DisplayServer.clipboard_set(result.value)
+				copy_selection()
+			KEY_X:
+				cut_selection()
 			KEY_V:
 				paste_text(DisplayServer.clipboard_get())
 			KEY_S:
@@ -1227,11 +1320,36 @@ func clone_selection(axis: int) -> void:
 		return result)
 
 func paste_text(text: String) -> void:
-	session.transact("Paste map brushes", func():
+	cancel_interaction()
+	if session.transact("Paste map brushes", func():
 		var result: Dictionary = session.document.import_selection(text)
 		if result.ok and not result.value.is_empty():
 			session.select(result.value)
-		return result)
+		return result):
+		var pasted_count: int = session.selected.size()
+		set_status("Pasted %d %s." % [pasted_count, "brush" if pasted_count == 1 else "brushes"])
+
+func copy_selection() -> void:
+	if session.selected.is_empty():
+		set_status("No brushes selected to copy.")
+		return
+	var result: Dictionary = session.document.export_selection(session.selected)
+	if session.report(result) and not result.value.is_empty():
+		DisplayServer.clipboard_set(result.value)
+		set_status("Copied %d %s." % [session.selected.size(), "brush" if session.selected.size() == 1 else "brushes"])
+
+func cut_selection() -> void:
+	if session.selected.is_empty():
+		set_status("No brushes selected to cut.")
+		return
+	var selected: PackedInt64Array = session.selected.duplicate()
+	var exported: Dictionary = session.document.export_selection(selected)
+	if not session.report(exported) or exported.value.is_empty():
+		return
+	cancel_interaction()
+	if session.transact("Cut map brushes", func(): return session.document.delete_brushes(selected)):
+		DisplayServer.clipboard_set(exported.value)
+		set_status("Cut %d %s." % [selected.size(), "brush" if selected.size() == 1 else "brushes"])
 
 func delete_selection() -> void:
 	session.transact("Delete map selection", func():
@@ -1676,6 +1794,7 @@ func open_path(path: String) -> bool:
 	var candidate = Session.new()
 	var result: Dictionary = candidate.document.load_map(path)
 	if not session.report(result):
+		candidate.dispose()
 		discard_on_replace = null
 		return false
 	replace_session(candidate)
@@ -2023,7 +2142,8 @@ func save_all(defer_bake = false) -> void:
 			continue
 		var path: String = origin.document.get_path()
 		if path.is_empty():
-			untitled = origin
+			if origin == session:
+				untitled = origin
 		elif origin == session:
 			save_path(path, defer_bake)
 		else:
@@ -2033,7 +2153,6 @@ func save_all(defer_bake = false) -> void:
 				else:
 					bake_origin(origin)
 	if untitled != null:
-		set_session(untitled)
 		file_command("save")
 	refresh_status()
 

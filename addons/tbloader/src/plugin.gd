@@ -151,6 +151,13 @@ func _get_plugin_name() -> String:
 	return MAIN_SCREEN_NAME
 
 func _get_plugin_icon() -> Texture2D:
+	var path := "res://addons/tbloader/icons/tbloader.svg"
+	if ResourceLoader.exists(path):
+		var kind := ResourceLoader.get_resource_type(path)
+		if kind == "Texture2D" or kind.ends_with("Texture2D") or kind == "ImageTexture":
+			var icon = ResourceLoader.load(path)
+			if icon is Texture2D:
+				return icon
 	return get_editor_interface().get_base_control().get_theme_icon("GridMap", "EditorIcons")
 
 func _get_unsaved_status(_for_scene: String) -> String:

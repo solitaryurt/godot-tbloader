@@ -220,6 +220,9 @@ class TBMapDocument : public RefCounted {
 			const StringName &operation) const;
 	const LMBrush &current_brush(int entity, int brush) const;
 	std::string current_face_texture(int entity, int brush, int face) const;
+	const char *current_face_texture_cstr(int entity, int brush, int face) const;
+	String intern_face_texture(int entity, int brush, int face, void *intern_state) const;
+	Dictionary make_draw_brush_entry(int entity, int brush, void *intern_state) const;
 	BrushGeometryView current_brush_geometry(int entity, int brush) const;
 	std::shared_ptr<LMMapData> materialize_source_state(const std::shared_ptr<LMMapData> &base, const std::shared_ptr<const EditorState> &overlay) const;
 	std::shared_ptr<LMMapData> materialize_current_source() const;
@@ -233,6 +236,7 @@ class TBMapDocument : public RefCounted {
 	void commit(std::shared_ptr<LMMapData> candidate, std::shared_ptr<const TBMapDocumentState::BaseEditorGeometry> geometry, std::shared_ptr<const std::string> text, bool was_dirty);
 	Dictionary identities(const LMMapData &data) const;
 	bool apply_identities(LMMapData &data, const Dictionary &ids) const;
+	bool copy_identities(const LMMapData &from, LMMapData &to) const;
 	static Dictionary success(bool changed = false, const Variant &value = Variant());
 	static Dictionary failure(const StringName &code, const String &message, const StringName &operation, const String &path = String(), int line = 0, int column = 0);
 
@@ -280,6 +284,8 @@ public:
 	PackedInt64Array query_brushes_2d(int hidden_axis, Vector3 mins, Vector3 maxs) const;
 	Dictionary query_brush_2d_hit(int hidden_axis, Vector3 point, double tolerance, const PackedInt64Array &hidden_ids,
 			int filter_mask, const PackedInt64Array &selected_ids, bool prefer_selected) const;
+	Dictionary query_brush_camera_hit(Vector3 origin, Vector3 forward, Vector3 right, Vector3 up, Vector2 viewport_size,
+			double vertical_fov, Vector2 position, double aperture, const PackedInt64Array &hidden_ids, int filter_mask) const;
 	Array query_ray(Vector3 origin, Vector3 direction, double max_distance = 1e30) const;
 	Dictionary query_ray_nearest_visible(Vector3 origin, Vector3 direction, double max_distance, const PackedInt64Array &hidden_ids, int filter_mask) const;
 	Dictionary create_cuboid(Vector3 mins, Vector3 maxs, const String &texture);

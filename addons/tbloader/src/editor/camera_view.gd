@@ -109,6 +109,8 @@ var camera_rotation_axis := 2
 var camera_rotation_pivot := Vector3.ZERO
 var camera_rotation_start := 0.0
 var camera_rotation_angle := 0.0
+var camera_click_cycle_ids := PackedInt64Array()
+var camera_click_cycle_id := 0
 var surface_grid_visible := false
 var surface_grid_key: Array = []
 var ground_grid_key: Array = []
@@ -140,6 +142,7 @@ const MIN_DOLLY_STEP = 0.125
 const MAX_DOLLY_STEP = 128.0
 const DOLLY_STEP_FACTOR = 1.25
 const TRACKPAD_ZOOM_FACTOR = 1.25
+@export_range(2.0, 64.0, 1.0) var selector_half_size := 12.0
 const SKY_ENVIRONMENT_PROPERTIES = [
 	"background_mode",
 	"sky",
@@ -217,7 +220,11 @@ func _ready() -> void:
 		preview_panel.add_child(preview_controls)
 		add_child(preview_panel)
 	preview_panel.name = "CameraPreviewControls"
-	preview_panel.position = Vector2(31, 1)
+	preview_panel.set_anchors_and_offsets_preset(Control.PRESET_TOP_LEFT)
+	preview_panel.offset_left = 31
+	preview_panel.offset_top = 1
+	preview_panel.grow_horizontal = Control.GROW_DIRECTION_END
+	preview_panel.grow_vertical = Control.GROW_DIRECTION_END
 	preview_controls.add_theme_constant_override("separation", 0)
 	preview_sunlight_button = Button.new()
 	preview_sunlight_button.name = "PreviewSunlight"
@@ -287,20 +294,15 @@ func _ready() -> void:
 		segment.color = crosshair_color
 		segment.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		crosshair.add_child(segment)
-	var frame_button = Button.new()
-	frame_button.name = "FrameSelection"
-	frame_button.custom_minimum_size = Vector2(28, 28)
-	frame_button.size = Vector2(28, 28)
-	frame_button.tooltip_text = "Frame selection"
-	frame_button.accessibility_name = "Frame selection"
-	frame_button.theme_type_variation = "FlatButton"
-	var frame_icon: Texture2D = host.custom_icon("frame_selection") if is_instance_valid(host) else null
-	frame_button.icon = frame_icon
-	frame_button.text = ""
-	frame_button.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
-	frame_button.position = Vector2(-32, 4)
-	frame_button.pressed.connect(frame_selection)
-	add_child(frame_button)
+	var titlebar_actions := HBoxContainer.new()
+	titlebar_actions.name = "CameraTitlebarActions"
+	titlebar_actions.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
+	titlebar_actions.offset_right = -4
+	titlebar_actions.offset_top = 4
+	titlebar_actions.grow_horizontal = Control.GROW_DIRECTION_BEGIN
+	titlebar_actions.grow_vertical = Control.GROW_DIRECTION_END
+	titlebar_actions.add_theme_constant_override("separation", 4)
+	add_child(titlebar_actions)
 	built_appearance_button = Button.new()
 	built_appearance_button.name = "BuiltAppearance"
 	built_appearance_button.text = "Built appearance"
@@ -308,11 +310,20 @@ func _ready() -> void:
 	built_appearance_button.tooltip_text = "Preview PBR materials and visual geometry using TBLoader build rules"
 	built_appearance_button.accessibility_name = "Built appearance"
 	built_appearance_button.theme_type_variation = "FlatButton"
-	built_appearance_button.set_anchors_and_offsets_preset(Control.PRESET_TOP_RIGHT)
-	built_appearance_button.position = Vector2(-162, 4)
-	built_appearance_button.size = Vector2(126, 28)
+	built_appearance_button.custom_minimum_size.y = 28
 	built_appearance_button.toggled.connect(set_built_appearance)
-	add_child(built_appearance_button)
+	titlebar_actions.add_child(built_appearance_button)
+	var frame_button = Button.new()
+	frame_button.name = "FrameSelection"
+	frame_button.custom_minimum_size = Vector2(28, 28)
+	frame_button.tooltip_text = "Frame selection"
+	frame_button.accessibility_name = "Frame selection"
+	frame_button.theme_type_variation = "FlatButton"
+	var frame_icon: Texture2D = host.custom_icon("frame_selection") if is_instance_valid(host) else null
+	frame_button.icon = frame_icon
+	frame_button.text = ""
+	frame_button.pressed.connect(frame_selection)
+	titlebar_actions.add_child(frame_button)
 	focus_exited.connect(cancel_interaction)
 
 func _sync_suspension(force_suspended := false) -> void:
@@ -337,6 +348,8 @@ func cancel_gesture() -> void:
 	camera_hit.clear()
 	camera_component.clear()
 	brush_paint_visited.clear()
+	camera_click_cycle_ids.clear()
+	camera_click_cycle_id = 0
 	ctrl_gesture = ""
 	ctrl_start_hit.clear()
 	ctrl_visited.clear()
@@ -808,24 +821,6 @@ func set_candidate_preview(candidates: Array) -> void:
 		and candidate_edge_buffer.size() > 0 \
 		and candidate_point_buffer.size() > 0
 	if transform_only:
-		# Verify retained buffer sizes still match; otherwise fall back to rebuild.
-		var expected_triangles := 0
-		var expected_edges := 0
-		var expected_points := 0
-		for brush in candidates:
-			var verts: PackedVector3Array = brush.get("vertices", PackedVector3Array())
-			var edgs: PackedVector3Array = brush.get("edges", PackedVector3Array())
-			expected_points += verts.size()
-			expected_edges += edgs.size()
-			for face in brush.get("faces", []):
-				var winding: PackedVector3Array = face.winding
-				if winding.size() >= 3:
-					expected_triangles += (winding.size() - 2) * 3
-		if expected_triangles != candidate_triangle_buffer.size() \
-				or expected_edges != candidate_edge_buffer.size() \
-				or expected_points != candidate_point_buffer.size():
-			transform_only = false
-	if transform_only:
 		candidate_fast_path_hits += 1
 	else:
 		candidate_slow_path_builds += 1
@@ -841,7 +836,6 @@ func set_candidate_preview(candidates: Array) -> void:
 				var winding: PackedVector3Array = face.winding
 				if winding.size() >= 3:
 					triangle_total += (winding.size() - 2) * 3
-		# resize retains capacity when shrinking or keeping size; grows once.
 		candidate_triangle_buffer.resize(triangle_total)
 		candidate_edge_buffer.resize(edge_total)
 		candidate_point_buffer.resize(point_total)
@@ -1202,15 +1196,20 @@ func rebuild_geometry(scale_value: float) -> void:
 		host.session.hidden_brush_ids(), host.session.visibility_filter_mask(), CHUNK_TRIANGLES, CHUNK_SIZE)
 	triangle_count = manifest.get("triangle_count", 0)
 	var active_keys: Dictionary = {}
+	var materials: Dictionary = {}
+	var loader = host.session.loader.get_ref()
+	var visual_layer: int = loader.option_visual_layer_mask if is_instance_valid(loader) else 1
 	for entry in manifest.get("chunks", []):
 		var key: String = entry.chunk_id
 		active_keys[key] = true
 		var category: String = entry.get("render_category", "opaque")
-		var material: Material = host.preview_material(entry.texture, category)
+		var material_key := "%s|%s" % [entry.texture, category]
+		var material: Material = materials.get(material_key)
+		if material == null:
+			material = host.preview_material(entry.texture, category)
+			materials[material_key] = material
 		var cached: Dictionary = geometry_chunks.get(key, {})
 		if not cached.is_empty() and cached.get("geometry_hash") == entry.geometry_hash and cached.get("geometry_version") == entry.geometry_version:
-			var loader = host.session.loader.get_ref()
-			var visual_layer: int = loader.option_visual_layer_mask if is_instance_valid(loader) else 1
 			if cached.get("texture") != entry.texture or cached.get("render_category") != category:
 				apply_preview_material(cached.instance, material, category)
 				chunk_renderer_write_count += 1
@@ -1731,27 +1730,40 @@ func begin_camera_left(event: InputEventMouseButton) -> void:
 		return
 	if host.tool in ["Select", "Brush"]:
 		camera_hit = face_hit(event.position)
+		var aperture_hit := brush_aperture_hit(event.position)
 		if event.shift_pressed:
 			camera_gesture = "brush_paint"
-			brush_paint_select = camera_hit.is_empty() or not host.session.selected.has(camera_hit.brush_id)
-			paint_brush(camera_hit)
+			var paint_hit: Dictionary = camera_hit if not camera_hit.is_empty() else aperture_hit
+			brush_paint_select = paint_hit.is_empty() or not host.session.selected.has(paint_hit.get("brush_id", 0))
+			paint_brush(paint_hit)
 			return
-		if not camera_hit.is_empty() and host.session.selected.has(camera_hit.brush_id) and not event.shift_pressed:
+		var selected_hit := selected_aperture_face_hit(event.position, aperture_hit.get("brush_ids", PackedInt64Array()))
+		if not selected_hit.is_empty():
+			camera_hit = selected_hit
+			camera_click_cycle_ids = aperture_hit.get("brush_ids", PackedInt64Array())
+			camera_click_cycle_id = camera_hit.brush_id
 			camera_drag_anchor = camera_hit.position
 			camera_gesture = "move_pending"
 			return
-		if not camera_hit.is_empty():
-			apply_pick(camera_hit.brush_id, 0, camera_hit.face_index, event.shift_pressed)
-		else:
-			pick_crosshair(event.shift_pressed)
+		var aperture_id := int(aperture_hit.get("brush_id", 0))
+		if aperture_id and host.session.selected.has(aperture_id):
+			camera_click_cycle_ids = aperture_hit.get("brush_ids", PackedInt64Array())
+			camera_click_cycle_id = aperture_id
+			camera_hit = {"brush_id": aperture_id, "face_index": -1}
+			camera_gesture = "cycle_pending"
+			return
+		pick(event.position, false)
 		return
 	pick(event.position, event.shift_pressed, false, host.tool == "Face")
 
 func update_camera_gesture(position: Vector2) -> void:
 	if camera_gesture == "brush_paint":
-		paint_brush(face_hit(position))
+		paint_brush(brush_aperture_hit(position))
 		return
 	if camera_gesture.ends_with("_pending") and position.distance_to(camera_press_position) < DRAG_THRESHOLD:
+		return
+	if camera_gesture == "cycle_pending":
+		camera_gesture = "cycle_cancelled"
 		return
 	if camera_gesture == "move_pending":
 		camera_gesture = "move"
@@ -1803,8 +1815,12 @@ func finish_camera_left() -> void:
 	var angle := camera_rotation_angle
 	if gesture == "brush_paint":
 		pass
-	elif gesture == "move_pending" and not camera_hit.is_empty():
-		apply_pick(camera_hit.brush_id, 0, camera_hit.face_index, false)
+	elif gesture in ["move_pending", "cycle_pending"] and not camera_hit.is_empty():
+		var current := camera_click_cycle_ids.find(camera_click_cycle_id)
+		if current >= 0 and camera_click_cycle_ids.size() > 1:
+			host.session.select(PackedInt64Array([camera_click_cycle_ids[(current + 1) % camera_click_cycle_ids.size()]]))
+		else:
+			apply_pick(camera_hit.brush_id, 0, camera_hit.face_index, false)
 	elif gesture == "move" and not movement.is_zero_approx():
 		host.session.transact("Move map selection", func(): return host.session.translate_brushes(host.session.selected, movement), "brush_translation")
 	elif gesture == "component" and not movement.is_zero_approx():
@@ -1840,7 +1856,7 @@ func _gui_input(event: InputEvent) -> void:
 			accept_event()
 		elif event.button_index == MOUSE_BUTTON_LEFT:
 			if event.pressed:
-				if event.ctrl_pressed:
+				if event.is_command_or_control_pressed():
 					begin_ctrl_gesture(event.position)
 				else:
 					begin_camera_left(event)
@@ -1885,6 +1901,25 @@ func face_hit(position: Vector2) -> Dictionary:
 	var direction := camera.project_ray_normal(position)
 	return host.session.nearest_visible_ray_hit(preview_to_map(ray, scale_value),
 		preview_direction_to_map(direction), 1e30)
+
+func brush_aperture_hit(position: Vector2) -> Dictionary:
+	var scale_value := map_scale()
+	return host.session.document.query_brush_camera_hit(
+		camera_map_position(scale_value), camera_map_direction(),
+		preview_direction_to_map(camera.global_basis.x), preview_direction_to_map(camera.global_basis.y),
+		size, camera.fov, position, selector_half_size,
+		host.session.hidden_brush_ids(), host.session.visibility_filter_mask())
+
+func selected_aperture_face_hit(position: Vector2, ranked_ids: PackedInt64Array) -> Dictionary:
+	if host.session.selected.is_empty() or ranked_ids.is_empty():
+		return {}
+	var scale_value := map_scale()
+	var origin := preview_to_map(camera.project_ray_origin(position), scale_value)
+	var direction := preview_direction_to_map(camera.project_ray_normal(position))
+	for hit in host.session.visible_ray_hits(origin, direction):
+		if ranked_ids.has(hit.brush_id) and host.session.selected.has(hit.brush_id):
+			return hit
+	return {}
 
 func face_component(hit: Dictionary) -> Dictionary:
 	if hit.is_empty():
@@ -2019,26 +2054,34 @@ func pick(position: Vector2, additive: bool, paint = false, face_pick = false) -
 	var direction := camera.project_ray_normal(position)
 	var map_ray := preview_to_map(ray, scale_value)
 	var nearest = INF
+	var marker_screen_distance = INF
 	var point_id = 0
 	for marker in host.session.point_markers():
 		if not host.session.marker_visible():
 			continue
 		var p = transform_map(marker.origin)
-		if not camera.is_position_behind(p) and camera.unproject_position(p).distance_to(position) < 14:
-			var distance = map_ray.distance_to(marker.origin)
-			if distance < nearest:
+		if not camera.is_position_behind(p):
+			var projected := camera.unproject_position(p)
+			var delta := (projected - position).abs()
+			var screen_distance := projected.distance_to(position)
+			var distance := camera_map_direction().dot(marker.origin - camera_map_position())
+			if delta.x <= selector_half_size and delta.y <= selector_half_size and (screen_distance < marker_screen_distance or (is_equal_approx(screen_distance, marker_screen_distance) and distance < nearest)):
 				nearest = distance
+				marker_screen_distance = screen_distance
 				point_id = marker.id
 	var id = 0
 	var face_index = -1
-	var max_distance: float = nearest if is_finite(nearest) else 1e30
-	var hit: Dictionary = host.session.nearest_visible_ray_hit(map_ray,
-		preview_direction_to_map(direction), max_distance)
-	if not hit.is_empty() and hit.distance < nearest:
-		nearest = hit.distance
-		id = hit.brush_id
-		point_id = 0
-		face_index = hit.face_index
+	if host.tool == "Face" or face_pick:
+		var hit: Dictionary = host.session.nearest_visible_ray_hit(map_ray, preview_direction_to_map(direction), 1e30)
+		if not hit.is_empty() and hit.distance < nearest:
+			id = hit.brush_id
+			point_id = 0
+			face_index = hit.face_index
+	else:
+		var hit := brush_aperture_hit(position)
+		if not hit.is_empty() and (point_id == 0 or hit.depth < nearest or (not hit.direct and hit.screen_distance < marker_screen_distance)):
+			id = hit.brush_id
+			point_id = 0
 	apply_pick(id, point_id, face_index, additive, paint, face_pick)
 
 func apply_pick(id: int, point_id: int, face_index: int, additive: bool, paint = false, face_pick = false) -> void:
@@ -2172,13 +2215,16 @@ func _input(event: InputEvent) -> void:
 			else:
 				finish_rmb()
 		elif radiant_camera_behavior and event.button_index == MOUSE_BUTTON_LEFT:
-			selection_painting = event.pressed and event.shift_pressed and not event.ctrl_pressed and host.session.components.is_empty()
+			var quick_face: bool = event.is_command_or_control_pressed()
+			selection_painting = event.pressed and event.shift_pressed and not quick_face and host.session.components.is_empty()
 			if event.pressed:
-				if event.ctrl_pressed:
+				if quick_face:
 					pick_crosshair(false, false, true)
 				elif not event.shift_pressed or selection_painting:
 					pick_crosshair(event.shift_pressed, selection_painting)
 	elif event is InputEventKey:
+		if event.is_command_or_control_pressed() and event.keycode in [KEY_Z, KEY_Y]:
+			return
 		if event.keycode == KEY_ESCAPE:
 			stop_fly()
 		elif event.pressed and not event.echo and event.keycode in [KEY_DELETE, KEY_BACKSPACE]:

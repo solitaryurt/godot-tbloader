@@ -133,7 +133,7 @@ the Godot wrapper is verified in the real runtime, not sanitizer-instrumented.
 Acceptance covers successful single tetrahedron vertex, paired cube vertices,
 single edge and multi-edge/face deformation; multi-brush atomic success/rejection;
 duplicate/shared handles; stale IDs/tokens (including unrelated-edit undo preventing
-stale selection revival); preserved Ctrl+LMB quick-face selection;
+stale selection revival); preserved Ctrl+LMB (Command+LMB on macOS) quick-face selection;
 nonplanar, collapsed and inverted edits;
 axis-constrained snapping; isolated material edits and exact surviving-face UVs;
 2D clip/flip/split on all axes via graph/key handlers; half-space boundary cases,
