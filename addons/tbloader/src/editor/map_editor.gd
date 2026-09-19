@@ -51,7 +51,6 @@ var tool = "Brush"
 var tool_buttons: Dictionary = {}
 var visibility_buttons: Dictionary = {}
 var loader_actions: Dictionary = {}
-var tokens: Array = []
 var material_cache: Dictionary = {}
 var texture_sizes: Dictionary = {}
 var material_generation = 0
@@ -910,7 +909,6 @@ func set_session(value: RefCounted) -> void:
 	if not session.scene_managed:
 		last_standalone = weakref(session)
 	session.save_enabled = true
-	session.manager = plugin.get_undo_redo()
 	if not sessions.has(session):
 		session.changed.connect(_session_changed.bind(session))
 		session.message.connect(set_status)
@@ -943,29 +941,27 @@ func _session_changed(origin: RefCounted) -> void:
 		else:
 			refresh()
 	else:
-		# Global undo can dirty a retained document without changing the active view.
+		# Background content changes still update tab dirty state without refreshing panes.
 		refresh_status()
 
 func retain_action(token: RefCounted) -> void:
-	token.reporter = Callable(self, "set_status")
-	tokens.append(token)
-	var total = 0
-	var local = 0
-	var count = 0
-	for item in tokens:
-		total += item.bytes
-		if item.session == token.session:
-			local += item.bytes
-			count += 1
-	for item in tokens:
-		var same: bool = item.session == token.session
-		if total > history_total_budget or (same and (local > history_session_budget or count > history_action_budget)):
-			total -= item.bytes
-			if same:
-				local -= item.bytes
-				count -= 1
-			item.retire()
-	tokens = tokens.filter(func(item): return item.session != null)
+	token.session.history_enforce_limits(history_action_budget, history_session_budget)
+	while history_total_bytes() > history_total_budget:
+		var candidate: RefCounted
+		var sequence := 0
+		for origin in sessions:
+			var origin_sequence: int = origin.history_oldest_evictable_sequence()
+			if origin_sequence > 0 and (sequence == 0 or origin_sequence < sequence):
+				candidate = origin
+				sequence = origin_sequence
+		if candidate == null or not candidate.history_evict_oldest():
+			break
+
+func history_total_bytes() -> int:
+	var total := 0
+	for origin in sessions:
+		total += origin.history_bytes()
+	return total
 
 func cancel_interaction() -> void:
 	clear_mutation_preview()
@@ -1103,10 +1099,6 @@ func close_document(origin: RefCounted) -> void:
 			scene_sessions.erase(id)
 	if last_standalone.get_ref() == origin:
 		last_standalone = weakref(null)
-	for token in tokens:
-		if token.session == origin:
-			token.retire()
-	tokens = tokens.filter(func(token): return token.session != null)
 	origin.dispose()
 	discard_on_replace = null
 	set_session(replacement if replacement != null else Session.new())
@@ -1209,15 +1201,13 @@ func route_key(event: InputEventKey, graph: Control) -> bool:
 		match key:
 			KEY_Z, KEY_Y:
 				cancel_interaction()
-				var history = plugin.get_undo_redo().get_history_undo_redo(EditorUndoRedoManager.GLOBAL_HISTORY)
 				var redoing := key == KEY_Y or event.shift_pressed
-				if (redoing and not history.has_redo()) or (not redoing and not history.has_undo()):
+				var action_name: String = session.history_redo_name() if redoing else session.history_undo_name()
+				if action_name.is_empty():
 					set_status("Nothing to redo." if redoing else "Nothing to undo.")
 					return true
-				var action_index: int = history.get_current_action() + (1 if redoing else 0)
-				var action_name: String = history.get_action_name(action_index)
 				var message_generation := notice_generation
-				var changed: bool = history.redo() if redoing else history.undo()
+				var changed: bool = session.history_redo() if redoing else session.history_undo()
 				if changed and notice_generation == message_generation:
 					set_status("%s: %s" % ["Redid" if redoing else "Undid", action_name])
 			KEY_TAB:
@@ -2185,8 +2175,8 @@ func commit_bake(loader: Node, origin: RefCounted = null) -> bool:
 	return true
 
 func save_all(defer_bake = false) -> void:
-	# Retained background sessions can become dirty via global undo. Save those
-	# synchronously too; never redirect a save or bake through the selected loader.
+	# Save retained dirty background sessions synchronously too; never redirect a
+	# save or bake through the selected loader.
 	var untitled: RefCounted
 	for origin in sessions:
 		if origin == null or not origin.save_enabled or not origin.has_unsaved_changes():
@@ -2240,9 +2230,6 @@ func shutdown() -> void:
 	# explicit plugin teardown disposes documents; tree exit alone is not teardown.
 	cancel_interaction()
 	shutting_down = true
-	for token in tokens:
-		token.retire()
-	tokens.clear()
 	material_cache.clear()
 	for origin in sessions:
 		origin.dispose()
@@ -2347,12 +2334,6 @@ func restore_recovery() -> void:
 		restored_indices.append(index)
 	if restored.is_empty():
 		return
-	# Godot cannot remove individual expired global history entries. Retire their
-	# payloads before recovery disposes the old sessions; callbacks remain no-ops.
-	for token in tokens:
-		if sessions.has(token.session):
-			token.retire()
-	tokens = tokens.filter(func(token): return token.session != null)
 	for origin in sessions:
 		origin.dispose()
 	sessions.clear()

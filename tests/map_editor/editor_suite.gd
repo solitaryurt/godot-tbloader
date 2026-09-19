@@ -69,9 +69,80 @@ func paste_map_clipboard(exported: String) -> void:
 func text() -> String:
 	return ui.session.document.export_text().value
 
+func map_history_version(origin: RefCounted = null) -> int:
+	if origin == null:
+		origin = ui.session
+	return origin.history_action_count() * 1000 + origin.history_cursor()
+
 func select_none() -> void:
 	ui.session.select(PackedInt64Array())
 	ui.set_tool("Brush")
+
+func per_document_history_regression() -> void:
+	var original = ui.session
+	var Session = load("res://addons/tbloader/src/editor/map_session.gd")
+	var a = Session.new()
+	var b = Session.new()
+	ui.set_session(a)
+	checks.check(a.transact("Edit document A", func():
+		var result: Dictionary = a.document.create_cuboid(Vector3.ZERO, Vector3.ONE * 16, "history/a")
+		if result.ok:
+			a.select(PackedInt64Array([result.value]))
+		return result
+	), "document A records its own action")
+	var a_first: String = a.document.export_text().value
+	var a_selected: PackedInt64Array = a.selected.duplicate()
+	ui.set_session(b)
+	checks.check(b.transact("Edit document B", func():
+		var result: Dictionary = b.document.create_cuboid(Vector3.ONE * 32, Vector3.ONE * 48, "history/b")
+		if result.ok:
+			b.select(PackedInt64Array([result.value]))
+		return result
+	), "document B records its own action")
+	var b_edited: String = b.document.export_text().value
+	var b_selected: PackedInt64Array = b.selected.duplicate()
+	ui.set_session(a)
+	checks.check(a.transact("Move document A", func(): return a.translate_brushes(a.selected, Vector3.RIGHT * 16)),
+		"interleaved second action records in document A")
+	var a_second: String = a.document.export_text().value
+	ui.set_session(b)
+	ui.active_graph.grab_focus()
+	key(KEY_Z, true)
+	checks.check(b.document.export_text().value != b_edited and a.document.export_text().value == a_second
+		and b.history_cursor() == 0 and ui.notice.text == "Undid: Edit document B",
+		"undo in active B changes only B and reports its action")
+	ui.set_session(a)
+	ui.active_graph.grab_focus()
+	key(KEY_Z, true)
+	checks.check(a.document.export_text().value == a_first and a.selected == a_selected
+		and b.history_cursor() == 0 and ui.notice.text == "Undid: Move document A",
+		"switching to A restores A content and selection only")
+	ui.set_session(b)
+	ui.active_graph.grab_focus()
+	key(KEY_Y, true)
+	checks.check(b.document.export_text().value == b_edited and b.selected == b_selected
+		and b.history_cursor() == 1 and ui.notice.text == "Redid: Edit document B",
+		"B cursor, redo, selection, and action notice survive tab switches")
+	key(KEY_Z, true)
+	var a_cursor: int = a.history_cursor()
+	checks.check(b.transact("Replace document B redo", func(): return b.document.create_cuboid(Vector3.ONE * 64, Vector3.ONE * 80, "history/branch"))
+		and b.history_action_names() == PackedStringArray(["Replace document B redo"])
+		and b.history_cursor() == 1 and a.history_cursor() == a_cursor,
+		"new B edit truncates only B redo with linear history semantics")
+	var count: int = b.history_action_count()
+	checks.check(not b.transact("No-op history", func(): return b.document.translate_brushes(PackedInt64Array(), Vector3.RIGHT))
+		and b.history_action_count() == count, "no-op transaction adds no document history")
+	var failed_text: String = b.document.export_text().value
+	checks.check(not b.transact("Failed history", func(): return b.document.set_entity_property(9223372036854775807, "bad", "value"))
+		and b.history_action_count() == count and b.document.export_text().value == failed_text,
+		"failed transaction is atomic and adds no document history")
+	var action_ref := weakref(b.history_actions()[0])
+	ui.close_document(b)
+	b = null
+	checks.check(action_ref.get_ref() == null, "closing a document releases its retained history actions")
+	ui.set_session(original)
+	ui.close_document(a)
+	a = null
 
 func run() -> void:
 	var suite = OS.get_environment("TB_TEST_SUITE")
@@ -338,7 +409,7 @@ func run() -> void:
 		mouse(graph, graph.project(Vector3(0, 24, 0)), false)
 		var rotated: String = text()
 		checks.check(rotated != before_rotate and ui.session.brush(created.value).aabb_min.is_equal_approx(Vector3(-16, -32, -16)), "Rotate release commits valid brush geometry")
-		checks.check(history.undo() and text() == before_rotate, "Rotate action uses exact editor undo")
+		checks.check(ui.session.history_undo() and text() == before_rotate, "Rotate action uses exact document undo")
 		checks.finish(get_tree(), suite)
 		return
 	checks.check(ui.camera_view.preview_lights.get_child_count() == 1 and ui.camera_view.preview_lights.get_child(0).shadow_enabled, "standalone camera uses shadowed fallback sun")
@@ -385,7 +456,7 @@ func run() -> void:
 	mouse(graph, graph.project(Vector3.ZERO), true)
 	checks.check(text() == before, "press inserts no geometry")
 	mouse(graph, graph.project(Vector3.ZERO), false)
-	checks.check(text() == before and ui.tokens.is_empty(), "degenerate click adds no history")
+	checks.check(text() == before and ui.session.history_action_count() == 0, "degenerate click adds no history")
 	drag(graph, Vector3(-65, -49, 0), Vector3(63, 47, 0))
 	checks.check(ui.session.selected.size() == 1, "actual graph drag creates and selects")
 	var id: int = ui.session.selected[0]
@@ -400,8 +471,7 @@ func run() -> void:
 	checks.check(graph.orientation == 1 and graph.project(selected_center).distance_to(graph.size * 0.5) < 1.0,
 		"Ctrl Tab keeps selected brushes centered in the new grid angle")
 	graph.set_orientation(2)
-	checks.check(ui.tokens.size() == 1, "one gesture one action")
-	checks.check(manager.get_object_history_id(ui.session) == EditorUndoRedoManager.GLOBAL_HISTORY, "map session uses real global editor history")
+	checks.check(ui.session.history_action_count() == 1, "one gesture one action")
 	checks.check(ui.camera_view.triangle_count == 12, "camera generated from native preview")
 	var preview_nodes: Array[Node] = ui.camera_view.map_geometry.get_children()
 	var caulk_preview: BaseMaterial3D = preview_nodes[0].material_override
@@ -430,7 +500,7 @@ func run() -> void:
 	await get_tree().process_frame
 	checks.check(text() == before, "actual viewport Ctrl Z dispatch undoes exactly once")
 	key(KEY_Y, true)
-	var count: int = ui.tokens.size()
+	var count: int = ui.session.history_action_count()
 	mouse(graph, graph.project(Vector3.ZERO), true)
 	motion(graph, graph.project(Vector3(32, 0, 0)))
 	await get_tree().process_frame
@@ -443,7 +513,7 @@ func run() -> void:
 		"sparse move gesture masks the original gray selection without rebuilding static edges")
 	checks.check(text() == created, "gesture motion is disposable preview")
 	key(KEY_ESCAPE)
-	checks.check(text() == created and ui.tokens.size() == count and graph.gesture == "", "Esc cancel no history")
+	checks.check(text() == created and ui.session.history_action_count() == count and graph.gesture == "", "Esc cancel no history")
 	var rotation_before: String = text()
 	var rotation_bounds: Dictionary = ui.session.brush(id)
 	var rotation_center: Vector3 = (rotation_bounds.aabb_min + rotation_bounds.aabb_max) * 0.5
@@ -464,7 +534,7 @@ func run() -> void:
 	var rotation_after: String = text()
 	var rotated_brush: Dictionary = ui.session.brush(id)
 	checks.check(rotated_brush.aabb_min.is_equal_approx(Vector3(-48, -64, -64)) and rotated_brush.aabb_max.is_equal_approx(Vector3(48, 64, 64)), "top-grid rotate swaps projected brush extents and preserves hidden axis")
-	checks.check(rotation_after != rotation_before and ui.tokens.size() == count + 1, "rotate release commits one action")
+	checks.check(rotation_after != rotation_before and ui.session.history_action_count() == count + 1, "rotate release commits one action")
 	key(KEY_Z, true)
 	checks.check(text() == rotation_before and ui.session.brush(id).aabb_min == rotation_bounds.aabb_min, "rotate undo restores exact text and geometry")
 	key(KEY_Y, true)
@@ -524,11 +594,11 @@ func run() -> void:
 	ui.merge_selection()
 	var merged_id: int = ui.session.selected[0] if ui.session.selected.size() == 1 else -1
 	checks.check(merged_id > 0 and merged_id != merge_a.value and merged_id != merge_b.value and ui.session.brush(merge_a.value).is_empty(), "Merge UI selects the fresh merged brush ID")
-	checks.check(history.undo() and text() == pre_merge and ui.session.selected == PackedInt64Array([merge_a.value, merge_b.value]), "Merge uses one undoable session transaction")
-	var merge_token_count: int = ui.tokens.size()
+	checks.check(ui.session.history_undo() and text() == pre_merge and ui.session.selected == PackedInt64Array([merge_a.value, merge_b.value]), "Merge uses one undoable session transaction")
+	var merge_token_count: int = ui.session.history_action_count()
 	ui.session.select(PackedInt64Array([merge_a.value]))
 	ui.merge_selection()
-	checks.check(ui.tokens.size() == merge_token_count and ui.notice.text.contains("INVALID_ARGUMENT"), "invalid Merge reports without creating history")
+	checks.check(ui.session.history_action_count() == merge_token_count and ui.notice.text.contains("INVALID_ARGUMENT"), "invalid Merge reports without creating history")
 	merge_session.save_enabled = false
 	ui.set_session(merge_origin)
 	ui.session.select(PackedInt64Array([id]))
@@ -772,7 +842,6 @@ func run() -> void:
 	checks.check(ui.save_path("res://journey.map"), "save entity/material journey")
 	var journey = text()
 	var original_session = ui.session
-	var token: RefCounted = ui.tokens.back()
 	checks.check(not ui.open_path("res://missing.map") and ui.session == original_session, "failed open keeps active session")
 	var open_count = ui.sessions.size()
 	checks.check(ui.open_path("res://journey.map") and ui.session == original_session and ui.sessions.size() == open_count, "opening an existing path activates its tab without duplicating the document")
@@ -781,15 +850,11 @@ func run() -> void:
 	ui.set_session(new_session)
 	new_session.save_enabled = false
 	key(KEY_Z, true)
-	checks.check(ui.session == new_session and text() == journey and original_session.document.export_text().value != journey, "background undo targets originating session only")
-	checks.check(original_session.document.is_dirty() and not ui.unsaved_status().is_empty(), "background undo participates in editor unsaved reporting")
+	checks.check(ui.session == new_session and text() == journey and ui.notice.text == "Nothing to undo.", "document without history cannot undo another document")
+	checks.check(not original_session.document.is_dirty(), "active-document undo leaves the background saved document unchanged")
 	checks.check(ui.document_tabs.tab_count >= 3, "retained sessions are accessible through document tabs")
-	key(KEY_Y, true)
-	checks.check(original_session.document.export_text().value == journey, "background redo returns originating session to saved baseline")
-	token.retire()
-	token.restore(false)
-	checks.check(ui.notice.text.contains("expired") and text() == journey, "retired history explicit status and no redirection")
 	ui.set_session(original_session)
+	per_document_history_regression()
 	# Failed save and external conflict must never launch a destructive bake.
 	checks.check(not ui.save_path("res://no_such_directory/map.map"), "Save As failure surfaced")
 	checks.check(ui.session.document.get_path() == "res://journey.map", "failed Save As preserves path")
@@ -1302,11 +1367,16 @@ func binding_journey(plugin: EditorPlugin) -> void:
 		"bake history retains one detached predecessor subtree and no packed generated snapshots")
 	checks.check(ui.camera_view.triangle_count == 0 and not hidden_ids.is_empty(), "bake retains brushes hidden from editor preview")
 	ui.session.hide_selection(true)
+	var map_cursor_before_scene_undo: int = ui.session.history_cursor()
+	var map_count_before_scene_undo: int = ui.session.history_action_count()
 	checks.check(scene_history.undo() and loader.has_node("PreviousOutput"), "bake undo uses scene history and restores prior children")
 	checks.check(not bake_action.get_retention_counters().live_is_after
 		and bake_action.get_retention_counters().detached_root_count > 0,
 		"bake undo swaps generated output into the single detached history subtree")
 	checks.check(scene_history.redo() and not loader.has_node("PreviousOutput"), "bake scene redo restores generated nodes")
+	checks.check(ui.session.history_cursor() == map_cursor_before_scene_undo
+		and ui.session.history_action_count() == map_count_before_scene_undo,
+		"bake scene undo/redo does not enter or move map history")
 	checks.check(loader.get_child(0).owner == root, "bake history restores scene ownership")
 	var previous_output: Node = loader.get_child(0)
 	loader.entity_path = "res://unavailable-prefabs"
@@ -1323,8 +1393,13 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	checks.check(loader.map_resource == "res://journey-copy.map" and not ui.bake(), "Save As cannot silently retarget bound loader")
 	ui.update_loader_path()
 	checks.check(loader.map_resource == "res://journey-bound.map", "explicit loader path update")
+	map_cursor_before_scene_undo = ui.session.history_cursor()
+	map_count_before_scene_undo = ui.session.history_action_count()
 	checks.check(scene_history.undo() and loader.map_resource == "res://journey-copy.map", "loader path scene undo")
 	checks.check(scene_history.redo() and loader.map_resource == "res://journey-bound.map", "loader path scene redo")
+	checks.check(ui.session.history_cursor() == map_cursor_before_scene_undo
+		and ui.session.history_action_count() == map_count_before_scene_undo,
+		"loader path scene undo/redo does not enter or move map history")
 	checks.check(ui.bake(), "bake after explicit path update")
 	# Reproduce the enclosing scene-save order, not just the plugin hook.
 	ui.rebuild_on_save.button_pressed = true
@@ -1623,7 +1698,7 @@ func tohunga_editor_journey() -> void:
 		var edited_preview_nodes: Array[Node] = ui.camera_view.map_geometry.get_children()
 		print("TB_TOHUNGA_CHUNKS:%d:%d:%d" % [preview_nodes.size(), edited_preview_nodes.size(), preview_nodes.filter(func(node): return edited_preview_nodes.has(node)).size()])
 		checks.check(preview_nodes.any(func(node): return edited_preview_nodes.has(node)), "localized Tohunga edit retains unaffected camera preview chunks")
-		checks.check(history.undo() and text() == canonical, "editor undo restores exact Tohunga document")
+		checks.check(ui.session.history_undo() and text() == canonical, "editor undo restores exact Tohunga document")
 	ui.set_session(previous_session)
 
 func reopen_journey(plugin: EditorPlugin) -> void:
@@ -1703,13 +1778,13 @@ func review_regressions(plugin: EditorPlugin) -> void:
 
 	var global_stale = Session.new()
 	ui.set_session(global_stale)
-	checks.check(global_stale.transact("Global stale fallback fixture", func(): return global_stale.document.create_cuboid(Vector3.ZERO, Vector3.ONE * 8, "review/global")),
-		"record actual global structural fallback action")
-	var global_token = ui.tokens.back()
+	checks.check(global_stale.transact("Stale local fixture", func(): return global_stale.document.create_cuboid(Vector3.ZERO, Vector3.ONE * 8, "review/local")),
+		"record local structural history action")
 	global_stale.document.create_cuboid(Vector3.ONE * 16, Vector3.ONE * 24, "review/out-of-band")
 	var global_stale_text: String = global_stale.document.export_text().value
-	checks.check(history.undo() and global_token.session == null and global_stale.document.export_text().value == global_stale_text,
-		"actual global stale history callback advances cursor as a safe retired no-op")
+	checks.check(not global_stale.history_undo() and global_stale.history_action_count() == 0
+		and global_stale.document.export_text().value == global_stale_text,
+		"out-of-band mutation retires stale local history without restoring it")
 	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
 	var accounting_before: Dictionary = ui.session.capture()
 	var small_envelope_bytes: int = ui.session.ui_envelope_retained_bytes(accounting_before)
@@ -1734,14 +1809,14 @@ func review_regressions(plugin: EditorPlugin) -> void:
 	var accounting_token: int = ui.session.brush(accounting_id).topology_revision
 	var rollback_text: String = ui.session.document.export_text().value
 	var rollback_generation: int = ui.session.document.get_state_generation()
-	var rollback_tokens: int = ui.tokens.size()
+	var rollback_tokens: int = ui.session.history_action_count()
 	checks.check(not ui.session.transact("Atomic rollback review", func():
 		var moved: Dictionary = ui.session.document.translate_brushes(PackedInt64Array([accounting_id]), Vector3.RIGHT)
 		if not moved.ok:
 			return moved
 		return ui.session.document.set_face_texture(9223372036854775807, 0, "bad", accounting_token)
 	) and ui.session.document.export_text().value == rollback_text
-		and ui.session.document.get_state_generation() == rollback_generation and ui.tokens.size() == rollback_tokens,
+		and ui.session.document.get_state_generation() == rollback_generation and ui.session.history_action_count() == rollback_tokens,
 		"failed second command rolls back the first mutation without recording history")
 	var fatal_rollback = Session.new()
 	var fatal_messages: Array[String] = []
@@ -1794,16 +1869,17 @@ func review_regressions(plugin: EditorPlugin) -> void:
 	review_edit("edit reactivates")
 	checks.check(retained.save_enabled, "successful transaction reactivates retained session")
 	ui.save_all()
-	# No incidental strong reference remains to the background document/token.
+	# No incidental strong reference remains to the background document/history.
 	var background = make_budget_background()
 	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
-	checks.check(history.undo(), "actual global history makes background document dirty")
 	var expected: String = background.get_ref().document.export_text().value
+	checks.check(not ui.session.history_undo() and background.get_ref().document.export_text().value == expected,
+		"active local history cannot mutate a background document")
 	ui.history_total_budget = 1
 	review_edit("evict all payloads")
 	ui.history_total_budget = 128 * 1024 * 1024
-	checks.check(ui.tokens.is_empty() and background.get_ref() != null, "real total-budget enforcement expires every token but retains background document")
-	checks.check(background.get_ref().document.is_dirty() and background.get_ref().document.export_text().value == expected, "eviction preserves exact current background undo content")
+	checks.check(background.get_ref() != null, "real total-budget enforcement retains background document")
+	checks.check(background.get_ref().document.export_text().value == expected, "eviction preserves exact current background content")
 	ui.session.save_enabled = false
 	ui.save_all()
 	checks.check(FileAccess.get_file_as_string("res://budget-regression.map") == expected and not background.get_ref().document.is_dirty(), "evicted background document remains Save All eligible")
@@ -1811,11 +1887,11 @@ func review_regressions(plugin: EditorPlugin) -> void:
 	ui.history_action_budget = 2
 	for n in 3:
 		review_edit("action budget %d" % n)
-	checks.check(ui.tokens.size() == 2, "controlled per-session action budget actually enforces eviction")
+	checks.check(ui.session.history_action_count() == 2, "controlled per-session action budget actually enforces eviction")
 	ui.history_action_budget = 128
 	ui.history_session_budget = 1
 	review_edit("byte budget")
-	checks.check(ui.tokens.is_empty() and ui.session.document.is_dirty(), "controlled per-session byte budget retains dirty document without snapshots")
+	checks.check(ui.session.history_action_count() == 0 and ui.session.document.is_dirty(), "controlled per-session byte budget retains dirty document without older snapshots")
 	ui.history_session_budget = 64 * 1024 * 1024
 	ui.session.save_enabled = false
 	ui.set_session(original)
@@ -1842,7 +1918,7 @@ func focus_regression() -> void:
 		for notification in [Node.NOTIFICATION_WM_WINDOW_FOCUS_OUT, Node.NOTIFICATION_APPLICATION_FOCUS_OUT]:
 			var before = text()
 			var revision: int = ui.session.document.get_revision()
-			var version = history.get_version()
+			var version = map_history_version()
 			mouse(graph, graph.project(center), true)
 			motion(graph, graph.project(center) + Vector2(32, 0))
 			checks.check(graph.gesture == "move" and graph.delta != Vector3.ZERO, "focus regression starts moved preview in pane %s" % graph.orientation)
@@ -1855,7 +1931,7 @@ func focus_regression() -> void:
 			checks.check(graph.gesture == "" and text() == before, "synthetic release cancels BEFORE focus notification in pane %s" % graph.orientation)
 			graph.notification(notification)
 			mouse(graph, synthetic.position, false)
-			checks.check(text() == before and ui.session.document.get_revision() == revision and history.get_version() == version, "window/application focus cancellation has no doc/revision/history mutation in pane %s" % graph.orientation)
+			checks.check(text() == before and ui.session.document.get_revision() == revision and map_history_version() == version, "window/application focus cancellation has no doc/revision/history mutation in pane %s" % graph.orientation)
 		# Invoke actual native Viewport notification with mouse_focus acquired via input.
 		var local: Vector2 = graph.project(center)
 		var press = InputEventMouseButton.new()
@@ -1872,10 +1948,10 @@ func focus_regression() -> void:
 			graph._gui_input(local_press)
 		motion(graph, local + Vector2(32, 0))
 		var before = text()
-		var version = history.get_version()
+		var version = map_history_version()
 		checks.check(graph.gesture == "move" and graph.delta != Vector3.ZERO, "viewport dispatch acquired moved graph gesture")
 		get_viewport().propagate_notification(Node.NOTIFICATION_WM_WINDOW_FOCUS_OUT)
-		checks.check(graph.gesture == "" and text() == before and history.get_version() == version, "native viewport release then propagated window focus-out cancels without committing")
+		checks.check(graph.gesture == "" and text() == before and map_history_version() == version, "native viewport release then propagated window focus-out cancels without committing")
 		await get_tree().process_frame
 
 func resolver_regression(plugin: EditorPlugin) -> void:
@@ -1979,11 +2055,10 @@ func session_manifest_regression() -> void:
 	var recovery_brush: int = clean_a.draw_data()[0].id
 	checks.check(clean_a.transact("Recovery token lifetime", func(): return clean_a.document.translate_brushes(PackedInt64Array([recovery_brush]), Vector3.RIGHT)),
 		"recovery lifetime fixture records local memento")
-	var recovery_token = ui.tokens.back()
-	var recovery_change_ref = weakref(recovery_token.change)
+	var recovery_action_ref = weakref(clean_a.history_actions()[0])
 	var recovery_session_ref = weakref(clean_a)
 	var recovery_document_ref = weakref(clean_a.document)
-	recovery_token.restore(false)
+	clean_a.history_undo()
 	var dirty = load("res://addons/tbloader/src/editor/map_session.gd").new()
 	checks.check(dirty.document.import_text(canonical).ok, "session manifest dirty fixture imports")
 	dirty.document.create_cuboid(Vector3.ZERO, Vector3.ONE * 8, "common/caulk")
@@ -2021,9 +2096,7 @@ func session_manifest_regression() -> void:
 	]})
 	clean_a = null
 	ui.restore_recovery()
-	checks.check(recovery_token.session == null and recovery_token.change == null, "recovery replacement retires removed-session history payload")
-	recovery_token = null
-	checks.check(recovery_change_ref.get_ref() == null, "recovery replacement releases removed local change lifetime")
+	checks.check(recovery_action_ref.get_ref() == null, "recovery replacement releases removed-session history payload")
 	checks.check(recovery_session_ref.get_ref() == null, "recovery replacement releases removed session lifetime")
 	checks.check(recovery_document_ref.get_ref() == null, "recovery replacement releases removed document lifetime")
 	checks.check(ui.sessions.size() == 2 and ui.sessions[0].document.get_path().ends_with("session-clean-b.map")
@@ -2065,8 +2138,8 @@ func verify_recovery_regression(expected: Dictionary) -> void:
 	# Exercise Save As on the actual restored untitled session, not a surrogate.
 	checks.check(ui.save_path("res://recovered-copy.map") and not ui.session.document.is_dirty(), "recovery Save As establishes clean native baseline")
 	review_edit("after recovery save")
-	checks.check(ui.session.document.is_dirty() and history.undo() and not ui.session.document.is_dirty(), "recovered Save As undo returns to actual clean baseline")
-	checks.check(history.redo() and ui.save_path("res://recovered-copy.map") and history.undo(), "recovered session supports save at a new history baseline then undo")
+	checks.check(ui.session.document.is_dirty() and ui.session.history_undo() and not ui.session.document.is_dirty(), "recovered Save As undo returns to actual clean baseline")
+	checks.check(ui.session.history_redo() and ui.save_path("res://recovered-copy.map") and ui.session.history_undo(), "recovered session supports save at a new history baseline then undo")
 	checks.check(ui.session.document.is_dirty() and text() == expected.untitled, "background recovery checkpoint retains original untitled content after undo past new saved baseline")
 	var recovered = ui.session
 	var recovered_count = ui.sessions.size()
@@ -2104,19 +2177,19 @@ func precision_journey() -> void:
 	checks.check(is_zero_approx(fmod(scratch.brush(one).aabb_min.x, 16)) and is_zero_approx(fmod(scratch.brush(one).aabb_min.y, 16)), "Ctrl during drag aligns AABB reference")
 	checks.check(scratch.brush(two).aabb_min - scratch.brush(one).aabb_min == offset, "AABB alignment preserves group spacing")
 	var before = text()
-	var count: int = ui.tokens.size()
+	var count: int = ui.session.history_action_count()
 	moving_center = (scratch.brush(one).aabb_min + scratch.brush(one).aabb_max) * 0.5
 	mouse(graph, graph.project(moving_center), true)
 	motion(graph, graph.project(moving_center + Vector3(32, 0, 0)))
 	ui.texture_field.grab_focus()
-	checks.check(graph.gesture == "" and text() == before and ui.tokens.size() == count, "focus loss cancels preview without content/history")
+	checks.check(graph.gesture == "" and text() == before and ui.session.history_action_count() == count, "focus loss cancels preview without content/history")
 	graph.grab_focus()
 	scratch.select(PackedInt64Array([one]))
 	var brush: Dictionary = scratch.brush(one)
 	var edge: Vector3 = (brush.aabb_min + brush.aabb_max) * 0.5
 	edge.x = brush.aabb_max.x
 	drag(graph, edge, edge - Vector3(128, 0, 0))
-	checks.check(text() == before and ui.tokens.size() == count, "invalid inverted silhouette resize atomic and no history")
+	checks.check(text() == before and ui.session.history_action_count() == count, "invalid inverted silhouette resize atomic and no history")
 	ui.set_tool("Face")
 	mouse(graph, graph.project(moving_center), true, MOUSE_BUTTON_LEFT, false, true)
 	mouse(graph, graph.project(moving_center), false)
@@ -2142,16 +2215,16 @@ func precision_journey() -> void:
 	ui.set_tool("Vertex")
 	var vertex: Vector3 = scratch.brush(one).vertices[0]
 	before = text()
-	count = ui.tokens.size()
+	count = ui.session.history_action_count()
 	drag(graph, vertex, vertex + Vector3(16, 16, 0))
-	checks.check(text() != before and ui.tokens.size() == count + 1, "nonplanar vertex drag commits rebuilt convex hull")
+	checks.check(text() != before and ui.session.history_action_count() == count + 1, "nonplanar vertex drag commits rebuilt convex hull")
 	# Expiration on native epoch replacement must release payload and never restore.
-	var old_token: RefCounted = ui.tokens.back()
-	checks.check(old_token.session == scratch, "history token belongs to scratch session")
+	var old_action_ref := weakref(scratch.history_actions()[-1])
 	document.new_map()
 	var fresh = text()
-	old_token.restore(false)
-	checks.check(text() == fresh and old_token.session == null and old_token.bytes == 0, "epoch mismatch retires snapshot payload without redirect")
+	checks.check(not scratch.history_undo() and text() == fresh and scratch.history_action_count() == 0,
+		"epoch mismatch retires snapshot payload without redirect")
+	checks.check(old_action_ref.get_ref() == null, "epoch replacement releases old action metadata")
 	scratch.save_enabled = false
 	ui.set_session(original)
 	graph.orientation = 1
@@ -2185,7 +2258,7 @@ func visibility_filter_journey() -> void:
 	checks.check(ui.camera_view.triangle_count == 60 and scratch.point_markers().size() == 1, "filter fixture renders five brushes and one point entity")
 	var canonical: String = text()
 	var revision: int = doc.get_revision()
-	var history_version: int = history.get_version()
+	var history_version: int = map_history_version()
 	scratch.select(PackedInt64Array([caulk]))
 	ui.visibility_buttons.caulk.pressed.emit()
 	checks.check(scratch.visibility_filters.caulk and ui.visibility_buttons.caulk.button_pressed, "Caulk quick toggle enables session filter")
@@ -2209,7 +2282,7 @@ func visibility_filter_journey() -> void:
 	checks.check(scratch.selected.is_empty() and scratch.points.is_empty(), "entity filter clears brush-entity and point-entity selection")
 	checks.check(graph.hit_brush(graph.project(Vector3(544, 32, 0))) == 0 and graph.hit_point(graph.project(Vector3(640, 32, 0))) == 0, "entity filter excludes entities from graph picking")
 	checks.check(ui.camera_view.triangle_count == 48 and ui.camera_view.overlays.get_child_count() == 0, "entity filter excludes brush geometry and point overlays from camera")
-	checks.check(text() == canonical and doc.get_revision() == revision and history.get_version() == history_version, "quick filters do not edit content or history")
+	checks.check(text() == canonical and doc.get_revision() == revision and map_history_version() == history_version, "quick filters do not edit content or history")
 	ui.visibility_buttons.entities.pressed.emit()
 	checks.check(ui.camera_view.triangle_count == 60 and graph.hit_point(graph.project(Vector3(640, 32, 0))) == point, "quick toggles restore all filtered geometry without selecting it")
 	scratch.save_enabled = false
@@ -2533,14 +2606,14 @@ func grid_draw_batch_regression() -> void:
 	ui.camera_view.cancel_gesture()
 	checks.check(not ui.camera_view.grid_move_preview.visible and scratch.document.export_text().value == before_component_preview,
 		"camera component cancellation clears preview without a transaction")
-	var component_history_version: int = history.get_version()
+	var component_history_version: int = map_history_version(scratch)
 	ui.camera_view.camera_component = camera_component
 	ui.camera_view.camera_delta = component_movement
 	ui.camera_view.camera_gesture = "component"
 	ui.camera_view.finish_camera_left()
-	checks.check(scratch.document.export_text().value != before_component_preview and history.get_version() > component_history_version,
+	checks.check(scratch.document.export_text().value != before_component_preview and map_history_version(scratch) > component_history_version,
 		"camera component release commits exactly one editor transaction")
-	checks.check(history.undo() and scratch.document.export_text().value == before_component_preview,
+	checks.check(scratch.history_undo() and scratch.document.export_text().value == before_component_preview,
 		"camera component transaction has exact undo")
 	var offscreen_candidate: Dictionary = scratch.document.preview_translate_brushes(scratch.selected, Vector3(0, 32000, 0))
 	if offscreen_candidate.ok:
@@ -2594,10 +2667,10 @@ func vertex_hull_drag_journey() -> void:
 		var position: Vector3 = scratch.brush(id).vertices[scratch.components[0].index]
 		for movement in [Vector3(16, 8, 0), Vector3(0, 8, 0), Vector3(-8, -16, 0), Vector3(-8, 0, 0), Vector3(-8, -8, 0), Vector3(8, 8, 0)]:
 			var before := text()
-			var count: int = ui.tokens.size()
+			var count: int = ui.session.history_action_count()
 			drag(graph, position, position + movement)
 			position += movement
-			checks.check(text() != before and ui.tokens.size() == count + 1, "sequential vertex drag commits one undo action")
+			checks.check(text() != before and ui.session.history_action_count() == count + 1, "sequential vertex drag commits one undo action")
 			var b: Dictionary = scratch.brush(id)
 			if not checks.check(scratch.components.size() == 1 and scratch.component_valid(scratch.components[0], b), "sequential drag rebinds selected vertex to fresh topology"):
 				break
@@ -2691,7 +2764,7 @@ func shallow_prism_drag_journey() -> void:
 		var destination := reference + Vector3(16, 16, 0)
 		var movement := destination.snapped(Vector3.ONE * scratch.grid) - reference
 		var before := text()
-		var count: int = ui.tokens.size()
+		var count: int = ui.session.history_action_count()
 		mouse(graph, graph.project(reference), true)
 		checks.check(graph.gesture == "component" and graph.drag_component.kind == "edge" and scratch.components.size() == 1, "prism drag enters edge deformation, not brush translation")
 		checks.check(graph.component_position(graph.drag_component, b).distance_to(reference) < 0.001, "prism regression picks the intended depth and edge")
@@ -2701,7 +2774,7 @@ func shallow_prism_drag_journey() -> void:
 		motion(graph, graph.project(destination), graph.project(destination) - graph.project(reference))
 		checks.check(text() == before and graph.delta == movement, "default-grid edge preview snaps its midpoint without committing")
 		mouse(graph, graph.project(destination), false)
-		checks.check(text() != before and ui.tokens.size() == count + 1, "shallow-plane edge release commits exactly one action")
+		checks.check(text() != before and ui.session.history_action_count() == count + 1, "shallow-plane edge release commits exactly one action")
 		b = scratch.brush(id)
 		# The first moved endpoint is now inside the hull. Its edge genuinely
 		# disappears, so the editor must discard that handle rather than retarget it.
@@ -2865,10 +2938,10 @@ func phase5_journey() -> void:
 	click_component(graph, Vector3(64, 32, 32), true)
 	await capture_phase5("faces")
 	var before = text()
-	var count: int = ui.tokens.filter(func(token): return token.session == scratch).size()
+	var count: int = scratch.history_action_count()
 	drag(graph, Vector3(0, 32, 32), Vector3(128, 32, 32))
 	checks.check(scratch.brush(id).aabb_min.x == 128 and scratch.brush(id).aabb_max.x == 192, "graph moves all selected planes atomically past invalid intermediate hull")
-	checks.check(ui.tokens.filter(func(token): return token.session == scratch).size() == count + 1, "multi-face gesture records exactly one originating-session action")
+	checks.check(scratch.history_action_count() == count + 1, "multi-face gesture records exactly one originating-session action")
 	checks.check(scratch.components.size() == 2, "successful face batch retains both selections")
 	var moved = text()
 	key(KEY_Z, true)
@@ -2895,10 +2968,10 @@ func phase5_journey() -> void:
 	var stale: Array = scratch.components.duplicate(true)
 	doc.rebuild()
 	scratch.components = stale
-	count = ui.tokens.size()
+	count = scratch.history_action_count()
 	ui.assign_texture()
-	checks.check(text() == before and ui.tokens.size() == count and ui.notice.text.contains("STALE_COMPONENT"), "material assignment rejects stale selection")
-	checks.check(not scratch.transact("Stale component test", func(): return scratch.move_components(Vector3(16, 0, 0))) and text() == before and ui.tokens.size() == count, "batch deformation rejects stale selection without history")
+	checks.check(text() == before and scratch.history_action_count() == count and ui.notice.text.contains("STALE_COMPONENT"), "material assignment rejects stale selection")
+	checks.check(not scratch.transact("Stale component test", func(): return scratch.move_components(Vector3(16, 0, 0))) and text() == before and scratch.history_action_count() == count, "batch deformation rejects stale selection without history")
 	scratch.transact("Create beside stale selection", func(): return doc.create_cuboid(Vector3(128, 0, 0), Vector3(192, 64, 64), "baseline/checker"))
 	key(KEY_Z, true)
 	checks.check(text() == before and scratch.components.is_empty(), "unrelated edit undo never revives a stale component as a fresh index")
@@ -2915,12 +2988,12 @@ func phase5_journey() -> void:
 	click_component(graph, Vector3(64, 64, 32), true)
 	checks.check(scratch.components.size() == 1, "Shift toggles edge off")
 	click_component(graph, Vector3(64, 64, 32), true)
-	count = ui.tokens.size()
+	count = scratch.history_action_count()
 	mouse(graph, graph.project(Vector3(64, 64, 32)), true)
 	motion(graph, graph.project(Vector3(96, 80, 32)), Vector2.ZERO, true)
 	checks.check(graph.delta == Vector3(32, 0, 0) and text() == before, "axis constraint applies after component reference snapping; preview is disposable")
 	mouse(graph, graph.project(Vector3(96, 80, 32)), false)
-	checks.check(scratch.brush(id).aabb_max == Vector3(96, 64, 64) and scratch.components.size() == 2 and ui.tokens.size() == count + 1, "all selected edges move together with one constrained commit")
+	checks.check(scratch.brush(id).aabb_max == Vector3(96, 64, 64) and scratch.components.size() == 2 and scratch.history_action_count() == count + 1, "all selected edges move together with one constrained commit")
 	checks.check(is_equal_approx(solid_volume(scratch.brush(id)), 96 * 64 * 64), "edge batch expected expanded volume")
 	await capture_phase5("edges")
 	key(KEY_Z, true)
@@ -2943,9 +3016,12 @@ func phase5_journey() -> void:
 	key(KEY_Z, true)
 	ui.set_tool("Vertex")
 	var revision: int = doc.get_revision()
-	count = ui.tokens.size()
+	count = scratch.history_action_count()
+	var cursor_before_edit: int = scratch.history_cursor()
 	drag(graph, Vector3(64, 64, 0), Vector3(80, 80, 0))
-	checks.check(text() != before and Array(scratch.brush(id).vertices).any(func(point): return point.x == 80 and point.y == 80) and doc.get_revision() > revision and ui.tokens.size() == count + 1, "single quad corner rebuilds and commits convex hull")
+	checks.check(text() != before and Array(scratch.brush(id).vertices).any(func(point): return point.x == 80 and point.y == 80) and doc.get_revision() > revision
+		and scratch.history_action_count() == cursor_before_edit + 1,
+		"single quad corner rebuilds and commits convex hull on the linear timeline")
 	key(KEY_Z, true)
 	checks.check(text() == before, "single-corner hull edit undo restores brush")
 	# A valid first brush and invalid second brush must both remain untouched.
@@ -2957,9 +3033,9 @@ func phase5_journey() -> void:
 	checks.check(scratch.components.size() == 2 and scratch.components[0].brush_id != scratch.components[1].brush_id, "multi-brush edge selection")
 	before = text()
 	revision = doc.get_revision()
-	count = ui.tokens.size()
+	count = scratch.history_action_count()
 	drag(graph, Vector3(64, 64, 32), Vector3(80, 80, 32))
-	checks.check(text() != before and doc.get_revision() > revision and ui.tokens.size() == count + 1 and scratch.components.size() == 2, "multi-brush component group rebuilds every convex hull atomically")
+	checks.check(text() != before and doc.get_revision() > revision and scratch.history_action_count() == count + 1 and scratch.components.size() == 2, "multi-brush component group rebuilds every convex hull atomically")
 	scratch.restore(baseline)
 	# Triangular incident faces permit constrained single and grouped vertex edits.
 	doc.clip_brushes(PackedInt64Array([id]), Vector3(64, 0, 0), Vector3(0, 0, 64), Vector3(0, 64, 0), false)
@@ -3015,10 +3091,13 @@ func phase5_journey() -> void:
 					key(KEY_ENTER, true)
 					normal = -normal
 				before = text()
-				count = ui.tokens.size()
+				count = scratch.history_action_count()
+				cursor_before_edit = scratch.history_cursor()
 				key(KEY_ENTER, false, split)
 				var ids: PackedInt64Array = scratch.selected.duplicate()
-				checks.check(ids.size() == (2 if split else 1) and graph.clip_points.is_empty() and ui.tokens.size() == count + 1, "2D clip/split/flip commits one action axis %d" % axis)
+				checks.check(ids.size() == (2 if split else 1) and graph.clip_points.is_empty()
+					and scratch.history_action_count() == cursor_before_edit + 1,
+					"2D clip/split/flip commits one linear action axis %d" % axis)
 				var volume = 0.0
 				var normals: Array = []
 				for piece_id in ids:

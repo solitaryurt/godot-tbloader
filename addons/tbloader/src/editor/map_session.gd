@@ -27,7 +27,6 @@ var grid = 16.0
 var texture = "common/caulk"
 var texture_root = "res://textures"
 var recovery_source = ""
-var manager: EditorUndoRedoManager
 var save_enabled = true # Successful Discard replacement suppresses Save All until resume/edit/undo.
 var pristine_empty = true
 var was_bound = false
@@ -71,6 +70,14 @@ var _brush_visibility_vis_gen := -1
 var _hidden_ids_cache := PackedInt64Array()
 var _hidden_ids_cache_gen := -1
 var change_kind = ""
+var _history_states: Array = []
+var _history_actions: Array = []
+var _history_cursor := 0
+var _history_epoch := 0
+var _history_next_state_id := 1
+var _history_retained_bytes := 0
+var _disposed := false
+static var _history_next_sequence := 1
 
 func notify_changed(kind: String = "content") -> void:
 	var previous: String = change_kind
@@ -186,6 +193,8 @@ func _preview_changed() -> void:
 	preview_generation += 1
 
 func dispose() -> void:
+	_disposed = true
+	history_clear()
 	if document.map_changed.is_connected(_map_changed):
 		document.map_changed.disconnect(_map_changed)
 	if document.preview_changed.is_connected(_preview_changed):
@@ -196,12 +205,155 @@ func dispose() -> void:
 		message.disconnect(connection.callable)
 	for connection in action_recorded.get_connections():
 		action_recorded.disconnect(connection.callable)
-	manager = null
 	_draw_cache.clear()
 	_draw_index.clear()
 	_entity_cache.clear()
 	_brush_entity_ids.clear()
 	_marker_cache.clear()
+
+func _history_state(snapshot: Dictionary) -> Dictionary:
+	var state := {"id": _history_next_state_id, "snapshot": snapshot, "bytes": 0}
+	_history_next_state_id += 1
+	return state
+
+func _history_recount_bytes() -> void:
+	_history_retained_bytes = 0
+	for index in _history_states.size():
+		var snapshot: Dictionary = _history_states[index].snapshot
+		var bytes := ui_envelope_retained_bytes(snapshot)
+		if index == 0:
+			bytes += snapshot.native.get_retained_bytes()
+		else:
+			bytes += snapshot.native.get_additional_retained_bytes(_history_states[index - 1].snapshot.native)
+		_history_states[index].bytes = bytes
+		_history_retained_bytes += bytes
+
+func _history_initialize(snapshot: Dictionary) -> void:
+	history_clear()
+	_history_epoch = document.get_epoch()
+	_history_states.append(_history_state(snapshot))
+	_history_recount_bytes()
+
+func _history_ensure(snapshot: Dictionary = {}) -> bool:
+	if _disposed:
+		return false
+	if _history_states.is_empty() or _history_epoch != document.get_epoch():
+		_history_initialize(capture() if snapshot.is_empty() else snapshot)
+	elif not document.is_history_state_current(_history_states[_history_cursor].snapshot.native):
+		_history_initialize(capture() if snapshot.is_empty() else snapshot)
+	return true
+
+func history_clear() -> void:
+	for action in _history_actions:
+		action.retire()
+	_history_actions.clear()
+	_history_states.clear()
+	_history_cursor = 0
+	_history_epoch = 0
+	_history_retained_bytes = 0
+
+func history_action_count() -> int:
+	_history_ensure()
+	return _history_actions.size()
+
+func history_cursor() -> int:
+	_history_ensure()
+	return _history_cursor
+
+func history_bytes() -> int:
+	_history_ensure()
+	return _history_retained_bytes
+
+func history_action_names() -> PackedStringArray:
+	_history_ensure()
+	var names := PackedStringArray()
+	for action in _history_actions:
+		names.append(action.label)
+	return names
+
+func history_state_ids() -> PackedInt64Array:
+	_history_ensure()
+	var ids := PackedInt64Array()
+	for state in _history_states:
+		ids.append(state.id)
+	return ids
+
+func history_actions() -> Array:
+	_history_ensure()
+	return _history_actions.duplicate()
+
+func history_undo_name() -> String:
+	_history_ensure()
+	return _history_actions[_history_cursor - 1].label if _history_cursor > 0 else ""
+
+func history_redo_name() -> String:
+	_history_ensure()
+	return _history_actions[_history_cursor].label if _history_cursor < _history_actions.size() else ""
+
+func history_undo() -> bool:
+	if not _history_ensure() or _history_cursor == 0:
+		return false
+	if not restore(_history_states[_history_cursor - 1].snapshot):
+		return false
+	_history_cursor -= 1
+	return true
+
+func history_redo() -> bool:
+	if not _history_ensure() or _history_cursor >= _history_actions.size():
+		return false
+	if not restore(_history_states[_history_cursor + 1].snapshot):
+		return false
+	_history_cursor += 1
+	return true
+
+func history_navigate_state(state_id: int) -> bool:
+	if not _history_ensure():
+		return false
+	for index in _history_states.size():
+		if _history_states[index].id == state_id:
+			if index == _history_cursor:
+				return true
+			if not restore(_history_states[index].snapshot):
+				return false
+			_history_cursor = index
+			return true
+	return false
+
+func _history_truncate_redo() -> void:
+	while _history_actions.size() > _history_cursor:
+		_history_actions.pop_back().retire()
+		_history_states.pop_back()
+	_history_recount_bytes()
+
+func history_oldest_evictable_sequence() -> int:
+	if _history_actions.is_empty():
+		return 0
+	if _history_cursor > 0:
+		return _history_actions[0].sequence
+	if _history_cursor < _history_actions.size():
+		return _history_actions[-1].sequence
+	return 0
+
+func history_evict_oldest() -> bool:
+	if _history_actions.is_empty():
+		return false
+	if _history_cursor > 0:
+		_history_actions.pop_front().retire()
+		_history_states.pop_front()
+		_history_cursor -= 1
+		if not _history_actions.is_empty():
+			_history_actions[0].before_state_id = _history_states[0].id
+	elif _history_cursor < _history_actions.size():
+		_history_actions.pop_back().retire()
+		_history_states.pop_back()
+	else:
+		return false
+	_history_recount_bytes()
+	return true
+
+func history_enforce_limits(action_limit: int, byte_limit: int) -> void:
+	while (_history_actions.size() > action_limit or _history_retained_bytes > byte_limit) and history_evict_oldest():
+		pass
 
 func draw_data() -> Array:
 	if not _draw_valid:
@@ -312,6 +464,9 @@ func history_action_bytes(before: Dictionary, after: Dictionary) -> int:
 func transact(label: String, operation: Callable, kind := "") -> bool:
 	var before_native = document.capture_history_state()
 	var before_ui := capture_ui_envelope()
+	var before := before_ui.duplicate()
+	before.native = before_native
+	_history_ensure(before)
 	var result: Dictionary = operation.call()
 	if not report(result):
 		# Multi-command tools are atomic at the UI transaction boundary too.
@@ -326,35 +481,27 @@ func transact(label: String, operation: Callable, kind := "") -> bool:
 	if document.is_history_state_current(before_native):
 		notify_changed()
 		return false
+	# Selection/components/workzone may change between content actions. The state
+	# at the cursor owns the UI envelope immediately before its outgoing action.
+	_history_states[_history_cursor].snapshot = before
+	_history_truncate_redo()
 	var token = Action.new()
 	save_enabled = true
 	token.session = self
 	token.epoch = document.get_epoch()
-	token.before_generation = before_native.get_state_generation()
-	token.after_generation = document.get_state_generation()
-	var native_change = document.get_last_document_change()
-	# A single native mutation spans this UI action only when its directional
-	# generation starts at the captured state. Otherwise retain structural roots.
-	if native_change != null and native_change.get_before_generation() == before_native.get_state_generation():
-		token.change = native_change
-		token.before_ui = before_ui
-		token.after_ui = after_ui
-		token.bytes = (native_change.get_retained_bytes() + ui_envelope_retained_bytes(before_ui)
-			+ ui_envelope_retained_bytes(after_ui))
-	else:
-		var before := before_ui.duplicate()
-		before.native = before_native
-		var after := after_ui.duplicate()
-		after.native = document.capture_history_state()
-		token.before = before
-		token.after = after
-		token.bytes = history_action_bytes(before, after)
-	manager.create_action(label, UndoRedo.MERGE_DISABLE)
-	manager.add_do_method(token, "restore", true)
-	manager.add_undo_method(token, "restore", false)
-	manager.add_do_reference(token)
-	manager.add_undo_reference(token)
-	manager.commit_action(false)
+	token.label = label
+	token.sequence = _history_next_sequence
+	_history_next_sequence += 1
+	var after := after_ui.duplicate()
+	after.native = document.capture_history_state()
+	token.before_state_id = _history_states[-1].id
+	var after_state := _history_state(after)
+	token.after_state_id = after_state.id
+	_history_states.append(after_state)
+	_history_actions.append(token)
+	_history_cursor = _history_actions.size()
+	_history_recount_bytes()
+	token.bytes = after_state.bytes
 	action_recorded.emit(token)
 	notify_changed(kind if not kind.is_empty() else "content")
 	return true

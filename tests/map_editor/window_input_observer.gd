@@ -4,7 +4,6 @@ extends EditorPlugin
 ## focus changes, or production control setters are permitted here.
 
 var ui: Control
-var history: UndoRedo
 var busy = false
 var frame_times: Array = []
 var last_frame = 0
@@ -32,7 +31,6 @@ func start() -> void:
 		await get_tree().process_frame
 	var addon = find_plugin(get_tree().root)
 	ui = addon.map_editor
-	history = addon.get_undo_redo().get_history_undo_redo(EditorUndoRedoManager.GLOBAL_HISTORY)
 	RenderingServer.frame_post_draw.connect(frame_drawn)
 	write_json("res://window-ready.json", {"pid": OS.get_process_id()})
 
@@ -101,8 +99,9 @@ func state() -> Dictionary:
 		"camera": rect(ui.camera_view), "camera_position": vector(ui.camera_view.camera.position), "flying": ui.camera_view.flying,
 		"held": ui.camera_view.held, "mouse_mode": Input.mouse_mode, "triangles": ui.camera_view.triangle_count,
 		"brushes": brushes, "text": ui.session.document.export_text().value, "revision": ui.session.document.get_revision(),
-		"dirty": ui.session.document.is_dirty(), "path": ui.session.document.get_path(), "history": history.get_version(),
-		"actions": ui.tokens.size(), "selected": Array(ui.session.selected), "hidden": ui.session.hidden.size(),
+		"dirty": ui.session.document.is_dirty(), "path": ui.session.document.get_path(),
+		"history": ui.session.history_action_count() * 1000 + ui.session.history_cursor(),
+		"actions": ui.session.history_action_count(), "selected": Array(ui.session.selected), "hidden": ui.session.hidden.size(),
 		"grid": ui.session.grid, "tool": ui.tool, "search": ui.browser._search.text, "search_rect": rect(ui.browser._search),
 		"search_results": ui.browser.get_visible_paths(), "focus": str(focus.get_path()) if focus else "",
 		"inspector": ui.inspector.visible, "entity_key": ui.entity_key.text, "entity_value": ui.entity_value.text,
