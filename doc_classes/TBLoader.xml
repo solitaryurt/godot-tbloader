@@ -81,4 +81,17 @@
 			The path to use when looking up textures or materials.
 		</member>
 	</members>
+	<signals>
+		<signal name="bake_finished">
+			<description>
+				Emitted after [method build_meshes] successfully replaces this node's generated children. Failed builds do not emit. Editor [code]@tool[/code] scripts and other plugins can connect to run follow-up work after Build Meshes.
+			</description>
+		</signal>
+		<signal name="map_resource_changed">
+			<param index="0" name="path" type="String" />
+			<description>
+				Emitted when [member map_resource] changes to a different path.
+			</description>
+		</signal>
+	</signals>
 </class>

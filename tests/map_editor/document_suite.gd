@@ -35,6 +35,7 @@ func run() -> void:
 	checks.check(loader is Node3D, "TBLoader inherits Node3D")
 	checks.check(loader.map_inverse_scale == 38, "default inverse scale")
 	checks.check(loader.has_method("build_meshes"), "native bake method bound")
+	checks.check(loader.has_signal("bake_finished"), "native bake_finished signal bound")
 	var checker = load("res://textures/baseline/checker.png") as Texture2D
 	checks.check(checker != null and checker.get_size() == Vector2(64, 32), "asymmetric checker imported")
 	root.add_child(loader)
@@ -766,11 +767,14 @@ func test_checked_bake() -> void:
 	scene.add_child(loader)
 	loader.owner = scene
 	loader.map_resource = "res://fixtures/classic_cube.map"
+	var bake_finished := {"count": 0}
+	loader.bake_finished.connect(func(): bake_finished.count += 1)
 	var result = loader.build_meshes_checked()
 	if not expect_ok(result, "checked initial bake"):
 		scene.free()
 		return
 	checks.check(result.changed and result.value == {"path": loader.map_resource, "child_count": 1}, "checked bake success value")
+	checks.check(bake_finished.count == 1, "successful bake emits bake_finished")
 	var old_children = loader.get_children()
 	var old_mesh = loader.find_children("*", "MeshInstance3D", true, false)[0]
 	var old_resource = old_mesh.mesh
@@ -796,11 +800,14 @@ func test_checked_bake() -> void:
 			checks.check(result.error.line > 0 and result.error.column > 0, "bake reports parser location")
 		await process_frame
 		checks.check(loader.get_children() == old_children and is_instance_valid(old_mesh) and old_mesh.mesh == old_resource and is_instance_valid(old_collision), "failure retains exact successful baked nodes and resources")
+	checks.check(bake_finished.count == 1, "failed bakes do not emit bake_finished")
 	loader.map_inverse_scale = 0
 	checks.check(loader.build_meshes_checked().error.code == &"INVALID_ARGUMENT" and loader.get_children() == old_children, "invalid bake settings retain output")
+	checks.check(bake_finished.count == 1, "invalid bake settings do not emit bake_finished")
 	loader.map_inverse_scale = 38
 	loader.map_resource = "res://fixtures/classic_cube.map"
 	expect_ok(loader.build_meshes_checked(), "successful replacement after failed generation")
+	checks.check(bake_finished.count == 2, "replacement bake emits bake_finished")
 	await process_frame
 	checks.check(not is_instance_valid(old_mesh), "successful replacement retires prior bake")
 	for generated in loader.find_children("*", "", true, false):
