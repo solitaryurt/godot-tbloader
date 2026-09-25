@@ -374,14 +374,14 @@ func update_exact_preview() -> void:
 			preview_result(host.session.document.preview_translate_components(host.session.components, delta))
 
 func hit_brush(position: Vector2, prefer_selected := false) -> int:
-	var hit: Dictionary = host.session.document.query_brush_2d_hit(orientation, unproject(position), selector_half_size / zoom,
-		host.session.pick_hidden_brush_ids(), host.session.visibility_filter_mask(), host.session.selected, prefer_selected)
-	return hit.get("brush_id", 0)
+	return int(brush_hit(position, prefer_selected).get("brush_id", 0))
 
 func hit_brushes(position: Vector2) -> PackedInt64Array:
-	var hit: Dictionary = host.session.document.query_brush_2d_hit(orientation, unproject(position), selector_half_size / zoom,
-		host.session.pick_hidden_brush_ids(), host.session.visibility_filter_mask(), host.session.selected, false)
-	return hit.get("brush_ids", PackedInt64Array())
+	return brush_hit(position, false).get("brush_ids", PackedInt64Array())
+
+func brush_hit(position: Vector2, prefer_selected := false) -> Dictionary:
+	return host.session.accept_brush_hit(host.session.document.query_brush_2d_hit(orientation, unproject(position), selector_half_size / zoom,
+		host.session.pick_hidden_brush_ids(), host.session.visibility_filter_mask(), host.session.selected, prefer_selected))
 
 func hit_point(position: Vector2) -> int:
 	if not host.session.marker_visible():
@@ -1058,12 +1058,13 @@ func box_select(end: Vector2) -> void:
 				ids.remove_at(ids.find(brush.id))
 			elif not ids.has(brush.id) and not remove:
 				ids.append(brush.id)
-	for marker in host.session.point_markers():
-		if rect.has_point(project(marker.origin)):
-			if point_ids.has(marker.id) and (remove or not add):
-				point_ids.remove_at(point_ids.find(marker.id))
-			elif not point_ids.has(marker.id) and not remove:
-				point_ids.append(marker.id)
+	if host.session.marker_visible():
+		for marker in host.session.point_markers():
+			if rect.has_point(project(marker.origin)):
+				if point_ids.has(marker.id) and (remove or not add):
+					point_ids.remove_at(point_ids.find(marker.id))
+				elif not point_ids.has(marker.id) and not remove:
+					point_ids.append(marker.id)
 	host.session.select(ids, point_ids)
 
 func apply_clip(split: bool) -> void:

@@ -1,6 +1,11 @@
 #include <builder.h>
 
 #include <godot_cpp/classes/resource_loader.hpp>
+#include <godot_cpp/classes/resource_saver.hpp>
+#include <godot_cpp/classes/dir_access.hpp>
+#include <godot_cpp/classes/engine.hpp>
+#include <godot_cpp/classes/editor_interface.hpp>
+#include <godot_cpp/classes/editor_file_system.hpp>
 #include <godot_cpp/classes/omni_light3d.hpp>
 #include <godot_cpp/classes/audio_stream_player3d.hpp>
 #include <godot_cpp/classes/audio_stream.hpp>
@@ -170,6 +175,115 @@ bool Builder::build_map()
 		build_entity(i, ent, ent.get_property("classname"), entity_class_count);
 		if (!m_error.is_empty()) return false;
 	}
+	return externalize_baked_resources();
+}
+
+namespace {
+String sanitize_filename(const String& name)
+{
+	String out;
+	for (int64_t i = 0; i < name.length(); i++) {
+		int64_t c = name.unicode_at(i);
+		bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+		out += ok ? String::chr(c) : "_";
+	}
+	return out.is_empty() ? String("resource") : out;
+}
+
+void remove_tree(const String& dir)
+{
+	Ref<DirAccess> access = DirAccess::open(dir);
+	if (access.is_null()) return;
+	access->set_include_hidden(true);
+	access->set_include_navigational(false);
+	access->list_dir_begin();
+	PackedStringArray files;
+	PackedStringArray dirs;
+	for (String name = access->get_next(); !name.is_empty(); name = access->get_next()) {
+		String path = dir.path_join(name);
+		if (access->current_is_dir()) dirs.append(path);
+		else files.append(path);
+	}
+	access->list_dir_end();
+	for (int i = 0; i < files.size(); i++) DirAccess::remove_absolute(files[i]);
+	for (int i = 0; i < dirs.size(); i++) remove_tree(dirs[i]);
+	DirAccess::remove_absolute(dir);
+}
+}
+
+String Builder::baked_resource_directory() const
+{
+	String map_path = m_loader->get_map();
+	String parent_dir;
+	if (map_path.begins_with("res://")) {
+		parent_dir = map_path.get_base_dir();
+	} else {
+		Node* scene_owner = m_loader->get_owner() ? m_loader->get_owner() : m_loader;
+		String scene_path = scene_owner->get_scene_file_path();
+		if (scene_path.begins_with("res://")) parent_dir = scene_path.get_base_dir();
+	}
+	if (parent_dir.is_empty()) return String();
+	String map_name = sanitize_filename(map_path.get_file().get_basename());
+	if (map_name.is_empty()) map_name = "map";
+	return parent_dir.path_join("radiant_meshes").path_join(map_name);
+}
+
+bool Builder::save_external_resource(const Ref<Resource>& resource, const String& path)
+{
+	Error made = DirAccess::make_dir_recursive_absolute(path.get_base_dir());
+	if (made != OK && made != ERR_ALREADY_EXISTS) {
+		m_error = "Unable to create radiant_meshes directory: " + path.get_base_dir();
+		return false;
+	}
+	resource->take_over_path(path);
+	Error saved = ResourceSaver::get_singleton()->save(resource, path, ResourceSaver::FLAG_CHANGE_PATH);
+	if (saved != OK) {
+		m_error = "Unable to save baked resource: " + path;
+		return false;
+	}
+	return true;
+}
+
+bool Builder::save_baked_resources(Node* node, const String& directory, std::vector<String>& written)
+{
+	Ref<Resource> resource;
+	if (auto* mesh_instance = Object::cast_to<MeshInstance3D>(node)) resource = mesh_instance->get_mesh();
+	else if (auto* shape_node = Object::cast_to<CollisionShape3D>(node)) resource = shape_node->get_shape();
+	String child_dir = node == m_parent ? directory : directory.path_join(sanitize_filename(String(node->get_name())));
+	if (resource.is_valid() && resource->get_path().is_empty()) {
+		String base = sanitize_filename(String(node->get_name()));
+		String path = directory.path_join(base + ".res");
+		int duplicate = 2;
+		while (std::find(written.begin(), written.end(), path) != written.end()) {
+			path = directory.path_join(base + "_" + String::num_int64(duplicate) + ".res");
+			duplicate++;
+		}
+		if (!save_external_resource(resource, path)) return false;
+		written.push_back(path);
+	}
+	for (int i = 0; i < node->get_child_count(); i++) {
+		if (!save_baked_resources(node->get_child(i), child_dir, written)) return false;
+	}
+	return true;
+}
+
+bool Builder::externalize_baked_resources()
+{
+	String directory = baked_resource_directory();
+	if (directory.is_empty()) return true;
+	remove_tree(directory);
+	std::vector<String> written;
+	if (!save_baked_resources(m_parent, directory, written)) return false;
+	String meshes_dir = directory.get_base_dir();
+	if (DirAccess::dir_exists_absolute(meshes_dir) && DirAccess::get_files_at(meshes_dir).is_empty() && DirAccess::get_directories_at(meshes_dir).is_empty()) {
+		DirAccess::remove_absolute(meshes_dir);
+	}
+	if (Engine::get_singleton()->is_editor_hint()) {
+		EditorInterface* editor = EditorInterface::get_singleton();
+		EditorFileSystem* filesystem = editor ? editor->get_resource_filesystem() : nullptr;
+		if (filesystem) filesystem->scan();
+	}
+	UtilityFunctions::print("Saved baked meshes to ", directory);
 	return true;
 }
 
@@ -669,7 +783,7 @@ void Builder::add_collider_from_mesh(Node3D* node, Ref<ArrayMesh>& mesh, Collide
 	}
 }
 
-void Builder::add_surface_to_mesh(Ref<ArrayMesh>& mesh, LMSurface& surf)
+void Builder::add_surface_to_mesh(Ref<ArrayMesh>& mesh, LMSurface& surf, bool shared_lightmap_uv)
 {
 	if (surf.vertex_count < 3 || surf.index_count < 3 || surf.index_count % 3 != 0) {
 		m_error = "Generated surface has invalid triangle counts";
@@ -679,8 +793,34 @@ void Builder::add_surface_to_mesh(Ref<ArrayMesh>& mesh, LMSurface& surf)
 	PackedFloat32Array tangents;
 	PackedVector3Array normals;
 	PackedVector2Array uvs;
+	PackedVector2Array lightmap_uvs;
 	PackedInt32Array indices;
+	const Vector2 shared_uv[3] = { Vector2(0, 0), Vector2(1, 0), Vector2(0, 1) };
 
+	if (shared_lightmap_uv) {
+		for (int k = 0; k < surf.index_count; k++) {
+			if (surf.indices[k] < 0 || surf.indices[k] >= surf.vertex_count) {
+				m_error = "Generated surface contains an invalid triangle index";
+				return;
+			}
+			auto& v = surf.vertices[surf.indices[k]];
+			vertices.push_back(lm_transform(v.vertex));
+			if (!vertices[vertices.size() - 1].is_finite() || !std::isfinite(v.uv.u) || !std::isfinite(v.uv.v)
+					|| !std::isfinite(v.normal.x) || !std::isfinite(v.normal.y) || !std::isfinite(v.normal.z)
+					|| !std::isfinite(v.tangent.x) || !std::isfinite(v.tangent.y) || !std::isfinite(v.tangent.z) || !std::isfinite(v.tangent.w)) {
+				m_error = "Generated surface contains non-finite vertex attributes";
+				return;
+			}
+			tangents.push_back(v.tangent.y);
+			tangents.push_back(v.tangent.z);
+			tangents.push_back(v.tangent.x);
+			tangents.push_back(v.tangent.w);
+			normals.push_back(Vector3(v.normal.y, v.normal.z, v.normal.x));
+			uvs.push_back(Vector2(v.uv.u, v.uv.v));
+			lightmap_uvs.push_back(shared_uv[k % 3]);
+			indices.push_back(k);
+		}
+	} else {
 	// Add all vertices
 	for (int k = 0; k < surf.vertex_count; k++) {
 		auto& v = surf.vertices[k];
@@ -708,6 +848,7 @@ void Builder::add_surface_to_mesh(Ref<ArrayMesh>& mesh, LMSurface& surf)
 		}
 		indices.push_back(surf.indices[k]);
 	}
+	}
 
 	Array arrays;
 	arrays.resize(Mesh::ARRAY_MAX);
@@ -715,6 +856,9 @@ void Builder::add_surface_to_mesh(Ref<ArrayMesh>& mesh, LMSurface& surf)
 	arrays[Mesh::ARRAY_TANGENT] = tangents;
 	arrays[Mesh::ARRAY_NORMAL] = normals;
 	arrays[Mesh::ARRAY_TEX_UV] = uvs;
+	if (shared_lightmap_uv) {
+		arrays[Mesh::ARRAY_TEX_UV2] = lightmap_uvs;
+	}
 	arrays[Mesh::ARRAY_INDEX] = indices;
 
 	// Create mesh
@@ -758,6 +902,7 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 
 	// Create mesh
 	Ref<ArrayMesh> mesh = memnew(ArrayMesh());
+	Ref<ArrayMesh> hull_mesh = memnew(ArrayMesh());
 
 	// Create a map to store different types of collision meshes
 	// std::unordered_map<String, Ref<ArrayMesh>> collision_mesh_map;
@@ -811,6 +956,7 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 		if (tex.name == m_loader->get_skip_texture_name()) {
 			continue;
 		}
+		const bool hull_surface = String(tex.name) == "common/hull";
 
 		// Attempt to load material
 		material = material_from_name(tex.name);
@@ -829,6 +975,13 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 		for (int i = 0; i < surfs.surface_count; i++) {
 			auto& surf = surfs.surfaces[i];
 			if (surf.vertex_count == 0) {
+				continue;
+			}
+
+			// Hull is a light-bake occluder: its own mesh, no collision, not part of the visible mesh.
+			if (hull_surface) {
+				add_surface_to_mesh(hull_mesh, surf, true);
+				if (!m_error.is_empty()) return mesh_instance;
 				continue;
 			}
 
@@ -871,18 +1024,33 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 		}
 	}
 
-	// Unwrap UV2's if needed
-	if (m_loader->m_lighting_unwrap_uv2 && mesh->get_surface_count() > 0) {
-		Transform3D transform = mesh_instance->get_transform();
+	auto lightmap_transform = [&](Node3D* instance) {
+		Transform3D transform = instance->get_transform();
 		for (Node3D* ancestor = parent; ancestor && ancestor != m_parent; ancestor = Object::cast_to<Node3D>(ancestor->get_parent())) {
 			transform = ancestor->get_transform() * transform;
 		}
-		transform = (m_loader->is_inside_tree() ? m_loader->get_global_transform() : m_loader->get_transform()) * transform;
-		if (mesh->lightmap_unwrap(transform, m_loader->m_lighting_unwrap_texel_size) != OK) {
+		return (m_loader->is_inside_tree() ? m_loader->get_global_transform() : m_loader->get_transform()) * transform;
+	};
+
+	// Unwrap UV2's if needed
+	if (m_loader->m_lighting_unwrap_uv2 && mesh->get_surface_count() > 0) {
+		if (mesh->lightmap_unwrap(lightmap_transform(mesh_instance), m_loader->m_lighting_unwrap_texel_size) != OK) {
 			m_error = "Unable to unwrap mesh lightmap UVs";
 			return mesh_instance;
 		}
 		mesh_instance->set_gi_mode(GeometryInstance3D::GI_MODE_STATIC);
+	}
+
+	if (hull_mesh->get_surface_count() > 0) {
+		auto hull_instance = memnew(MeshInstance3D());
+		parent->add_child(hull_instance);
+		hull_instance->set_owner(m_owner);
+		hull_instance->set_name(String("entity_{0}_geometry_hull").format(Array::make(idx)));
+		hull_instance->set_layer_mask(m_loader->get_visual_layer_mask());
+		hull_instance->set_mesh(hull_mesh);
+		hull_instance->set_cast_shadows_setting(GeometryInstance3D::SHADOW_CASTING_SETTING_SHADOWS_ONLY);
+		hull_mesh->set_lightmap_size_hint(Vector2i(2, 2));
+		hull_instance->set_gi_mode(GeometryInstance3D::GI_MODE_STATIC);
 	}
 
 	// Create collisions if needed

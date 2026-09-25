@@ -555,8 +555,35 @@ func visible_ray_hits(origin: Vector3, direction: Vector3, max_distance: float =
 	return result
 
 func nearest_visible_ray_hit(origin: Vector3, direction: Vector3, max_distance: float = 1e30) -> Dictionary:
-	return document.query_ray_nearest_visible(origin, direction, max_distance,
-		pick_hidden_brush_ids(), visibility_filter_mask())
+	var hits := visible_ray_hits(origin, direction, max_distance)
+	return hits[0] if not hits.is_empty() else {}
+
+func visible_pick_ids(ids: PackedInt64Array) -> PackedInt64Array:
+	var visible := PackedInt64Array()
+	for id in ids:
+		if brush_visible(brush(id)):
+			visible.append(id)
+	return visible
+
+func accept_brush_hit(hit: Dictionary) -> Dictionary:
+	if hit.is_empty():
+		return hit
+	var ranked: PackedInt64Array = hit.get("brush_ids", PackedInt64Array())
+	var current := int(hit.get("brush_id", 0))
+	if ranked.is_empty() and current:
+		ranked = PackedInt64Array([current])
+	var visible := visible_pick_ids(ranked)
+	if current and not brush_visible(brush(current)):
+		current = visible[0] if not visible.is_empty() else 0
+	elif current == 0 and not visible.is_empty():
+		current = visible[0]
+	if current == 0:
+		return {}
+	var filtered := hit.duplicate()
+	filtered["brush_id"] = current
+	if hit.has("brush_ids"):
+		filtered["brush_ids"] = visible
+	return filtered
 
 func apply_face_edits(edits: Array) -> Dictionary:
 	var result: Dictionary = document.apply_face_edits(edits)

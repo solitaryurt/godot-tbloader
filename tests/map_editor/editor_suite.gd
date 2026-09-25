@@ -20,6 +20,74 @@ class MockSteamAudioProbeVolume extends Node3D:
 func _enter_tree() -> void:
 	call_deferred("run")
 
+func material_grid_names(plugin) -> PackedStringArray:
+	var names: PackedStringArray = []
+	for index in plugin.materials_grid.item_count:
+		names.append(plugin.materials_grid.get_item_text(index))
+	return names
+
+func material_context_cache_journey(plugin) -> void:
+	var previous_contexts: Dictionary = plugin.material_contexts.duplicate(true)
+	var previous_active: String = plugin.active_context_key
+	var previous_editing = plugin.editing_loader
+	var mat_a := StandardMaterial3D.new()
+	mat_a.resource_name = "CacheMatA"
+	var mat_b := StandardMaterial3D.new()
+	mat_b.resource_name = "CacheMatB"
+	checks.check(ResourceSaver.save(mat_a, "res://cache_mat_a.tres") == OK and ResourceSaver.save(mat_b, "res://cache_mat_b.tres") == OK, "cached material fixtures saved")
+	mat_a = load("res://cache_mat_a.tres")
+	mat_b = load("res://cache_mat_b.tres")
+	plugin.material_contexts = {
+		"res://cache-a.tscn::LoaderA": {
+			"scene_path": "res://cache-a.tscn",
+			"scene_root_id": 0,
+			"scene_name": "CacheA",
+			"node_path": "LoaderA",
+			"node_name": "LoaderA",
+			"materials": [{"material": mat_a, "name": "CacheMatA", "path": "res://cache_mat_a.tres"}],
+		},
+		"res://cache-b.tscn::LoaderB": {
+			"scene_path": "res://cache-b.tscn",
+			"scene_root_id": 0,
+			"scene_name": "CacheB",
+			"node_path": "LoaderB",
+			"node_name": "LoaderB",
+			"materials": [{"material": mat_b, "name": "CacheMatB", "path": "res://cache_mat_b.tres"}],
+		},
+	}
+	plugin.editing_loader = weakref(null)
+	plugin.active_context_key = plugin.ALL_MATERIALS_KEY
+	plugin.refresh_materials()
+	var all_names := material_grid_names(plugin)
+	checks.check(all_names.has("CacheMatA") and all_names.has("CacheMatB")
+		and plugin.materials_context_picker.get_item_metadata(0) == plugin.ALL_MATERIALS_KEY,
+		"no TBLoader selection shows all cached materials")
+	var filtered_index := 1
+	for index in plugin.materials_context_picker.item_count:
+		if plugin.materials_context_picker.get_item_metadata(index) == "res://cache-a.tscn::LoaderA":
+			filtered_index = index
+			break
+	plugin.materials_context_picker.select(filtered_index)
+	plugin.material_context_selected(filtered_index)
+	checks.check(plugin.materials_grid.item_count == 1 and plugin.materials_grid.get_item_text(0) == "CacheMatA"
+		and plugin.editing_loader.get_ref() == null,
+		"context picker filters a cached TBLoader without opening its scene")
+	plugin.persist_material_contexts()
+	plugin.material_contexts.clear()
+	plugin.restore_material_contexts()
+	checks.check(plugin.material_contexts.has("res://cache-a.tscn::LoaderA") and plugin.material_contexts.has("res://cache-b.tscn::LoaderB"),
+		"TBLoader material caches persist after scenes close")
+	plugin.active_context_key = plugin.ALL_MATERIALS_KEY
+	plugin.editing_loader = weakref(null)
+	plugin.refresh_materials()
+	var restored_names := material_grid_names(plugin)
+	checks.check(restored_names.has("CacheMatA") and restored_names.has("CacheMatB"),
+		"restored cache still contributes to All materials")
+	plugin.material_contexts = previous_contexts
+	plugin.active_context_key = previous_active
+	plugin.editing_loader = previous_editing
+	plugin.persist_material_contexts()
+
 func find_tb_plugin(node: Node) -> EditorPlugin:
 	if node is EditorPlugin and node.get_script() != null:
 		if node.get_script().resource_path == "res://addons/tbloader/src/plugin.gd":
@@ -203,12 +271,14 @@ func run() -> void:
 		and ui.slot_borders[2].get_theme_stylebox("panel").border_color.a == 0
 		and ui.slot_borders[3].get_theme_stylebox("panel").border_color.a == 0,
 		"default 3-view activates first visual slot with exactly one accent border")
-	checks.check(plugin.map_control.visible and plugin.map_control.get_child_count() == 2
+	checks.check(plugin.map_control.visible and plugin.map_control.get_child_count() == 3
 		and plugin.map_control.get_child(0).text == "Build Meshes"
 		and plugin.map_control.get_child(0).icon == ui.loader_actions.BuildMeshes.icon
-		and plugin.map_control.get_child(1).text.is_empty() and plugin.map_control.get_child(1).icon != null
-		and plugin.map_control.get_child(1).tooltip_text == "Open Radiant Editor",
-		"spatial toolbar uses Build Meshes text and an accessible Radiant icon")
+		and plugin.map_control.get_child(1).text.is_empty() and plugin.map_control.get_child(1).icon == plugin.radiant_icon()
+		and plugin.map_control.get_child(1).tooltip_text == "Open Radiant Editor"
+		and plugin.map_control.get_child(2).text.is_empty() and plugin.map_control.get_child(2).tooltip_text == "Pick Material" and plugin.map_control.get_child(2).toggle_mode
+		and plugin.map_control.get_child(2) == plugin.spatial_actions.PickMaterial,
+		"spatial toolbar uses Build Meshes text, the Radiant icon, and Pick Material")
 	checks.check(plugin.map_control.get_child(0).disabled and plugin.map_control.get_child(1).disabled, "spatial loader actions are disabled without a selected TBLoader")
 	var map_toolbar: Control = ui.find_child("MapToolbar", true, false)
 	var chrome: MarginContainer = ui.find_child("MapEditorChrome", true, false)
@@ -1229,6 +1299,7 @@ func run() -> void:
 	plugin._edit(loader)
 	checks.check(ui.session == selection_session and ui.session.loader.get_ref() == null, "spatial selection never changes document/binding")
 	checks.check(plugin.materials_panel == shared_materials_panel, "spatial selection cannot replace the shared Map Materials UI")
+	material_context_cache_journey(plugin)
 	plugin._edit(null)
 	loader.free()
 	await binding_journey(plugin)
@@ -2179,6 +2250,11 @@ func automatic_scene_journey(plugin: EditorPlugin) -> void:
 	for frame in 6:
 		await get_tree().process_frame
 	checks.check(ui.scene_tabs.tab_count == 0 and ui.session == standalone, "switching to a zero-loader scene removes stale tabs and restores the intentional standalone session")
+	if EditorInterface.get_open_scenes().size() > 1:
+		var open_titles: Array[String] = []
+		for tab_index in ui.document_tabs.tab_count - 1:
+			open_titles.append(ui.document_tabs.get_tab_title(tab_index))
+		checks.check(open_titles.any(func(title): return title.contains("journey-copy.map")), "maps from other open scenes stay open in Radiant")
 
 func tohunga_editor_journey() -> void:
 	print("TB_UI_STAGE: local Tohunga editor regression")

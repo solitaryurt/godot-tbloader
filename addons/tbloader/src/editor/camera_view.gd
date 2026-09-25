@@ -1910,16 +1910,17 @@ func face_hit(position: Vector2) -> Dictionary:
 	var scale_value := map_scale()
 	var ray := camera.project_ray_origin(position)
 	var direction := camera.project_ray_normal(position)
-	return host.session.nearest_visible_ray_hit(preview_to_map(ray, scale_value),
+	var hits: Array = host.session.visible_ray_hits(preview_to_map(ray, scale_value),
 		preview_direction_to_map(direction), 1e30)
+	return hits[0] if not hits.is_empty() else {}
 
 func brush_aperture_hit(position: Vector2) -> Dictionary:
 	var scale_value := map_scale()
-	return host.session.document.query_brush_camera_hit(
+	return host.session.accept_brush_hit(host.session.document.query_brush_camera_hit(
 		camera_map_position(scale_value), camera_map_direction(),
 		preview_direction_to_map(camera.global_basis.x), preview_direction_to_map(camera.global_basis.y),
 		size, camera.fov, position, selector_half_size,
-		host.session.pick_hidden_brush_ids(), host.session.visibility_filter_mask())
+		host.session.pick_hidden_brush_ids(), host.session.visibility_filter_mask()))
 
 func selected_aperture_face_hit(position: Vector2, ranked_ids: PackedInt64Array) -> Dictionary:
 	if host.session.selected.is_empty() or ranked_ids.is_empty():
@@ -2086,7 +2087,7 @@ func pick(position: Vector2, additive: bool, paint = false, face_pick = false) -
 	var id = 0
 	var face_index = -1
 	if host.tool == "Face" or face_pick:
-		var hit: Dictionary = host.session.nearest_visible_ray_hit(map_ray, preview_direction_to_map(direction), 1e30)
+		var hit: Dictionary = face_hit(position)
 		if not hit.is_empty() and hit.distance < nearest:
 			id = hit.brush_id
 			point_id = 0

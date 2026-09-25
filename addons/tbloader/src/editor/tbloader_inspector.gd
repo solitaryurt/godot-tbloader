@@ -15,6 +15,9 @@ func _parse_begin(object: Object) -> void:
 	open_button.name = "OpenRadiantEditor"
 	open_button.text = "Open Radiant Editor"
 	open_button.tooltip_text = "Open this TBLoader in the Radiant map editor"
+	var host = plugin_ref.get_ref()
+	if is_instance_valid(host) and host.has_method("radiant_icon"):
+		open_button.icon = host.radiant_icon()
 	open_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	open_button.pressed.connect(func():
 		var plugin = plugin_ref.get_ref()

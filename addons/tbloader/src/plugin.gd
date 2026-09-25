@@ -5,6 +5,8 @@ class_name TBPlugin
 const MAIN_SCREEN_NAME := "Radiant"
 const TBLoaderInspector = preload("res://addons/tbloader/src/editor/tbloader_inspector.gd")
 const STEAM_AUDIO_MATERIAL_PATH := "res://resources/steam_audio_materials"
+const ALL_MATERIALS_KEY := ""
+const MATERIAL_CONTEXTS_PATH := "res://.godot/tbloader_material_contexts.cfg"
 
 var map_control: Control = null
 var editing_loader: WeakRef = weakref(null)
@@ -31,6 +33,7 @@ var entities_pane: Control = null
 var map_editor: Control = null
 var map_screen_active = false
 var spatial_actions: Dictionary = {}
+var _radiant_icon: Texture2D
 
 func _enter_tree():
 	set_input_event_forwarding_always_enabled()
@@ -45,6 +48,7 @@ func _enter_tree():
 	add_inspector_plugin(inspector_plugin)
 	materials_panel = create_materials_panel()
 	materials_button = add_control_to_bottom_panel(materials_panel, "Map Materials")
+	restore_material_contexts()
 	uv_panel = map_editor.create_material_workspace()
 	add_control_to_bottom_panel(uv_panel, "UV")
 	entities_panel = create_entities_panel()
@@ -53,6 +57,8 @@ func _enter_tree():
 	map_editor.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	map_editor.hide()
 	scene_changed.connect(edited_scene_changed)
+	if has_signal("scene_closed"):
+		scene_closed.connect(scene_tab_closed)
 	get_tree().node_added.connect(scene_tree_changed)
 	get_tree().node_removed.connect(scene_tree_changed)
 	get_tree().node_renamed.connect(scene_node_renamed)
@@ -60,6 +66,7 @@ func _enter_tree():
 	spatial_selection_changed()
 
 func _exit_tree():
+	persist_material_contexts()
 	materials_preview_generation += 1
 	if inspector_plugin != null:
 		remove_inspector_plugin(inspector_plugin)
@@ -70,6 +77,8 @@ func _exit_tree():
 	map_editor.shutdown()
 	if scene_changed.is_connected(edited_scene_changed):
 		scene_changed.disconnect(edited_scene_changed)
+	if has_signal("scene_closed") and scene_closed.is_connected(scene_tab_closed):
+		scene_closed.disconnect(scene_tab_closed)
 	if get_tree().node_added.is_connected(scene_tree_changed):
 		get_tree().node_added.disconnect(scene_tree_changed)
 	if get_tree().node_removed.is_connected(scene_tree_changed):
@@ -121,6 +130,10 @@ func _set_window_layout(configuration: ConfigFile) -> void:
 	if map_editor != null and map_editor.is_node_ready() and configuration.has_section_key("TBLoader", "map_workspace"):
 		map_editor.restore_workspace_state(configuration.get_value("TBLoader", "map_workspace", {}))
 
+func scene_tab_closed(_path: String) -> void:
+	if map_screen_active and map_editor != null:
+		map_editor.queue_scene_discovery()
+
 func edited_scene_changed(_root: Node) -> void:
 	if map_screen_active and map_editor != null:
 		map_editor.queue_scene_discovery()
@@ -151,14 +164,18 @@ func _get_plugin_name() -> String:
 	return MAIN_SCREEN_NAME
 
 func _get_plugin_icon() -> Texture2D:
-	var path := "res://addons/tbloader/icons/tbloader.svg"
-	if ResourceLoader.exists(path):
-		var kind := ResourceLoader.get_resource_type(path)
-		if kind == "Texture2D" or kind.ends_with("Texture2D") or kind == "ImageTexture":
-			var icon = ResourceLoader.load(path)
-			if icon is Texture2D:
-				return icon
-	return get_editor_interface().get_base_control().get_theme_icon("GridMap", "EditorIcons")
+	return radiant_icon()
+
+func radiant_icon() -> Texture2D:
+	if _radiant_icon != null:
+		return _radiant_icon
+	var svg := FileAccess.get_file_as_string("res://addons/tbloader/icons/radiant.svg")
+	var image := Image.new()
+	var scale := get_editor_interface().get_editor_scale() * 0.25
+	if svg.is_empty() or image.load_svg_from_string(svg, scale) != OK:
+		return get_editor_interface().get_base_control().get_theme_icon("GridMap", "EditorIcons")
+	_radiant_icon = ImageTexture.create_from_image(image)
+	return _radiant_icon
 
 func _get_unsaved_status(_for_scene: String) -> String:
 	return map_editor.unsaved_status() if map_editor != null else ""
@@ -178,6 +195,8 @@ func _edit(object):
 	update_spatial_toolbar()
 	if map_editor != null and map_editor.has_method("update_loader_action_state"):
 		map_editor.update_loader_action_state()
+	if object == null:
+		active_context_key = ALL_MATERIALS_KEY
 	update_materials_context()
 	if not map_screen_active:
 		refresh_materials()
@@ -196,12 +215,21 @@ func create_map_control() -> Control:
 	ret.add_child(button_build_meshes)
 	var open_button = Button.new()
 	open_button.flat = true
-	open_button.icon = get_editor_interface().get_base_control().get_theme_icon("GridMap", "EditorIcons")
+	open_button.icon = radiant_icon()
 	open_button.tooltip_text = "Open Radiant Editor"
 	open_button.accessibility_name = "Open Radiant Editor"
 	open_button.pressed.connect(open_in_map_editor)
 	spatial_actions.OpenRadiantEditor = open_button
 	ret.add_child(open_button)
+	var pick_button := Button.new()
+	pick_button.flat = true
+	pick_button.toggle_mode = true
+	pick_button.tooltip_text = "Pick Material"
+	pick_button.accessibility_name = "Pick Material"
+	pick_button.icon = get_editor_interface().get_base_control().get_theme_icon("ColorPick", "EditorIcons")
+	pick_button.toggled.connect(sync_material_picker)
+	spatial_actions.PickMaterial = pick_button
+	ret.add_child(pick_button)
 	return ret
 
 func update_spatial_toolbar() -> void:
@@ -370,6 +398,7 @@ func create_materials_panel() -> Control:
 	material_picker_button.text = "Pick Material"
 	material_picker_button.tooltip_text = "Pick a TBLoader surface material from the 3D viewport"
 	material_picker_button.icon = get_editor_interface().get_base_control().get_theme_icon("ColorPick", "EditorIcons")
+	material_picker_button.toggled.connect(sync_material_picker)
 	header.add_child(material_picker_button)
 	var refresh_button = Button.new()
 	refresh_button.text = "Refresh"
@@ -421,7 +450,13 @@ func update_materials_context() -> void:
 	if materials_context_label == null:
 		return
 	var loader = material_loader()
-	materials_context_label.text = "Map materials • " + (loader.name if is_instance_valid(loader) else "No bound or selected TBLoader")
+	if is_instance_valid(loader):
+		materials_context_label.text = "Map materials • " + loader.name
+	elif material_contexts.has(active_context_key):
+		var context: Dictionary = material_contexts[active_context_key]
+		materials_context_label.text = "Map materials • %s > %s (cached)" % [context.scene_name, context.node_name]
+	else:
+		materials_context_label.text = "Map materials • All TBLoaders"
 
 func material_loader():
 	if map_screen_active and map_editor != null and map_editor.session != null:
@@ -440,11 +475,20 @@ func show_materials():
 	refresh_materials()
 	make_bottom_panel_item_visible(materials_panel)
 
+func sync_material_picker(pressed: bool) -> void:
+	if material_picker_button != null and material_picker_button.button_pressed != pressed:
+		material_picker_button.set_pressed_no_signal(pressed)
+	if spatial_actions.has("PickMaterial") and spatial_actions.PickMaterial.button_pressed != pressed:
+		spatial_actions.PickMaterial.set_pressed_no_signal(pressed)
+
+func material_pick_active() -> bool:
+	return (material_picker_button != null and material_picker_button.button_pressed) or (spatial_actions.has("PickMaterial") and spatial_actions.PickMaterial.button_pressed)
+
 func _forward_3d_gui_input(camera: Camera3D, event: InputEvent) -> int:
-	if material_picker_button == null or not material_picker_button.button_pressed:
+	if not material_pick_active():
 		return EditorPlugin.AFTER_GUI_INPUT_PASS
 	if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
-		material_picker_button.button_pressed = false
+		sync_material_picker(false)
 		return EditorPlugin.AFTER_GUI_INPUT_STOP
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
 		var hit := pick_material(camera, event.position)
@@ -560,24 +604,24 @@ func update_bottom_panel_sessions() -> void:
 func refresh_materials() -> void:
 	if materials_tree == null or materials_grid == null:
 		return
+	discover_open_scene_loaders()
 	material_entries.clear()
 	var loader = material_loader()
-	if not is_instance_valid(loader):
-		if material_contexts.has(active_context_key):
-			material_entries = material_contexts[active_context_key].materials
-		filter_materials(materials_search.text)
-		if material_entries.is_empty():
-			materials_count_label.text = "Bind a Radiant session or select a TBLoader to view its materials."
-			materials_button.text = "Map Materials"
-		else:
-			materials_button.text = "Map Materials (%d)" % material_entries.size()
-		update_material_context_picker()
-		return
-	material_entries = collect_material_entries(loader)
-	cache_material_context(loader, material_entries, true)
+	if is_instance_valid(loader):
+		material_entries = collect_material_entries(loader)
+		cache_material_context(loader, material_entries, true)
+	elif material_contexts.has(active_context_key):
+		material_entries = hydrated_materials(material_contexts[active_context_key].materials)
+	else:
+		active_context_key = ALL_MATERIALS_KEY
+		material_entries = all_material_entries()
 	update_material_context_picker()
 	filter_materials(materials_search.text)
-	materials_button.text = "Map Materials (%d)" % material_entries.size()
+	if material_entries.is_empty() and material_contexts.is_empty():
+		materials_count_label.text = "Select a TBLoader to cache its materials, or build meshes first."
+		materials_button.text = "Map Materials"
+	else:
+		materials_button.text = "Map Materials (%d)" % material_entries.size()
 
 func collect_material_entries(loader: TBLoader) -> Array:
 	var materials := {}
@@ -594,43 +638,48 @@ func collect_material_entries(loader: TBLoader) -> Array:
 	entries.sort_custom(func(a, b): return a.name.naturalnocasecmp_to(b.name) < 0)
 	return entries
 
-func cache_material_context(loader: TBLoader, entries: Array, make_active: bool) -> String:
+func cache_material_context(loader: TBLoader, entries: Array, make_active: bool, write_cache: bool = true) -> String:
 	var scene_root := find_scene_root(loader)
-	if scene_root == null:
-		return ""
-	var scene_path: String = scene_root.scene_file_path
-	var scene_id := scene_path if not scene_path.is_empty() else "unsaved:%d" % scene_root.get_instance_id()
-	var key := "%s::%s" % [scene_id, scene_root.get_path_to(loader)]
+	var scene_path := ""
+	var scene_name := ""
+	var node_path := loader.name
+	var scene_id := "orphan:%d" % loader.get_instance_id()
+	if scene_root != null:
+		scene_path = scene_root.scene_file_path
+		scene_name = scene_root.name
+		node_path = str(scene_root.get_path_to(loader))
+		scene_id = scene_path if not scene_path.is_empty() else "unsaved:%d" % scene_root.get_instance_id()
+	var key := "%s::%s" % [scene_id, node_path]
+	if entries.is_empty() and material_contexts.has(key) and not material_contexts[key].materials.is_empty():
+		if make_active:
+			active_context_key = key
+		return key
 	material_contexts[key] = {
 		"scene_path": scene_path,
-		"scene_root_id": scene_root.get_instance_id(),
-		"scene_name": scene_root.name,
-		"node_path": str(scene_root.get_path_to(loader)),
+		"scene_root_id": scene_root.get_instance_id() if scene_root != null else 0,
+		"scene_name": scene_name if not scene_name.is_empty() else "(unsaved)",
+		"node_path": node_path,
 		"node_name": loader.name,
 		"materials": entries.duplicate(),
 	}
 	if make_active:
 		active_context_key = key
+	if write_cache and not scene_path.is_empty():
+		persist_material_contexts()
 	return key
 
 func discover_open_scene_loaders() -> void:
-	if materials_context_picker == null:
-		return
-	var first_key := ""
-	var preferred_key := ""
-	var edited_root := get_editor_interface().get_edited_scene_root()
+	var wrote_cache := false
 	for scene_root in get_editor_interface().get_open_scene_roots():
 		var loaders := scene_root.find_children("*", "TBLoader", true, false)
 		if scene_root is TBLoader:
 			loaders.push_front(scene_root)
 		for loader in loaders:
-			var key := cache_material_context(loader, collect_material_entries(loader), false)
-			if first_key.is_empty():
-				first_key = key
-			if scene_root == edited_root and preferred_key.is_empty():
-				preferred_key = key
-	if active_context_key.is_empty():
-		active_context_key = preferred_key if not preferred_key.is_empty() else first_key
+			cache_material_context(loader, collect_material_entries(loader), false, false)
+			if not scene_root.scene_file_path.is_empty():
+				wrote_cache = true
+	if wrote_cache:
+		persist_material_contexts()
 	update_material_context_picker()
 
 func find_scene_root(node: Node) -> Node:
@@ -639,15 +688,98 @@ func find_scene_root(node: Node) -> Node:
 			return scene_root
 	return null
 
+func all_material_entries() -> Array:
+	var materials := {}
+	for key in material_contexts:
+		for entry in hydrated_materials(material_contexts[key].materials):
+			var entry_key: String = entry.get("path", "")
+			if entry_key.is_empty():
+				entry_key = entry.get("name", "")
+			if entry_key.is_empty():
+				continue
+			if materials.has(entry_key):
+				continue
+			materials[entry_key] = entry
+	var entries: Array = materials.values()
+	entries.sort_custom(func(a, b): return a.name.naturalnocasecmp_to(b.name) < 0)
+	return entries
+
+func hydrated_materials(entries: Array) -> Array:
+	var result: Array = []
+	for entry in entries:
+		result.append(hydrate_material_entry(entry))
+	return result
+
+func hydrate_material_entry(entry: Dictionary) -> Dictionary:
+	var material = entry.get("material")
+	if is_instance_valid(material) and material is Material:
+		return entry
+	var path: String = entry.get("path", "")
+	if not path.is_empty() and ResourceLoader.exists(path):
+		var loaded = ResourceLoader.load(path)
+		if loaded is Material:
+			entry.material = loaded
+	return entry
+
+func persist_material_contexts() -> void:
+	var data := {}
+	for key in material_contexts:
+		var context: Dictionary = material_contexts[key]
+		if str(context.get("scene_path", "")).is_empty():
+			continue
+		var serialized: Array = []
+		for entry in context.materials:
+			serialized.append({
+				"name": str(entry.get("name", "")),
+				"path": str(entry.get("path", "")),
+			})
+		data[key] = {
+			"scene_path": context.scene_path,
+			"scene_name": context.scene_name,
+			"node_path": context.node_path,
+			"node_name": context.node_name,
+			"materials": serialized,
+		}
+	var config := ConfigFile.new()
+	config.set_value("tbloader", "material_contexts", data)
+	config.save(MATERIAL_CONTEXTS_PATH)
+
+func restore_material_contexts() -> void:
+	var config := ConfigFile.new()
+	if config.load(MATERIAL_CONTEXTS_PATH) != OK:
+		return
+	var data = config.get_value("tbloader", "material_contexts", {})
+	if not data is Dictionary:
+		return
+	for key in data:
+		if material_contexts.has(key):
+			continue
+		var context: Dictionary = data[key]
+		var entries: Array = []
+		for item in context.get("materials", []):
+			if not item is Dictionary:
+				continue
+			entries.append({
+				"material": null,
+				"name": str(item.get("name", "")),
+				"path": str(item.get("path", "")),
+			})
+		material_contexts[key] = {
+			"scene_path": str(context.get("scene_path", "")),
+			"scene_root_id": 0,
+			"scene_name": str(context.get("scene_name", "")),
+			"node_path": str(context.get("node_path", "")),
+			"node_name": str(context.get("node_name", "")),
+			"materials": hydrated_materials(entries),
+		}
+
 func update_material_context_picker() -> void:
 	if materials_context_picker == null:
 		return
 	materials_context_picker.clear()
-	if material_contexts.is_empty():
-		materials_context_picker.add_item("Select a TBLoader node to view its materials")
-		materials_context_picker.set_item_disabled(0, true)
-		open_context_scene_button.visible = false
-		return
+	var all_count := all_material_entries().size()
+	materials_context_picker.add_item("All materials (%d unique)" % all_count)
+	materials_context_picker.set_item_metadata(0, ALL_MATERIALS_KEY)
 	var contexts: Array = []
 	for key in material_contexts:
 		var context: Dictionary = material_contexts[key]
@@ -670,29 +802,32 @@ func update_material_context_picker() -> void:
 	update_open_context_scene_button()
 
 func material_context_selected(index: int) -> void:
-	var key: String = materials_context_picker.get_item_metadata(index)
+	var key = materials_context_picker.get_item_metadata(index)
+	if key == null:
+		return
+	key = str(key)
+	if key == ALL_MATERIALS_KEY:
+		active_context_key = ALL_MATERIALS_KEY
+		material_entries = all_material_entries()
+		filter_materials(materials_search.text)
+		materials_button.text = "Map Materials (%d)" % material_entries.size()
+		update_open_context_scene_button()
+		update_materials_context()
+		return
 	if not material_contexts.has(key):
 		return
 	active_context_key = key
-	var context: Dictionary = material_contexts[key]
-	material_entries = context.materials
+	material_entries = hydrated_materials(material_contexts[key].materials)
 	filter_materials(materials_search.text)
 	materials_button.text = "Map Materials (%d)" % material_entries.size()
-	var loader := find_context_loader(context)
-	if loader == null:
-		editing_loader = weakref(null)
-		update_open_context_scene_button()
-		return
-	var scene_root := find_context_root(context)
-	if scene_root != get_editor_interface().get_edited_scene_root() and not context.scene_path.is_empty():
-		pending_context_key = key
-		get_editor_interface().open_scene_from_path(context.scene_path)
-		return
-	activate_context_loader(loader)
+	update_open_context_scene_button()
+	update_materials_context()
 
 func find_context_root(context: Dictionary) -> Node:
 	for scene_root in get_editor_interface().get_open_scene_roots():
-		if scene_root.get_instance_id() == context.scene_root_id:
+		if context.scene_root_id != 0 and scene_root.get_instance_id() == context.scene_root_id:
+			return scene_root
+		if not context.scene_path.is_empty() and scene_root.scene_file_path == context.scene_path:
 			return scene_root
 	return null
 
@@ -751,18 +886,25 @@ func filter_materials(query: String) -> void:
 	for entry in material_entries:
 		if not normalized_query.is_empty() and normalized_query not in entry.name.to_lower() and normalized_query not in entry.path.to_lower():
 			continue
+		var material = entry.get("material")
+		var valid_material := is_instance_valid(material) and material is Material
 		var item = materials_tree.create_item(root)
 		item.set_text(0, entry.name)
 		item.set_text(1, entry.path)
-		item.set_metadata(0, entry.material)
+		item.set_metadata(0, material if valid_material else entry.path)
 		item.set_tooltip_text(0, "Show this material in the Inspector")
 		var index := materials_grid.add_item(entry.name)
-		materials_grid.set_item_metadata(index, entry.material)
+		materials_grid.set_item_metadata(index, material if valid_material else entry.path)
 		materials_grid.set_item_tooltip(index, entry.path if not entry.path.is_empty() else entry.name)
-		EditorInterface.get_resource_previewer().queue_edited_resource_preview(
-			entry.material, self, "material_preview_ready",
-			{"generation": materials_preview_generation, "index": index,
-				"instance_id": entry.material.get_instance_id()})
+		if valid_material:
+			EditorInterface.get_resource_previewer().queue_edited_resource_preview(
+				material, self, "material_preview_ready",
+				{"generation": materials_preview_generation, "index": index,
+					"instance_id": material.get_instance_id()})
+		elif not entry.path.is_empty():
+			EditorInterface.get_resource_previewer().queue_resource_preview(
+				entry.path, self, "material_preview_ready",
+				{"generation": materials_preview_generation, "index": index, "path": entry.path})
 		visible_count += 1
 	materials_count_label.text = "%d of %d materials" % [visible_count, material_entries.size()] if not normalized_query.is_empty() else "%d unique material%s" % [visible_count, "" if visible_count == 1 else "s"]
 
@@ -795,13 +937,19 @@ func add_material(materials: Dictionary, material: Material, loader: TBLoader) -
 
 func material_selected() -> void:
 	var item = materials_tree.get_selected()
-	if item != null and item.get_metadata(0) is Material:
-		get_editor_interface().edit_resource(item.get_metadata(0))
+	if item != null:
+		inspect_material_item(item.get_metadata(0))
 
 func grid_material_selected(index: int) -> void:
-	var material = materials_grid.get_item_metadata(index)
-	if material is Material:
-		get_editor_interface().edit_resource(material)
+	inspect_material_item(materials_grid.get_item_metadata(index))
+
+func inspect_material_item(value) -> void:
+	if value is Material:
+		get_editor_interface().edit_resource(value)
+	elif value is String and not value.is_empty() and ResourceLoader.exists(value):
+		var loaded = ResourceLoader.load(value)
+		if loaded is Resource:
+			get_editor_interface().edit_resource(loaded)
 
 func material_preview_ready(_path: String, preview: Texture2D, thumbnail: Texture2D, data: Variant) -> void:
 	if not data is Dictionary or data.get("generation", -1) != materials_preview_generation:
@@ -809,8 +957,11 @@ func material_preview_ready(_path: String, preview: Texture2D, thumbnail: Textur
 	var index: int = data.get("index", -1)
 	if index < 0 or index >= materials_grid.item_count:
 		return
-	var material = materials_grid.get_item_metadata(index)
-	if not material is Material or material.get_instance_id() != data.get("instance_id", 0):
+	var stored = materials_grid.get_item_metadata(index)
+	if stored is Material:
+		if stored.get_instance_id() != data.get("instance_id", 0):
+			return
+	elif str(stored) != data.get("path", ""):
 		return
 	var image := preview if preview != null else thumbnail
 	if image != null:

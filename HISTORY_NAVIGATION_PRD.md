@@ -1,24 +1,32 @@
 # Enhanced Undo/Redo History Navigation PRD
 
-**Status:** Implementation-ready proposal  
-**Date:** 2026-09-13  
+**Status:** Future extension; rebased on implemented Phase 1 per-document history  
+**Date:** 2026-09-18  
 **Product area:** Radiant Map editor  
 **Target:** The Godot editor addon under `addons/tbloader/`
 
 ## 1. Summary
 
-Add one history stack button to the Radiant Map toolbar. Activating it opens a
-menu of retained, discrete map-edit events for the active Map document. A user
+Phase 1 (`PHASE_1_PER_DOCUMENT_HISTORY_PRD.md`) has already replaced global Map
+history with a bounded, session-owned `MapSession` timeline, active-session
+undo/redo, state IDs, cursor navigation primitives, conventional redo truncation,
+and session/editor memory budgets. This PRD does not propose that migration.
+
+As a future enhancement, add one history stack button to the Radiant Map toolbar.
+Activating it opens a menu of retained, discrete map-edit events for the active Map document. A user
 can select any older or newer event and move directly to that event's resulting
 state. Merely navigating never deletes the newer states, so the same menu and
 Ctrl+Z/Ctrl+Y can move backward and forward repeatedly.
 
-History is a bounded, cursor-based linear timeline per Map document. Editing
+The existing history is a bounded, cursor-based linear timeline per Map document.
+This extension changes the historical-edit UX: editing
 while the cursor is behind the newest retained state is a different operation
-from navigation: it creates a branch point. The recommended policy is to block
+from navigation: it creates a branch point. This extension's policy is to block
 the first mutation attempt and require an explicit choice to discard the future,
 return to the latest state, or cancel. Only the explicit **Edit Here** choice
-performs conventional destructive branch truncation.
+performs destructive branch truncation. Until this extension lands, implemented
+Phase 1 behavior remains authoritative: a successful edit after undo automatically
+truncates that session's redo tail.
 
 This feature applies to `.map` document content transactions. Loader path changes
 and mesh bakes remain in Godot scene history and are not listed in the Map history
@@ -26,6 +34,8 @@ menu.
 
 ## 2. Goals
 
+- Extend, rather than replace, the implemented `MapSession` timeline and its
+  active-document shortcut routing.
 - Make long-distance undo and redo a single, discoverable operation.
 - Preserve all retained future events during backward and forward navigation.
 - Make the current position, available past, available future, saved baseline,
@@ -39,6 +49,10 @@ menu.
 
 ## 3. Non-goals
 
+- Migrating Map actions out of Godot global history; Phase 1 already completed
+  that work and its scene-history isolation is not reopened here.
+- Reimplementing timeline storage, one-step undo/redo, action labels, lifecycle
+  disposal, epoch invalidation, or existing memory-limit enforcement.
 - A branching history tree, named branches, merging, or recovery of a discarded
   branch.
 - History persistence across plugin disable, editor restart, document close, New,
@@ -83,28 +97,28 @@ menu.
 
 ### 4.2 Current history architecture
 
-- Today, `map_session.gd::transact()` registers before/after callbacks with the
-  plugin's `EditorUndoRedoManager` using global history, `MERGE_DISABLE`, the
-  session as custom context, and `commit_action(false)` because the edit is already
-  applied.
-- `map_action.gd` is a lightweight callback token containing its originating
-  session, before/after envelopes, epoch, retained byte estimate, and reporter.
-  It refuses to redirect an expired action to another document.
-- `map_editor.gd::tokens` strongly retains usable tokens. `retain_action()` applies
-  limits of 128 actions and 64 MiB per session and 128 MiB across the plugin,
-  retiring oldest payloads. `sessions` separately keeps current documents alive,
-  including dirty background documents.
-- `map_editor.gd::route_key()` intercepts Ctrl+Z/Y only while a Map graph/camera has
-  focus and invokes global history exactly once. Text fields, dialogs, and other
-  editor screens keep native Godot routing.
-- Global history intentionally allows an undo performed while document B is active
-  to mutate originating document A. This is tested in `editor_suite.gd`, but it is
-  incompatible with an active-document indexed menu: direct restoration would
-  desynchronize the global cursor, while repeated global undo would also replay
-  interleaved scene and other-document actions.
-- The pinned `UndoRedo` API exposes action count, current action, and action names,
-  but `EditorUndoRedoManager` still represents shared ordering. It provides no safe
-  selective cursor movement for one external Map document.
+- Implemented Phase 1 makes each `MapSession` authoritative for one initial state,
+  labeled `MapAction` transition metadata, stable session-local state IDs, a cursor,
+  epoch validation, byte accounting, undo/redo, direct state restoration, redo-tail
+  truncation, and contiguous edge eviction.
+- `map_session.gd::transact()` captures the outgoing UI envelope, records one
+  successful non-noop content action, and currently truncates redo automatically
+  before appending after an undo. Failed/no-op work records nothing.
+- `map_action.gd` is lightweight transition metadata (`before_state_id`,
+  `after_state_id`, label, sequence, bytes), not a global callback token owning
+  duplicate before/after snapshots.
+- `map_editor.gd` enforces 128 actions/64 MiB per session and 128 MiB editor-wide
+  using the originating session and globally oldest eligible sequence. Closing,
+  recovery replacement, epoch replacement, and shutdown dispose or invalidate the
+  applicable session timeline.
+- `map_editor.gd::route_key()` invokes the active session's `history_undo()` and
+  `history_redo()` within the existing protected Radiant input boundary. Undo in one
+  document cannot mutate another document.
+- Map content actions are absent from `EditorUndoRedoManager.GLOBAL_HISTORY`.
+  Loader-path and bake actions remain Godot scene-history operations.
+- `history_navigate_state()` already exists as a low-level restore primitive. This
+  extension adds a safe discoverable UI, saved/expired annotations, stale-menu
+  guards, and historical-edit confirmation around that implemented model.
 
 ### 4.3 Save, dirty, and persistence behavior
 
@@ -122,8 +136,8 @@ menu.
   deliberately creates a new epoch and restores no IDs, selection, binding, or
   history. This must remain true in the first release.
 - New/Open create or activate sessions rather than silently replacing dirty tabs.
-  Closing a document retires its tokens. Epoch changes make all old snapshots
-  invalid.
+  Closing a document disposes its timeline metadata/states. Epoch changes invalidate
+  and reinitialize the session timeline at current content.
 
 ### 4.4 UI and test conventions
 
@@ -142,30 +156,24 @@ menu.
 
 ### 5.1 Session-owned Map history
 
-Make a session-owned timeline authoritative for `.map` content and stop registering
-new Map content actions in `EditorUndoRedoManager.GLOBAL_HISTORY`. Continue using
-Godot scene history for `update_loader_path()` and `commit_bake()`.
+Phase 1's session-owned timeline is the implemented foundation and remains
+authoritative for `.map` content. This extension consumes its state/action/cursor,
+navigation, budget, and lifecycle APIs. It must not add a second timeline, dual-write
+Map actions to Godot history, or revive global callback tokens.
 
-This is a deliberate change to the prior global-history rule documented in
-`MAP_EDITOR_IMPLEMENTATION.md`. It is required because no implementation can both:
+Map shortcuts continue to operate on the active session timeline. Outside Radiant,
+Godot continues to undo scene/resource work. `update_loader_path()` and
+`commit_bake()` remain in Godot scene history and are not listed by the future Map
+history menu.
 
-1. move one Map document directly to an indexed state,
-2. leave unrelated global actions untouched,
-3. preserve the selected document's future, and
-4. keep the shared Godot history cursor truthful.
-
-Map shortcuts already have a focused routing boundary, so Ctrl+Z/Y in Radiant can
-operate on the active session timeline. Outside Radiant, Godot continues to undo
-scene/resource work. A background Map document no longer changes because the user
-pressed Undo in another document; the user activates its tab before navigating it.
-
-Do not dual-write Map actions to both systems. Dual registration creates two cursors
-and makes a direct jump, branch truncation, expiration, and dirty reporting
-ambiguous.
+The new architecture work is limited to menu presentation and immutable popup
+snapshots, saved/expired annotations, direct-navigation coordination, and a central
+historical-edit guard that changes the current automatic redo-tail truncation policy
+only after the complete extension ships.
 
 ### 5.2 Timeline model
 
-For each session and epoch maintain:
+Phase 1 already maintains the equivalent model for each session and epoch:
 
 ```text
 states: [S0, S1, ... Sn]
@@ -173,7 +181,7 @@ events: [E1, E2, ... En]
 cursor: c, where 0 <= c <= n and current document state is Sc
 
 Ei = {
-  id: monotonically increasing session-local integer,
+  id: stable session-local state/action identity,
   label: String,
   before_state_id: S(i-1),
   after_state_id: Si,
@@ -182,7 +190,7 @@ Ei = {
 }
 ```
 
-`S0` is captured when the session/epoch begins. Each state is the existing editor
+`S0` is captured when the session/epoch begins. Each state is the implemented editor
 snapshot envelope from `map_session.gd::capture()`. Store each state once; adjacent
 events refer to state IDs rather than each owning duplicate before/after envelopes.
 No wall-clock timestamp is required.
@@ -190,7 +198,7 @@ No wall-clock timestamp is required.
 The state selected for event `Ei` is its **after** state `Si`. The menu also exposes
 **Document opened** / **New document** as `S0`, allowing complete rollback.
 
-Operations are:
+Existing operations, plus extension behavior, are:
 
 - **Undo:** if `c > 0`, restore `S(c-1)` and decrement `c`.
 - **Redo:** if `c < n`, restore `S(c+1)` and increment `c`.
@@ -198,10 +206,11 @@ Operations are:
   intermediate mutations and do not remove any state.
 - **Append at tip:** require `c == n`, run one successful non-noop transaction,
   append its after state and event, and set `c = n + 1`.
-- **Branch at historical state:** only after explicit confirmation, remove states
-  `S(c+1)...Sn` and events `E(c+1)...En`, release them, then permit a new append.
-- **Save:** keep states/events/cursor unchanged; update the latest saved-state marker
-  after native save succeeds.
+- **Branch at historical state (extension):** only after explicit confirmation,
+  remove states `S(c+1)...Sn` and events `E(c+1)...En`, release them, then permit a
+  new append.
+- **Save (extension annotation):** keep states/events/cursor unchanged; update the
+  latest saved-state marker after native save succeeds.
 - **Epoch replacement:** expire the complete timeline and create a new `S0`.
 
 `TBMapDocument::is_dirty()` remains authoritative. The timeline may track the state
@@ -210,6 +219,11 @@ must not infer dirty from cursor position: duplicate canonical states can occur 
 the native baseline can change after Save As.
 
 ### 5.3 Navigation versus destructive branching
+
+This section defines the future extension's replacement for Phase 1's current
+automatic post-undo redo truncation. It is not current implemented behavior until
+the central guard, confirmation UI, and complete mutation-family coverage ship
+together.
 
 History navigation changes only `cursor` and restores a retained state. It is
 non-destructive regardless of distance or direction. Backward navigation is not a
@@ -344,20 +358,21 @@ Go forward to
 
 ### FR-1 Timeline ownership
 
-Every open Map session owns exactly one timeline for its current native epoch. Tabs
-do not share timelines, including tabs that originated from different loaders.
+Preserve Phase 1: every open Map session owns exactly one timeline for its current
+native epoch. Tabs do not share timelines, including tabs that originated from
+different loaders.
 
 ### FR-2 Atomic event recording
 
-Every successful, non-noop `map_session.gd::transact()` at the tip records exactly
-one labeled event and one new state. Failure, cancellation, preview, cache rebuild,
-save, selection-only changes, and no-op operations record none.
+Preserve Phase 1: every successful, non-noop `map_session.gd::transact()` at the tip
+records exactly one labeled event and one new state. Failure, cancellation, preview,
+cache rebuild, save, selection-only changes, and no-op operations record none.
 
 ### FR-3 Exact restoration
 
-Navigation restores the existing native state, stable IDs, selected brush/point IDs,
-valid component selection, and workzone through `map_session.gd::restore()`. Current
-hidden/filter state remains session state and is pruned as it is today.
+Navigation reuses the existing `history_navigate_state()`/restore path for native
+state, stable IDs, selected brush/point IDs, valid component selection, and workzone.
+Current hidden/filter state remains session state and is pruned as it is today.
 
 ### FR-4 Cursor consistency
 
@@ -391,10 +406,9 @@ session's cursor and states.
 
 ### FR-9 Memory limits
 
-Keep defaults of 128 events and 64 MiB retained history per session and 128 MiB
-across Map sessions. Count each unique state once, using native retained/additional
-byte methods; include a conservative estimate for GDScript envelope arrays or
-document the native-only estimate in code.
+Keep Phase 1's implemented defaults of 128 actions and 64 MiB retained history per
+session and 128 MiB across Map sessions. Reuse its unique-state native
+retained/additional-byte accounting and conservative GDScript envelope charges.
 
 Eviction must:
 
@@ -445,18 +459,18 @@ No native API change is expected for the first implementation.
 
 | File / symbol | Expected change |
 |---|---|
-| `addons/tbloader/src/editor/map_session.gd` | Add state/event storage, epoch, cursor, saved marker, expiration flags, append/navigate/undo/redo/truncate APIs, and a central `can_transact()`/historical-edit signal. Refactor `transact()` to append locally instead of calling `EditorUndoRedoManager`. Initialize `S0` after New/load/import session setup. |
-| `addons/tbloader/src/editor/map_action.gd` | Replace or retire the per-global-action callback role. Reuse as a plain event/state metadata type only if that is simpler; remove dual before/after ownership. |
+| `addons/tbloader/src/editor/map_session.gd` | Reuse implemented state/action/epoch/cursor, `history_navigate_state()`, undo/redo, truncation, and limits. Add only menu snapshot/query metadata, saved/expired annotations as needed, and a central historical-edit guard that can defer mutation without changing Phase 1 storage. |
+| `addons/tbloader/src/editor/map_action.gd` | No migration. Keep Phase 1's lightweight transition metadata; extend only if immutable menu identity cannot be represented by existing state/action IDs. |
 | `addons/tbloader/src/editor/map_editor.gd::_ready()` | Add the grouped history `MenuButton`, popup construction, accessibility text, and branch confirmation dialog. |
-| `map_editor.gd::route_key()` | Route Map-focused Ctrl+Z/Y to session cursor methods; keep text/dialog and non-Map routing unchanged. |
-| `map_editor.gd::retain_action()` / `tokens` | Replace token-list accounting with unique timeline-state accounting and edge eviction across sessions. Preserve strong `sessions` ownership. |
-| `map_editor.gd::set_session()` / `_session_changed()` / `refresh_status()` | Bind timeline signals, refresh menu/status, preserve per-tab cursor, and stop background global-history mutation assumptions. |
+| `map_editor.gd::route_key()` | Keep Phase 1 active-session Ctrl+Z/Y routing and text/dialog protections; refresh menu/status from the same cursor after keyboard movement. |
+| `map_editor.gd::retain_action()` / history budgets | Preserve Phase 1 unique-state accounting and edge eviction. Add only expiration-direction presentation state if existing APIs do not expose it. |
+| `map_editor.gd::set_session()` / `_session_changed()` / `refresh_status()` | Refresh menu/status and preserve the already session-owned per-tab cursor; add no global-history assumptions. |
 | `map_editor.gd::save_path()` / `save_all()` | Mark a retained saved state after successful save without adding or truncating history. |
-| `map_editor.gd::close_document()` / `shutdown()` | Release timeline states and dialogs without clearing Godot scene history. |
+| `map_editor.gd::close_document()` / `shutdown()` | Reuse Phase 1 session disposal; additionally close/release menu and branch-dialog invocation state without clearing Godot scene history. |
 | `map_editor.gd::store_recovery()` / `restore_recovery()` | Keep current-state-only recovery and initialize a fresh timeline after restore; do not change manifest version solely for this feature. |
 | `addons/tbloader/src/editor/graph_view.gd`, `camera_view.gd`, `entity_pane.gd` | Most mutations already use `transact()`. Verify any direct native mutation used only for fixtures/setup is not a user-facing bypass. Gesture attempts behind tip must cancel preview and trigger the central guard. |
 | `src/map_document.h/.cpp` | Reuse `capture_history_state`, `restore_history_state`, byte accounting, epoch checks, and dirty baseline semantics unchanged. Add native functionality only if profiling proves envelope accounting or a fingerprint query is necessary. |
-| `tests/map_editor/editor_suite.gd` | Replace global map-history assertions with per-session cursor tests; add menu, jump, branch guard, save, eviction, tabs, focus, and scene-history isolation coverage. |
+| `tests/map_editor/editor_suite.gd` | Retain Phase 1 per-session cursor, budget, lifecycle, and scene-isolation tests. Add menu, direct jump, branch guard, saved/expired annotation, stale invocation, and focus coverage; do not restore stale global-history tests. |
 | `tests/map_editor/window_input_observer.gd` | Expose read-only active timeline labels/count/cursor/menu state for external input assertions. |
 | `tests/map_editor/window_input_runner.py` | Add genuine keyboard/mouse stack-menu navigation and branch-dialog journeys. |
 | `tests/map_editor/document_suite.gd` | Retain native restore/dirty/epoch/large-map tests; add only any native API coverage introduced after profiling. |
@@ -555,11 +569,11 @@ through `transact()` or an equally central guarded transaction.
 
 | Risk | Mitigation |
 |---|---|
-| Moving Map content out of global history changes established behavior. | Keep focused Ctrl+Z/Y, provide per-tab history, update tests/documentation, and leave all scene actions global. Do not ship dual cursors. |
+| The extension regresses Phase 1's session isolation or reintroduces a second cursor. | Reuse only the implemented `MapSession` timeline/navigation APIs, retain Phase 1 regression tests, and never register Map content in Godot history. |
 | An interactive mutation bypasses the branch guard. | Audit every native mutator and enforce append/guard in `transact()`; add one test per transaction family. |
 | Popup state becomes stale during tab/epoch change. | Bind IDs to session+epoch+state ID and reject stale activation atomically. |
 | Deferred branch confirmation executes stale gesture data. | Never auto-replay the attempted edit; cancel preview and require user retry. |
-| Snapshot memory is double-counted or retained after eviction. | Store each state once, use native additional-byte accounting, test weak references and both edge-eviction directions. |
+| Menu annotations or branch state retain snapshots after Phase 1 eviction. | Store only immutable IDs/labels in popup state, reuse Phase 1 accounting, and test stale IDs plus weak references after eviction/teardown. |
 | Future expiration appears to violate preservation. | Preserve future for all navigation; allow loss only at documented hard limits and show an explicit disabled expiration row/status. |
 | Saved marker and dirty state diverge. | Keep native canonical-vs-baseline comparison authoritative; marker is annotation only and changes only on successful save. |
 | Recovery surprises a user viewing old history. | Document current-state-only recovery, checkpoint the viewed text, and never imply future survives restart. |
@@ -573,36 +587,37 @@ measured through deterministic tests and optional local profiling only.
 
 ## 15. Phased Delivery
 
-### Phase 0: Compatibility spike
+### Baseline: Implemented Phase 1
 
-- Prototype a session timeline with existing native state envelopes and direct jump.
+- Already implemented: session-owned state/action/cursor model, initial state,
+  active-session undo/redo, low-level direct navigation, epoch invalidation,
+  lifecycle disposal, unique-state budgets, scene-history isolation, and automatic
+  redo truncation after a successful historical edit.
+- This baseline is not an implementation step for this PRD and must remain passing.
+
+### Extension Phase 1: Menu compatibility spike
+
 - Confirm pinned Godot PopupMenu accessibility/focus behavior and editor theme icon.
-- Inventory all interactive native mutations and verify unique-state byte accounting.
-- Exit criterion: no unresolved dual/global cursor requirement and a measured direct
-  restore on the Tohunga fixture.
+- Exercise existing `history_navigate_state()` over the Tohunga fixture and verify a
+  distant jump performs one restore without changing Phase 1 storage/accounting.
+- Inventory transaction entry points for the future guard; do not alter truncation
+  behavior during the spike.
 
-### Phase 1: Timeline core and shortcut migration
-
-- Implement state/event/cursor model, initial state, append, undo/redo, direct jump,
-  epoch retirement, signals, and unique-state budgets.
-- Route focused Map Ctrl+Z/Y locally; stop global registration of Map content events.
-- Preserve scene history unchanged.
-- Exit criterion: headless editor model, dirty/save, tabs, scene isolation, eviction,
-  and native regression tests pass.
-
-### Phase 2: Toolbar menu and accessibility
+### Extension Phase 2: Toolbar menu and accessibility
 
 - Add the stack MenuButton, dynamic sections, saved/latest/expired annotations,
   status, stale-ID rejection, and focus restoration.
 - Exit criterion: editor and displayed UI tests cover mouse and keyboard menu jumps.
 
-### Phase 3: Historical edit safety
+### Extension Phase 3: Historical edit safety
 
 - Add central mutation guard, dialog, preview cancellation, explicit truncation,
   retry policy, and all transaction-family tests.
+- Switch from Phase 1's automatic redo truncation only when the guard and all
+  confirmation outcomes are complete; do not ship a partially guarded policy.
 - Exit criterion: no tested mutation can silently clear future history.
 
-### Phase 4: Hardening and release gate
+### Extension Phase 4: Hardening and release gate
 
 - Extend genuine X11 journey, large-map measurements, recovery/teardown tests, and
   user-facing documentation of per-document history and restart limits.
@@ -616,8 +631,8 @@ measured through deterministic tests and optional local profiling only.
 These are spike validations, not product ambiguities:
 
 - Select the exact editor theme icon available in the pinned engine.
-- Determine whether plain GDScript envelope memory needs a fixed conservative charge
-  beyond native `TBMapDocumentState` accounting; document the chosen estimate.
+- Confirm menu/popup snapshot metadata does not add retained native state ownership;
+  Phase 1's conservative envelope accounting remains authoritative.
 - Verify standard PopupMenu item tooltips expose untruncated labels to assistive
   technology in the pinned editor. If not, include the full text in accessibility
   descriptions rather than building a custom menu.

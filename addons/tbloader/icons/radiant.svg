@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Godot Radiant</title>
+  <g fill="#fb8080">
+    <path d="M27 3h10l-2 19h-6z"/>
+    <path d="m44.73 7.14 7.07 7.07-14.85 12.02-4.24-4.24z"/>
+    <path d="M61 27v10l-19-2v-6z"/>
+    <path d="m56.86 44.73-7.07 7.07-12.02-14.85 4.24-4.24z"/>
+    <path d="M37 61H27l2-19h6z"/>
+    <path d="m19.27 56.86-7.07-7.07 14.85-12.02 4.24 4.24z"/>
+    <path d="M3 37V27l19 2v6z"/>
+    <path d="m7.14 19.27 7.07-7.07 12.02 14.85-4.24 4.24z"/>
+  </g>
+  <path fill="#f5f2f0" d="m32 21 11 11-11 11-11-11z"/>
+  <path fill="#c83f4b" d="m32 26 6 6-6 6-6-6z"/>
+</svg>

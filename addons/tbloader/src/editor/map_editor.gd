@@ -1513,11 +1513,7 @@ func set_session(value: RefCounted) -> void:
 	if not session.scene_managed:
 		last_standalone = weakref(session)
 	session.save_enabled = true
-	if not sessions.has(session):
-		session.changed.connect(_session_changed.bind(session))
-		session.message.connect(set_status)
-		session.action_recorded.connect(retain_action)
-		sessions.append(session)
+	retain_session(session)
 	clear_cut_state()
 	for pane in entity_panes:
 		pane.set_session(session)
@@ -2584,14 +2580,11 @@ func discover_scene_loaders() -> void:
 	if not scene_active or shutting_down or session == null:
 		return
 	var root = EditorInterface.get_edited_scene_root()
+	var open_ids := open_scene_ids()
+	release_closed_scene_maps(open_ids)
+	open_background_scene_maps(root)
 	discovered_scene_id = root.get_instance_id() if root != null else 0
-	var all_loaders: Array[Node] = []
-	if root is TBLoader:
-		all_loaders.append(root)
-	if root != null:
-		for node in root.find_children("*", "", true, false):
-			if node is TBLoader:
-				all_loaders.append(node)
+	var all_loaders := scene_loaders(root)
 	watch_scene_loaders(all_loaders)
 	var mapped: Array[Node] = all_loaders.filter(func(loader): return not loader.map_resource.is_empty())
 	var previous_loader = session.loader.get_ref()
@@ -2606,8 +2599,13 @@ func discover_scene_loaders() -> void:
 		if origin != null:
 			next_sessions[id] = origin
 	for id in scene_sessions:
-		if not next_sessions.has(id):
-			retire_scene_session(scene_sessions[id])
+		if next_sessions.has(id):
+			continue
+		var retired = scene_sessions[id]
+		var retired_scene = retired.scene.get_ref()
+		if retired_scene != null and retired_scene != root and open_ids.has(retired_scene.get_instance_id()):
+			continue
+		retire_scene_session(retired)
 	scene_sessions = next_sessions
 	if previous_loader != null and scene_sessions.has(previous_loader.get_instance_id()):
 		if session != scene_sessions[previous_loader.get_instance_id()]:
@@ -2621,6 +2619,70 @@ func discover_scene_loaders() -> void:
 			standalone = Session.new()
 		set_session(standalone)
 	rebuild_scene_tabs(root, mapped)
+	refresh_status()
+
+func scene_loaders(root: Node) -> Array[Node]:
+	var loaders: Array[Node] = []
+	if root == null:
+		return loaders
+	if root is TBLoader:
+		loaders.append(root)
+	for node in root.find_children("*", "", true, false):
+		if node is TBLoader:
+			loaders.append(node)
+	return loaders
+
+func open_scene_ids() -> Dictionary:
+	var ids := {}
+	for scene_root in EditorInterface.get_open_scene_roots():
+		if scene_root != null:
+			ids[scene_root.get_instance_id()] = true
+	return ids
+
+func retain_session(origin: RefCounted) -> void:
+	if origin == null or sessions.has(origin):
+		return
+	origin.changed.connect(_session_changed.bind(origin))
+	origin.message.connect(set_status)
+	origin.action_recorded.connect(retain_action)
+	sessions.append(origin)
+
+func open_background_scene_maps(edited: Node) -> void:
+	for scene_root in EditorInterface.get_open_scene_roots():
+		if scene_root == null or scene_root == edited:
+			continue
+		for loader in scene_loaders(scene_root):
+			if loader.map_resource.is_empty() or find_path_session(loader.map_resource) != null:
+				continue
+			var candidate = Session.new()
+			var result: Dictionary = candidate.document.load_map(loader.map_resource)
+			if not session.report(result):
+				candidate.dispose()
+				continue
+			candidate.scene_managed = true
+			candidate.loader = weakref(loader)
+			candidate.scene = weakref(scene_root)
+			candidate.was_bound = true
+			retain_session(candidate)
+
+func release_closed_scene_maps(open_ids: Dictionary) -> void:
+	for origin in sessions.duplicate():
+		if origin == null or origin == session or not origin.scene_managed:
+			continue
+		var scene = origin.scene.get_ref()
+		if scene != null and open_ids.has(scene.get_instance_id()):
+			continue
+		if origin.has_unsaved_changes():
+			origin.scene_managed = false
+			origin.loader = weakref(null)
+			origin.scene = weakref(null)
+			origin.was_bound = false
+			continue
+		sessions.erase(origin)
+		for id in scene_sessions.keys():
+			if scene_sessions[id] == origin:
+				scene_sessions.erase(id)
+		origin.dispose()
 
 func watch_scene_loaders(loaders: Array[Node]) -> void:
 	var current: Dictionary = {}
@@ -2842,7 +2904,7 @@ func bake_origin(origin: RefCounted) -> bool:
 	if not commit_bake(loader, origin):
 		return false
 	refresh_status()
-	set_status("Map saved and meshes built successfully; save the Godot scene to persist generated nodes.")
+	set_status("Map saved and meshes built successfully; mesh files are in radiant_meshes. Save the scene to keep the node references.")
 	return true
 
 func commit_bake(loader: Node, origin: RefCounted = null) -> bool:
@@ -2885,7 +2947,7 @@ func commit_bake(loader: Node, origin: RefCounted = null) -> bool:
 		remember_baked_state(origin, token.after_text)
 	EditorInterface.mark_scene_as_unsaved()
 	plugin.refresh_materials()
-	set_status("Selected loader meshes built successfully; scene marked unsaved.")
+	set_status("Selected loader meshes built successfully into radiant_meshes; scene marked unsaved.")
 	return true
 
 func save_all(defer_bake = false) -> void:

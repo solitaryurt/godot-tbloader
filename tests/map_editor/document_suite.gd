@@ -76,6 +76,30 @@ func run() -> void:
 		checks.check(bounds.position.is_equal_approx(Vector3(-32, -8, -16) / 38.0), "map to Godot minimum (y,z,x)/38")
 		checks.check(bounds.end.is_equal_approx(Vector3(32, 24, 48) / 38.0), "map to Godot maximum (y,z,x)/38")
 	checks.check(loader.find_children("*", "CollisionShape3D", true, false).size() == 1, "cube collision generated")
+	var baked_mesh: Mesh = meshes[0].mesh
+	var baked_shape: Shape3D = loader.find_children("*", "CollisionShape3D", true, false)[0].shape
+	checks.check(baked_mesh.resource_path == "res://fixtures/radiant_meshes/classic_cube/Default_Layer/entity_0_geometry.res" and FileAccess.file_exists(baked_mesh.resource_path), "visual mesh saved in radiant_meshes")
+	checks.check(baked_shape.resource_path == "res://fixtures/radiant_meshes/classic_cube/Default_Layer/entity_0_geometry_DEFAULT_col/CollisionShape3D.res" and FileAccess.file_exists(baked_shape.resource_path), "collision shape saved in radiant_meshes")
+	var hull_file := FileAccess.open("user://hull-occluder.map", FileAccess.WRITE)
+	hull_file.store_string("{\n\"classname\" \"worldspawn\"\n{\n( 64 -64 -64 ) ( 64 64 64 ) ( 64 64 -64 ) common/hull 0 0 0 1 1\n( -64 -64 64 ) ( -64 64 -64 ) ( -64 64 64 ) common/hull 0 0 0 1 1\n( -64 64 -64 ) ( 64 64 64 ) ( -64 64 64 ) common/hull 0 0 0 1 1\n( -64 -64 64 ) ( 64 -64 -64 ) ( -64 -64 -64 ) common/hull 0 0 0 1 1\n( -64 -64 64 ) ( 64 64 64 ) ( 64 -64 64 ) common/hull 0 0 0 1 1\n( 64 -64 -64 ) ( -64 64 -64 ) ( -64 -64 -64 ) common/hull 0 0 0 1 1\n}\n}\n")
+	hull_file.close()
+	var hull_loader = ClassDB.instantiate("TBLoader")
+	root.add_child(hull_loader)
+	hull_loader.map_resource = "user://hull-occluder.map"
+	var hull_result: Dictionary = hull_loader.build_meshes_checked()
+	var hull_meshes = hull_loader.find_children("*", "MeshInstance3D", true, false)
+	checks.check(hull_result.ok and hull_meshes.size() == 1 and str(hull_meshes[0].name).ends_with("_hull"), "common/hull bakes to one separate mesh")
+	checks.check(hull_loader.find_children("*", "CollisionShape3D", true, false).is_empty(), "hull mesh has no collision")
+	var hull_instance: MeshInstance3D = hull_meshes[0]
+	var hull_format: int = (hull_instance.mesh as ArrayMesh).surface_get_format(0)
+	var hull_uv2: PackedVector2Array = (hull_instance.mesh as ArrayMesh).surface_get_arrays(0)[Mesh.ARRAY_TEX_UV2]
+	checks.check(hull_instance.cast_shadow == GeometryInstance3D.SHADOW_CASTING_SETTING_SHADOWS_ONLY
+		and hull_instance.gi_mode == GeometryInstance3D.GI_MODE_STATIC
+		and (hull_format & Mesh.ARRAY_FORMAT_TEX_UV2) != 0
+		and (hull_instance.mesh as ArrayMesh).get_lightmap_size_hint() == Vector2i(2, 2)
+		and hull_uv2.size() >= 3 and hull_uv2[0] == Vector2.ZERO and hull_uv2[1] == Vector2.RIGHT and hull_uv2[2] == Vector2.UP,
+		"hull mesh is an invisible 2x2 lightmap occluder with one shared UV")
+	hull_loader.free()
 	for generated in loader.find_children("*", "", true, false):
 		checks.check(generated.owner == loader, "root loader owns generated output")
 	loader.free()

@@ -17,6 +17,7 @@
 #include <surface_gatherer.h>
 
 #include <map>
+#include <vector>
 
 using namespace godot;
 
@@ -59,6 +60,10 @@ public:
 	Dictionary load_map(const String& path);
 	bool prepare_map_data();
 	bool build_map();
+	bool externalize_baked_resources();
+	String baked_resource_directory() const;
+	bool save_external_resource(const Ref<Resource>& resource, const String& path);
+	bool save_baked_resources(Node* node, const String& directory, std::vector<String>& written);
 	bool build_visual_map();
 	Dictionary resolve_material(const String& token);
 
@@ -78,7 +83,7 @@ protected:
 	Vector3 lm_transform(const vec3& v);
 
 	void add_collider_from_mesh(Node3D* area, Ref<ArrayMesh>& mesh, ColliderShape colshape, Color* debug_color = nullptr);
-	void add_surface_to_mesh(Ref<ArrayMesh>& mesh, LMSurface& surf);
+	void add_surface_to_mesh(Ref<ArrayMesh>& mesh, LMSurface& surf, bool shared_lightmap_uv = false);
 	MeshInstance3D* build_entity_mesh(int idx, LMEntity& ent, Node3D* parent, ColliderType coltype, ColliderShape colshape);
 
 protected:
