@@ -93,6 +93,9 @@ const DENSE_EDGE_POINT_BYTES = 8
 const DENSE_EDGE_RANGE_BYTES = 16
 const CONTEXT_DRAG_THRESHOLD = 4.0
 const TRACKPAD_ZOOM_FACTOR = 1.25
+const BRUSH_EDGE_DASH = 4.0
+const BRUSH_EDGE_GAP = 5.0
+const FACE_EDGE_WIDTH = 4.0
 @export_range(2.0, 64.0, 1.0) var selector_half_size = 12.0
 
 func _overlay_font() -> Font:
@@ -1223,6 +1226,24 @@ func draw_static_layer(canvas: Control) -> void:
 	if not sparse_edge_buffer.is_empty():
 		canvas.draw_multiline(sparse_edge_buffer, Color("9eb2c7"), 1, true)
 
+func dashed_edges(edges: PackedVector2Array, dash: float, gap: float) -> PackedVector2Array:
+	var dashed := PackedVector2Array()
+	for i in range(0, edges.size(), 2):
+		var a: Vector2 = edges[i]
+		var b: Vector2 = edges[i + 1]
+		var delta := b - a
+		var length := delta.length()
+		if length <= 0.0001:
+			continue
+		var direction := delta / length
+		var t := 0.0
+		while t < length:
+			var dash_end := minf(t + dash, length)
+			dashed.append(a + direction * t)
+			dashed.append(a + direction * dash_end)
+			t += dash + gap
+	return dashed
+
 func draw_selection_layer(canvas: Control) -> void:
 	var query := cached_visible_query()
 	var visible_brushes: Array = []
@@ -1269,13 +1290,13 @@ func draw_selection_layer(canvas: Control) -> void:
 		if not original_edges.is_empty():
 			canvas.draw_multiline(original_edges, Color("20252d"), 3.0 / zoom, true)
 			selection_mask_point_count += original_edges.size()
-		canvas.draw_multiline(selected_edges, Color("ffb657"), 2.0 / zoom, true)
+		canvas.draw_multiline(dashed_edges(selected_edges, BRUSH_EDGE_DASH / zoom, BRUSH_EDGE_GAP / zoom), Color("ffb657"), 2.0 / zoom, true)
 		canvas.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 	elif not selected_edges.is_empty():
 		if not original_edges.is_empty():
 			canvas.draw_multiline(original_edges, Color("20252d"), 3, true)
 			selection_mask_point_count += original_edges.size()
-		canvas.draw_multiline(selected_edges, Color("ffb657"), 2, true)
+		canvas.draw_multiline(dashed_edges(selected_edges, BRUSH_EDGE_DASH, BRUSH_EDGE_GAP), Color("ffb657"), 2, true)
 	if host.tool in ["Vertex", "Edge"] or not host.session.components.is_empty():
 		for brush in visible_brushes:
 			var color = Color("ffb657")
@@ -1301,7 +1322,7 @@ func draw_selection_layer(canvas: Control) -> void:
 					if polygon.size() >= 3 and absf(brush.faces[component.index].normal[orientation]) > 0.001:
 						canvas.draw_colored_polygon(polygon, Color(0.16, 0.5, 1.0, 0.3))
 					for i in polygon.size():
-						canvas.draw_line(polygon[i], polygon[(i + 1) % polygon.size()], Color("69a7ff"), 3, true)
+						canvas.draw_line(polygon[i], polygon[(i + 1) % polygon.size()], Color("69a7ff"), FACE_EDGE_WIDTH, true)
 				elif component.kind == "vertex":
 					canvas.draw_circle(project(brush.vertices[component.index]), 6, Color("ffe6a6"))
 				else:

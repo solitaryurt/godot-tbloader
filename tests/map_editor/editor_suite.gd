@@ -7,16 +7,6 @@ var ui: Control
 var manager: EditorUndoRedoManager
 var history: UndoRedo
 
-class MockSteamAudioProbeVolume extends Node3D:
-	var size := Vector3.ZERO
-	var spacing := 0.0
-	var bake_threads := 0
-	var reflection_threads := 0
-	var generated := false
-
-	func generate_probes() -> void:
-		generated = true
-
 func _enter_tree() -> void:
 	call_deferred("run")
 
@@ -966,8 +956,9 @@ func run() -> void:
 	mouse(graph, graph.project(center), false, MOUSE_BUTTON_LEFT, false, true)
 	checks.check(ui.session.components.size() == 1, "graph face component pick")
 	checks.check(ui.camera_view.overlays.get_node_or_null("SelectedFaceFill") == null
-		and ui.camera_view.overlays.get_node_or_null("SelectedFaceEdges") != null,
-		"camera face selection uses blue boundary edges without a face fill")
+		and ui.camera_view.overlays.get_node_or_null("SelectedFaceEdges") != null
+		and ui.camera_view.overlays.get_node("SelectedFaceEdges").mesh.surface_get_primitive_type(0) == Mesh.PRIMITIVE_TRIANGLES,
+		"camera face selection uses thick blue boundary edges without a face fill")
 	var face_index: int = ui.session.components[0].index
 	ui.texture_field.text = "common/caulk"
 	ui.assign_texture()
@@ -2047,42 +2038,6 @@ func binding_journey(plugin: EditorPlugin) -> void:
 			for array_index in [Mesh.ARRAY_VERTEX, Mesh.ARRAY_NORMAL, Mesh.ARRAY_TANGENT, Mesh.ARRAY_TEX_UV, Mesh.ARRAY_TEX_UV2, Mesh.ARRAY_INDEX]:
 				checks.check(preview_arrays[array_index] == baked_arrays[array_index],
 					"built camera array %d matches bake mesh %d surface %d" % [array_index, mesh_index, surface])
-	var old_probe_volume := MockSteamAudioProbeVolume.new()
-	old_probe_volume.name = "SteamAudioProbeVolume"
-	var old_probe_branch := Node3D.new()
-	root.add_child(old_probe_branch)
-	old_probe_branch.add_child(old_probe_volume)
-	var skybox_branch := Node3D.new()
-	skybox_branch.name = "skybox"
-	loader.add_child(skybox_branch)
-	var skybox_mesh := MeshInstance3D.new()
-	var skybox_box := BoxMesh.new()
-	skybox_box.size = Vector3.ONE * 100000.0
-	skybox_mesh.mesh = skybox_box
-	skybox_branch.add_child(skybox_mesh)
-	var probe_volume := MockSteamAudioProbeVolume.new()
-	plugin.add_steam_audio_probe_volume(loader, probe_volume)
-	checks.check(probe_volume.get_parent() == loader.get_parent() and probe_volume.get_index() + 1 == loader.get_index()
-		and probe_volume.owner == root,
-		"Steam Audio probe volume is the sibling immediately above TBLoader with scene ownership")
-	checks.check(old_probe_volume.get_parent() == null and old_probe_volume.is_queued_for_deletion(),
-		"Steam Audio probe generation removes an existing volume anywhere in the edited scene before replacement")
-	checks.check(skybox_mesh.gi_mode == GeometryInstance3D.GI_MODE_DISABLED,
-		"skybox meshes are excluded from GI")
-	var map_bounds: AABB = baked_meshes[0].global_transform * baked_meshes[0].mesh.get_aabb()
-	for mesh_index in range(1, baked_meshes.size()):
-		var mesh_instance: MeshInstance3D = baked_meshes[mesh_index]
-		map_bounds = map_bounds.merge(mesh_instance.global_transform * mesh_instance.mesh.get_aabb())
-	checks.check(is_equal_approx(probe_volume.spacing, 3.0)
-		and probe_volume.size.is_equal_approx(map_bounds.size)
-		and probe_volume.global_position.is_equal_approx(map_bounds.get_center()),
-		"Steam Audio probe volume uses spacing 3 and the generated map AABB")
-	checks.check(probe_volume.bake_threads == OS.get_processor_count()
-		and probe_volume.reflection_threads == OS.get_processor_count(),
-		"Steam Audio probe baking uses all available processor threads")
-	checks.check(probe_volume.generated, "Steam Audio probes are generated during map bake")
-	skybox_branch.queue_free()
-	await get_tree().process_frame
 	checks.check(not loader.find_children("*", "CollisionShape3D", true, false).is_empty(), "real baked collision output")
 	var bake_action = ui.last_bake_action.get_ref()
 	checks.check(bake_action != null and bake_action.get_retention_counters().packed_snapshot_count == 0
@@ -3758,10 +3713,15 @@ func phase5_journey() -> void:
 	checks.check(scratch.selected.is_empty() and scratch.points.is_empty() and scratch.components.is_empty(),
 		"Escape clears the complete spatial and component selection in one action")
 	ui.camera_view.apply_pick(id, 0, 0, false, false, true)
+	var brush_edge_mesh: ArrayMesh = ui.camera_view.overlays.get_node("SelectedBrushEdges").mesh
 	checks.check(ui.camera_view.overlays.has_node("SelectedBrushFill") and ui.camera_view.overlays.has_node("SelectedFaceEdges")
+		and ui.camera_view.overlays.has_node("SelectedBrushEdges")
+		and brush_edge_mesh.surface_get_primitive_type(0) == Mesh.PRIMITIVE_LINES
+		and brush_edge_mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX].size() > 24
+		and ui.camera_view.overlays.get_node("SelectedFaceEdges").mesh.surface_get_primitive_type(0) == Mesh.PRIMITIVE_TRIANGLES
 		and ui.camera_view.overlays.get_node("SelectedFaceEdges").material_override.albedo_color.b > 0.9
 		and ui.camera_view.overlays.get_node("SelectedFaceEdges").material_override.albedo_color.a == 1.0,
-		"camera renders translucent orange brushes and opaque blue selected-face edges")
+		"camera renders translucent orange brushes, dotted brush edges, and thick opaque blue selected-face edges")
 	ui.texture_field.text = "common/caulk"
 	ui.assign_texture()
 	checks.check(scratch.brush(id).faces[0].texture == "common/caulk", "camera quick-face selection scopes material assignment")

@@ -223,7 +223,7 @@ class TBMapDocument : public RefCounted {
 	Dictionary stage_components(const Array &components, Vector3 delta, const StringName &operation, LMMapEdit &edit, Dictionary &sources) const;
 	Dictionary stage_clip(const PackedInt64Array &ids, Vector3 p0, Vector3 p1, Vector3 p2, bool split, const StringName &operation, LMMapEdit &edit, PackedInt64Array &out, Dictionary &sources) const;
 	void resolve_texture_sizes(LMMapData &data, const Dictionary &sizes) const;
-	Dictionary build_base_editor_geometry(LMMapData &data, const Dictionary &sizes, std::shared_ptr<const TBMapDocumentState::BaseEditorGeometry> &out, const StringName &operation, const String &error_path) const;
+	Dictionary build_base_editor_geometry(LMMapData &data, const Dictionary &sizes, std::shared_ptr<const TBMapDocumentState::BaseEditorGeometry> &out, const StringName &operation, const String &error_path, bool skip_invalid = false) const;
 	Dictionary update_texture_context_geometry(const LMMapData &data, const std::shared_ptr<const TBMapDocumentState::BaseEditorGeometry> &source_base,
 			const std::shared_ptr<const EditorState> &source_editor, const Dictionary &old_sizes, const Dictionary &new_sizes,
 			std::shared_ptr<const TBMapDocumentState::BaseEditorGeometry> &out_base, std::shared_ptr<const EditorState> &out_editor,

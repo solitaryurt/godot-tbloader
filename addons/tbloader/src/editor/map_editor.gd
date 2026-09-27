@@ -58,6 +58,7 @@ var browser: Control
 var bottom_uv_pane: Control
 var status: Label
 var notice: Label
+var notice_copy: Button
 var notice_generation := 0
 var binding_label: Label
 var texture_field: LineEdit
@@ -365,10 +366,23 @@ func _ready() -> void:
 	load_recent_paths()
 	status = Label.new()
 	add_child(status)
+	var notice_row := HBoxContainer.new()
+	notice_row.name = "MapNotice"
+	add_child(notice_row)
 	notice = Label.new()
+	notice.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	notice.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	notice.text = "Drag empty grid: cuboid • RMB click: add entity • RMB drag: pan • S: UV • N: Entities • H: hide • Space: clone"
-	add_child(notice)
+	notice_row.add_child(notice)
+	notice_copy = Button.new()
+	notice_copy.name = "CopyNotice"
+	notice_copy.icon = editor_icon("ActionCopy")
+	notice_copy.flat = true
+	notice_copy.tooltip_text = "Copy error"
+	notice_copy.accessibility_name = "Copy error"
+	notice_copy.hide()
+	notice_copy.pressed.connect(copy_notice)
+	notice_row.add_child(notice_copy)
 	build_dialogs()
 	build_entity_menu()
 	set_session(Session.new())
@@ -1578,6 +1592,14 @@ func set_status(text: String) -> void:
 	notice_generation += 1
 	if notice != null:
 		notice.text = text
+	if notice_copy != null:
+		var code := text.get_slice(": ", 0)
+		notice_copy.visible = not code.is_empty() and code == code.to_upper() and code.find(" ") == -1 and text.begins_with(code + ": ")
+
+func copy_notice() -> void:
+	if notice == null or notice.text.is_empty():
+		return
+	DisplayServer.clipboard_set(notice.text)
 
 func sync_baked_state(origin: RefCounted) -> Dictionary:
 	var state: Dictionary = origin.get_meta(BAKED_STATE_META, {
@@ -2542,7 +2564,10 @@ func open_path(path: String) -> bool:
 	replace_session(candidate)
 	remember_recent_path(path)
 	refresh_materials()
-	set_status("Opened %s" % path)
+	var skipped := 0
+	if result.value is int or result.value is float:
+		skipped = int(result.value)
+	set_status(("Opened %s; skipped %d invalid brush%s" % [path, skipped, "" if skipped == 1 else "es"]) if skipped else "Opened %s" % path)
 	return true
 
 func find_path_session(path: String, binding_loader: Node = null) -> RefCounted:
@@ -2831,6 +2856,7 @@ func bind_loader(loader: Node) -> void:
 			if not loaded:
 				origin.dispose()
 				return
+			origin.set_meta("skipped_brushes", int(result.value) if result.value is int else 0)
 	origin.loader = weakref(loader)
 	origin.scene = weakref(root)
 	origin.was_bound = true
@@ -2840,6 +2866,9 @@ func bind_loader(loader: Node) -> void:
 	configure_browser(loader.texture_path)
 	refresh()
 	queue_scene_discovery()
+	var skipped := int(origin.get_meta("skipped_brushes", 0))
+	if skipped > 0:
+		set_status("Skipped %d invalid brush%s in %s" % [skipped, "" if skipped == 1 else "es", loader.map_resource])
 
 func detach() -> void:
 	if session == null:

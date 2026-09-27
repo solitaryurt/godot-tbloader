@@ -479,7 +479,7 @@ func restore_document_change(change: RefCounted, use_after: bool, envelope: Dict
 func report(result: Dictionary) -> bool:
 	if not result.ok:
 		var e: Dictionary = result.error
-		message.emit("%s: %s %s%s" % [e.code, e.message, e.path,
+		message.emit("%s (%s): %s %s%s" % [e.code, e.operation, e.message, e.path,
 			(" (%d:%d)" % [e.line, e.column]) if e.line else ""])
 	return result.ok
 

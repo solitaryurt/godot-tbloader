@@ -9,6 +9,7 @@
 #include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/core/class_db.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 #include <atomic>
 #include <algorithm>
 #include <chrono>
@@ -216,7 +217,24 @@ Dictionary TBMapDocument::prepare(const std::string &text, std::shared_ptr<LMMap
 	return success();
 }
 
-Dictionary TBMapDocument::build_base_editor_geometry(LMMapData &data, const Dictionary &sizes, std::shared_ptr<const TBMapDocumentState::BaseEditorGeometry> &out, const StringName &operation, const String &error_path) const {
+namespace {
+void remove_invalid_brush(LMEntity &ent, int index) {
+	free(ent.brushes[index].faces);
+	if (index + 1 < ent.brush_count) memmove(&ent.brushes[index], &ent.brushes[index + 1], size_t(ent.brush_count - index - 1) * sizeof(LMBrush));
+	--ent.brush_count;
+	int write = 0;
+	for (int p = 0; p < ent.primitive_count; ++p) {
+		auto prim = ent.primitives[p];
+		if (!prim.is_patch) {
+			if (prim.index == index) continue;
+			if (prim.index > index) --prim.index;
+		}
+		ent.primitives[write++] = prim;
+	}
+	ent.primitive_count = write;
+}
+}
+Dictionary TBMapDocument::build_base_editor_geometry(LMMapData &data, const Dictionary &sizes, std::shared_ptr<const TBMapDocumentState::BaseEditorGeometry> &out, const StringName &operation, const String &error_path, bool skip_invalid) const {
 	const auto build_begin = std::chrono::steady_clock::now();
 	auto store = std::make_shared<TBMapDocumentState::BaseEditorGeometry>();
 	size_t total_brushes = 0;
@@ -228,12 +246,17 @@ Dictionary TBMapDocument::build_base_editor_geometry(LMMapData &data, const Dict
 		dimensions[t] = {size.x, size.y};
 	}
 	const LMEditorBrushBuildContext context{dimensions.data(), dimensions.size()};
+	std::vector<std::pair<int, int>> dropped;
 	for (int e = 0; e < data.entity_count; ++e) {
 		auto &entity = data.entities[e];
 		for (int b = 0; b < entity.brush_count; ++b) {
 			auto &brush = entity.brushes[b]; auto built = lm_build_editor_brush_geometry(brush, context);
 			if (translation_counter_scope) { ++last_operation.brush_builds; ++last_operation.compact_full_builds; }
-			if (!built || !lm_validate_editor_brush_geometry(brush, built.geometry)) return failure("INVALID_GEOMETRY", "Brush must be a finite, closed solid with nonempty faces", operation, error_path);
+			if (!built || !lm_validate_editor_brush_geometry(brush, built.geometry)) {
+				if (!skip_invalid) return failure("INVALID_GEOMETRY", "Brush must be a finite, closed solid with nonempty faces", operation, error_path);
+				dropped.emplace_back(e, b);
+				continue;
+			}
 			brush.center = {}; size_t corners = 0;
 			for (const auto &face : built.geometry.faces) for (uint32_t v = 0; v < face.corner_count; ++v) {
 				brush.center = vec3_add(brush.center, built.geometry.positions[built.geometry.corners[face.corner_begin + v].position]); ++corners;
@@ -242,9 +265,10 @@ Dictionary TBMapDocument::build_base_editor_geometry(LMMapData &data, const Dict
 			store->brushes[brush.id] = std::make_shared<const LMEditorBrushGeometry>(std::move(built.geometry));
 		}
 	}
+	for (auto it = dropped.rbegin(); it != dropped.rend(); ++it) remove_invalid_brush(data.entities[it->first], it->second);
 	out = std::move(store);
 	if (translation_counter_scope) { last_operation.compact_build_us += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - build_begin).count(); last_operation.compact_retained_bytes = out->retained_bytes(); }
-	return success();
+	return success(false, static_cast<int64_t>(dropped.size()));
 }
 
 Dictionary TBMapDocument::update_texture_context_geometry(const LMMapData &data,
@@ -433,19 +457,23 @@ Dictionary TBMapDocument::replace_text(const std::string &text, const StringName
 	bool was_dirty = is_dirty();
 	assign_ids(*candidate);
 	std::shared_ptr<const TBMapDocumentState::BaseEditorGeometry> geometry;
-	result = build_base_editor_geometry(*candidate, texture_sizes, geometry, operation, new_path);
+	const bool skip_invalid = operation == StringName("load_map");
+	result = build_base_editor_geometry(*candidate, texture_sizes, geometry, operation, new_path, skip_invalid);
 	if (!bool(result["ok"])) { translation_counter_scope = false; return result; }
+	const int64_t skipped = skip_invalid ? int64_t(result["value"]) : 0;
+	std::string disk_canonical;
+	if (skipped > 0) { disk_canonical = std::move(normalized); normalized = lm_write_map(*candidate); }
 	clear_spatial_caches(); clear_preview_caches();
 	epoch = ++epoch_counter;
 	path = new_path;
 	disk_path = saved ? absolute_path(new_path) : String();
 	has_baseline = saved;
-	baseline = saved ? normalized : "";
+	baseline = saved ? (skipped > 0 ? disk_canonical : normalized) : "";
 	disk_bytes = saved ? text : "";
-	saved_state_generation = saved ? next_state_generation + 1 : -1;
+	saved_state_generation = saved && skipped == 0 ? next_state_generation + 1 : -1;
 	commit(candidate, geometry, normalized, was_dirty);
 	last_operation.success = true; last_operation.committed = true; translation_counter_scope = false;
-	return success(true);
+	return success(true, skipped);
 }
 Dictionary TBMapDocument::new_map() { return replace_text("{\n\"classname\" \"worldspawn\"\n}\n", "new_map", String(), false); }
 Dictionary TBMapDocument::import_text(const String &text) { return replace_text(utf8(text), "import_text", String(), false); }
@@ -456,7 +484,12 @@ Dictionary TBMapDocument::load_map(const String &new_path) {
 	if (file.is_valid() && file->get_length() > LMMapParser::MAX_TEXT_BYTES) return failure("LIMIT_EXCEEDED", "Map exceeds 16 MiB", "load_map", new_path);
 	std::string bytes;
 	if (!read_bytes(new_path, bytes)) return failure("IO_READ", "Cannot read map", "load_map", new_path);
-	return replace_text(bytes, "load_map", new_path, true);
+	Dictionary result = replace_text(bytes, "load_map", new_path, true);
+	if (bool(result["ok"])) {
+		const int64_t skipped = result["value"];
+		if (skipped > 0) UtilityFunctions::print("WARNING: Skipped ", skipped, " invalid brush", skipped == 1 ? "" : "es", " while loading ", new_path);
+	}
+	return result;
 }
 
 Dictionary TBMapDocument::save_map(const String &target) {

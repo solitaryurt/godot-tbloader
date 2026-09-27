@@ -367,12 +367,14 @@ Node* Builder::build_entity(int idx, LMEntity& ent, const String& classname, std
 		if (newEntityNode) newEntityNode->add_to_group("level");
 	} else {
 		// Load common entities if enabled
+		bool handled_nocollision = false;
 		if (m_loader->m_entity_common) {
 			if (classname == "light") {
 				newEntityNode = build_entity_light(idx, ent);
 			} else if (classname == "area") {
 				newEntityNode = build_entity_area(idx, ent);
 			} else if (classname == "nocollision") {
+				handled_nocollision = true;
 				newEntityNode = build_worldspawn(idx, ent, false);
 			} else if (classname == "target_speaker") {
 				newEntityNode = build_entity_sound(idx, ent);
@@ -393,8 +395,8 @@ Node* Builder::build_entity(int idx, LMEntity& ent, const String& classname, std
 		}
 
 		if (!m_error.is_empty()) return nullptr;
-		if (newEntityNode == nullptr) {
-			// Still no entity? We're building a custom one
+		if (!handled_nocollision && newEntityNode == nullptr) {
+			// An empty nocollision entity is a valid no-op, not a custom scene.
 			newEntityNode = build_entity_custom(idx, ent, m_map->entity_geo[idx], classname, entity_class_count);
 		}
 	}
@@ -956,7 +958,7 @@ MeshInstance3D* Builder::build_entity_mesh(int idx, LMEntity& ent, Node3D* paren
 		if (tex.name == m_loader->get_skip_texture_name()) {
 			continue;
 		}
-		const bool hull_surface = String(tex.name) == "common/hull";
+		const bool hull_surface = String(tex.name) == m_loader->get_lightmap_hull();
 
 		// Attempt to load material
 		material = material_from_name(tex.name);

@@ -299,67 +299,6 @@ func add_steam_audio_geometry(loader: Node) -> void:
 		shape.add_child(geometry)
 		geometry.owner = shape.owner
 		geometry.set("material", materials[material_name])
-	add_steam_audio_probe_volume(loader)
-
-func add_steam_audio_probe_volume(loader: Node, probe_volume: Node3D = null) -> void:
-	var probe_parent := loader.get_parent()
-	if probe_parent == null:
-		push_warning("SteamAudioProbeVolume was not created because the TBLoader has no parent.")
-		return
-	var scene_root := get_editor_interface().get_edited_scene_root()
-	if scene_root == null or (scene_root != loader and not scene_root.is_ancestor_of(loader)):
-		scene_root = probe_parent
-		while scene_root.get_parent() != null:
-			scene_root = scene_root.get_parent()
-	var scene_nodes: Array[Node] = [scene_root]
-	scene_nodes.append_array(scene_root.find_children("*", "", true, false))
-	for existing_probe in scene_nodes:
-		if existing_probe != probe_volume and (existing_probe.is_class("SteamAudioProbeVolume")
-				or existing_probe.name == "SteamAudioProbeVolume"):
-			existing_probe.get_parent().remove_child(existing_probe)
-			existing_probe.queue_free()
-	if probe_volume == null:
-		if not ClassDB.class_exists(&"SteamAudioProbeVolume"):
-			return
-		probe_volume = ClassDB.instantiate(&"SteamAudioProbeVolume") as Node3D
-		if probe_volume == null:
-			push_warning("SteamAudioProbeVolume could not be instantiated.")
-			return
-	var map_bounds := AABB()
-	var has_bounds := false
-	for child in loader.find_children("*", "MeshInstance3D", true, false):
-		var mesh_instance := child as MeshInstance3D
-		if mesh_instance.mesh == null:
-			continue
-		var ancestor: Node = mesh_instance
-		var is_skybox := false
-		while ancestor != loader:
-			if String(ancestor.name).to_lower() == "skybox":
-				is_skybox = true
-				break
-			ancestor = ancestor.get_parent()
-		if is_skybox:
-			mesh_instance.gi_mode = GeometryInstance3D.GI_MODE_DISABLED
-			continue
-		var mesh_bounds: AABB = mesh_instance.global_transform * mesh_instance.mesh.get_aabb()
-		map_bounds = map_bounds.merge(mesh_bounds) if has_bounds else mesh_bounds
-		has_bounds = true
-	if not has_bounds:
-		push_warning("SteamAudioProbeVolume was not created because the map has no mesh bounds.")
-		return
-	probe_volume.name = "SteamAudioProbeVolume"
-	if probe_volume.get_parent() != probe_parent:
-		probe_parent.add_child(probe_volume)
-	var loader_index := loader.get_index()
-	var probe_index := probe_volume.get_index()
-	probe_parent.move_child(probe_volume, loader_index - 1 if probe_index < loader_index else loader_index)
-	probe_volume.owner = loader.owner if loader.owner != null else probe_parent
-	probe_volume.global_transform = Transform3D(Basis.IDENTITY, map_bounds.get_center())
-	probe_volume.set("size", map_bounds.size)
-	probe_volume.set("spacing", 3.0)
-	probe_volume.set("bake_threads", OS.get_processor_count())
-	probe_volume.set("reflection_threads", OS.get_processor_count())
-	probe_volume.call("generate_probes")
 
 func create_materials_panel() -> Control:
 	var panel = VBoxContainer.new()

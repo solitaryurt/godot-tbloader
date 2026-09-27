@@ -38,6 +38,8 @@ void TBLoader::_bind_methods()
 	ClassDB::bind_method(D_METHOD("get_no_wall_jump_texture_name"), &TBLoader::get_no_wall_jump_texture_name);
 	ClassDB::bind_method(D_METHOD("set_skip_texture_name", "option_skip_texture_name"), &TBLoader::set_skip_texture_name);
 	ClassDB::bind_method(D_METHOD("get_skip_texture_name"), &TBLoader::get_skip_texture_name);
+	ClassDB::bind_method(D_METHOD("set_lightmap_hull", "option_lightmap_hull"), &TBLoader::set_lightmap_hull);
+	ClassDB::bind_method(D_METHOD("get_lightmap_hull"), &TBLoader::get_lightmap_hull);
 	ClassDB::bind_method(D_METHOD("set_visual_layer_mask", "option_visual_layer_mask"), &TBLoader::set_visual_layer_mask);
 	ClassDB::bind_method(D_METHOD("get_visual_layer_mask"), &TBLoader::get_visual_layer_mask);
 	ClassDB::bind_method(D_METHOD("set_skybox_layer_mask", "option_skybox_layer_mask"), &TBLoader::set_skybox_layer_mask);
@@ -85,6 +87,7 @@ void TBLoader::_bind_methods()
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "option_cushion_texture_name", PROPERTY_HINT_NONE, "Cushion Texture"), "set_cushion_texture_name", "get_cushion_texture_name");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "option_no_wall_jump_texture_name", PROPERTY_HINT_NONE, "No Wall Jump Texture"), "set_no_wall_jump_texture_name", "get_no_wall_jump_texture_name");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "option_skip_texture_name", PROPERTY_HINT_NONE, "skip Texture"), "set_skip_texture_name", "get_skip_texture_name");
+	ADD_PROPERTY(PropertyInfo(Variant::STRING, "option_lightmap_hull", PROPERTY_HINT_NONE, "lightmap hull"), "set_lightmap_hull", "get_lightmap_hull");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "option_visual_layer_mask", PROPERTY_HINT_LAYERS_3D_RENDER), "set_visual_layer_mask", "get_visual_layer_mask");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "option_skybox_layer_mask", PROPERTY_HINT_LAYERS_3D_RENDER), "set_skybox_layer_mask", "get_skybox_layer_mask");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "option_collision_layer_mask", PROPERTY_HINT_LAYERS_3D_PHYSICS), "set_collision_layer_mask", "get_collision_layer_mask");
@@ -238,6 +241,16 @@ void TBLoader::set_skip_texture_name(const String& skip_texture_name)
 String TBLoader::get_skip_texture_name()
 {
 	return m_skip_texture_name;
+}
+
+void TBLoader::set_lightmap_hull(const String& lightmap_hull)
+{
+	m_lightmap_hull = lightmap_hull;
+}
+
+String TBLoader::get_lightmap_hull()
+{
+	return m_lightmap_hull;
 }
 
 uint32_t TBLoader::get_visual_layer_mask()

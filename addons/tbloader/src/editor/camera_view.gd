@@ -142,6 +142,9 @@ const MIN_DOLLY_STEP = 0.125
 const MAX_DOLLY_STEP = 128.0
 const DOLLY_STEP_FACTOR = 1.25
 const TRACKPAD_ZOOM_FACTOR = 1.25
+const FACE_EDGE_WIDTH = 2.5
+const BRUSH_EDGE_DASH = 4.0
+const BRUSH_EDGE_GAP = 5.0
 @export_range(2.0, 64.0, 1.0) var selector_half_size := 12.0
 const SKY_ENVIRONMENT_PROPERTIES = [
 	"background_mode",
@@ -1300,6 +1303,42 @@ func append_face_triangles(target: PackedVector3Array, winding: PackedVector3Arr
 		target.append(transform_map_scaled(winding[index], scale_value))
 		target.append(transform_map_scaled(winding[index + 1], scale_value))
 
+func append_quad(target: PackedVector3Array, p0: Vector3, p1: Vector3, p2: Vector3, p3: Vector3) -> void:
+	target.append(p0)
+	target.append(p1)
+	target.append(p2)
+	target.append(p0)
+	target.append(p2)
+	target.append(p3)
+
+func append_thick_segment(target: PackedVector3Array, a: Vector3, b: Vector3, half_width: float) -> void:
+	var along := b - a
+	if along.length_squared() <= 0.0000001:
+		return
+	along = along.normalized()
+	var side := along.cross(Vector3.UP)
+	if side.length_squared() <= 0.0000001:
+		side = along.cross(Vector3.FORWARD)
+	side = side.normalized() * half_width
+	var up := along.cross(side).normalized() * half_width
+	append_quad(target, a - side - up, a + side - up, b + side - up, b - side - up)
+	append_quad(target, a + side - up, a + side + up, b + side + up, b + side - up)
+	append_quad(target, a + side + up, a - side + up, b - side + up, b + side + up)
+	append_quad(target, a - side + up, a - side - up, b - side - up, b - side + up)
+
+func append_dashed_map_line(target: PackedVector3Array, a: Vector3, b: Vector3, scale_value: float) -> void:
+	var delta := b - a
+	var length := delta.length()
+	if length <= 0.0001:
+		return
+	var direction := delta / length
+	var t := 0.0
+	while t < length:
+		var dash_end := minf(t + BRUSH_EDGE_DASH, length)
+		target.append(transform_map_scaled(a + direction * t, scale_value))
+		target.append(transform_map_scaled(a + direction * dash_end, scale_value))
+		t += BRUSH_EDGE_DASH + BRUSH_EDGE_GAP
+
 func build_overlays(scale_value: float, visual_layer: int) -> void:
 	var marker_mesh := SphereMesh.new()
 	marker_mesh.radius = 0.15
@@ -1318,7 +1357,9 @@ func build_overlays(scale_value: float, visual_layer: int) -> void:
 		instance.layers = visual_layer
 		core_overlays.add_child(instance)
 	var brush_triangles := PackedVector3Array()
+	var brush_edges := PackedVector3Array()
 	var face_edges := PackedVector3Array()
+	var face_half_width := FACE_EDGE_WIDTH * 0.5 / scale_value
 	for id in host.session.selected:
 		var brush: Dictionary = host.session.brush(id)
 		if not host.session.brush_visible(brush):
@@ -1326,6 +1367,8 @@ func build_overlays(scale_value: float, visual_layer: int) -> void:
 		for face in brush.faces:
 			if not host.session.material_filtered(face.texture):
 				append_face_triangles(brush_triangles, face.winding, scale_value)
+		for index in range(0, brush.edges.size(), 2):
+			append_dashed_map_line(brush_edges, brush.edges[index], brush.edges[index + 1], scale_value)
 	for component in host.session.components:
 		if component.kind != "face":
 			continue
@@ -1333,11 +1376,12 @@ func build_overlays(scale_value: float, visual_layer: int) -> void:
 		if host.session.component_valid(component, brush) and host.session.brush_visible(brush):
 			var face: Dictionary = brush.faces[component.index]
 			if not host.session.material_filtered(face.texture):
-				for index in face.winding.size():
-					face_edges.append(transform_map_scaled(face.winding[index], scale_value))
-					face_edges.append(transform_map_scaled(face.winding[(index + 1) % face.winding.size()], scale_value))
+				var winding: PackedVector3Array = face.winding
+				for index in winding.size():
+					append_thick_segment(face_edges, transform_map_scaled(winding[index], scale_value), transform_map_scaled(winding[(index + 1) % winding.size()], scale_value), face_half_width)
 	add_selection_overlay("SelectedBrushFill", brush_triangles, Color(1.0, 0.48, 0.14, 0.14), 1)
-	add_selection_lines("SelectedFaceEdges", face_edges, Color(0.16, 0.5, 1.0, 1.0), 2)
+	add_selection_lines("SelectedBrushEdges", brush_edges, Color("ffb657"), 2)
+	add_selection_overlay("SelectedFaceEdges", face_edges, Color(0.16, 0.5, 1.0, 1.0), 3)
 	if host.tool in ["Face", "Edge", "Vertex"]:
 		var handle_material = StandardMaterial3D.new()
 		handle_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -1376,26 +1420,6 @@ func build_overlays(scale_value: float, visual_layer: int) -> void:
 				handle.material_override = selected_handle_material if selected else handle_material
 				handle.layers = visual_layer
 				core_overlays.add_child(handle)
-	var outline = ImmediateMesh.new()
-	var outline_material = StandardMaterial3D.new()
-	outline_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	outline_material.albedo_color = Color("ffb657")
-	var has_lines = false
-	for id in host.session.selected:
-		var brush: Dictionary = host.session.brush(id)
-		if not host.session.brush_visible(brush):
-			continue
-		if not has_lines:
-			outline.surface_begin(Mesh.PRIMITIVE_LINES, outline_material)
-			has_lines = true
-		for edge in brush.edges:
-			outline.surface_add_vertex(transform_map_scaled(edge, scale_value))
-	if has_lines:
-		outline.surface_end()
-		var instance = MeshInstance3D.new()
-		instance.mesh = outline
-		instance.layers = visual_layer
-		core_overlays.add_child(instance)
 
 func ground_grid_signature() -> Array:
 	if not is_instance_valid(host) or host.session == null:

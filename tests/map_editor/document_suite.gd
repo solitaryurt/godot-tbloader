@@ -88,6 +88,7 @@ func run() -> void:
 	hull_loader.map_resource = "user://hull-occluder.map"
 	var hull_result: Dictionary = hull_loader.build_meshes_checked()
 	var hull_meshes = hull_loader.find_children("*", "MeshInstance3D", true, false)
+	checks.check(hull_loader.option_lightmap_hull == "common/hull", "lightmap hull texture defaults to common/hull")
 	checks.check(hull_result.ok and hull_meshes.size() == 1 and str(hull_meshes[0].name).ends_with("_hull"), "common/hull bakes to one separate mesh")
 	checks.check(hull_loader.find_children("*", "CollisionShape3D", true, false).is_empty(), "hull mesh has no collision")
 	var hull_instance: MeshInstance3D = hull_meshes[0]
@@ -934,6 +935,15 @@ func test_checked_bake() -> void:
 	loader.texture_material_template = priority
 	var templated = loader.resolve_material("res://textures/baseline/checker.png")
 	checks.check(templated.material != priority and templated.material.albedo_color == priority.albedo_color and templated.material.albedo_texture == checker and priority.albedo_texture == null, "shared resolver duplicates material template")
+	loader.texture_path = "res://textures"
+	write_text("user://empty-nocollision.map", cube + '{"classname" "nocollision"}\n')
+	loader.map_resource = "user://empty-nocollision.map"
+	result = loader.build_meshes_checked()
+	checks.check(result.ok and result.value.child_count == 1 and loader.find_children("*", "MeshInstance3D", true, false).size() == 1, "empty nocollision is a no-op, not a missing custom entity")
+	write_text("user://brush-nocollision.map", '{"classname" "worldspawn"}\n' + cube.replace('"classname" "worldspawn"', '"classname" "nocollision"'))
+	loader.map_resource = "user://brush-nocollision.map"
+	result = loader.build_meshes_checked()
+	checks.check(result.ok and result.value.child_count == 1 and loader.find_children("*", "MeshInstance3D", true, false).size() == 1 and loader.find_children("*", "CollisionShape3D", true, false).is_empty(), "nocollision brush bakes visual geometry without colliders")
 	loader.map_resource = "res://fixtures/empty.map"
 	result = loader.build_meshes_checked()
 	checks.check(result.ok and result.changed and result.value.child_count == 0 and loader.get_child_count() == 0, "empty map commits empty bake")
@@ -1050,8 +1060,15 @@ func test_document() -> void:
 		+ "( 1 0 0 ) ( 0.999999999999 1 1 ) ( 0.999999999999 1 0 ) pathological 0 0 0 1 1\n}\n}\n"
 	write_text("user://pathological.map", pathological_text)
 	var pathological_result: Dictionary = doc.load_map("user://pathological.map")
-	expect_failure(doc, pathological_result, before, "INVALID_GEOMETRY", "load_map")
-	checks.check(pathological_result.error.path == "user://pathological.map", "incoming compact geometry diagnostics retain the requested path")
+	expect_ok(pathological_result, "load skips invalid brush")
+	checks.check(int(pathological_result.value) == 1 and doc.get_draw_data().is_empty(), "invalid brush is omitted and reported")
+	checks.check(doc.is_dirty() and not doc.export_text().value.contains("pathological"), "skipped brush marks filtered map dirty")
+	expect_ok(doc.save_map("user://pathological.map"), "save filtered map")
+	checks.check(not doc.is_dirty(), "saving filtered map clears dirty state")
+	checks.check(int(doc.load_map("user://pathological.map").value) == 0 and doc.get_draw_data().is_empty(), "saved filtered map reopens without skipped brushes")
+	expect_ok(doc.import_text(redundant), "restore after skipped brush")
+	before = state(doc)
+	events_before = events.duplicate()
 	for bytes in [PackedByteArray([123, 34, 255, 34, 32, 34, 120, 34, 125]), PackedByteArray([123, 0, 125]), PackedByteArray([123, 34, 237, 160, 128, 34, 125])]:
 		var binary = FileAccess.open("user://invalid-encoding.map", FileAccess.WRITE)
 		binary.store_buffer(bytes)

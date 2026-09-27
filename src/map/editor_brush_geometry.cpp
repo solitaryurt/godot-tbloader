@@ -254,7 +254,9 @@ static LMEditorBrushBuildResult build_editor_brush_geometry(const LMBrush &brush
 
 	unique_edges.reserve(corner_count);
 	for (const auto &winding : windings) for (size_t i = 0; i < winding.size(); ++i) {
+		if (winding.size() < 3) continue;
 		uint32_t a = winding[i].topology_position, b = winding[(i + 1) % winding.size()].topology_position;
+		if (a == b) continue;
 		if (a > b) std::swap(a, b);
 		if (std::find(unique_edges.begin(), unique_edges.end(), std::make_pair(a, b)) == unique_edges.end()) unique_edges.emplace_back(a, b);
 	}
@@ -293,7 +295,9 @@ static LMEditorBrushBuildResult build_editor_brush_geometry(const LMBrush &brush
 	for (const auto edge_pair : unique_edges) {
 		LMEditorBrushEdge edge{edge_pair.first, edge_pair.second};
 		for (uint32_t f = 0; f < windings.size(); ++f) for (size_t i = 0; i < windings[f].size(); ++i) {
+			if (windings[f].size() < 3) continue;
 			uint32_t a = windings[f][i].topology_position, b = windings[f][(i + 1) % windings[f].size()].topology_position;
+			if (a == b) continue;
 			if (a > b) std::swap(a, b);
 			if (a == edge.a && b == edge.b) {
 				if (edge.use_count == 0) edge.first_face = f;
