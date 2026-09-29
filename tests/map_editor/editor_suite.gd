@@ -51,7 +51,7 @@ func material_context_cache_journey(plugin) -> void:
 	var all_names := material_grid_names(plugin)
 	checks.check(all_names.has("CacheMatA") and all_names.has("CacheMatB")
 		and plugin.materials_context_picker.get_item_metadata(0) == plugin.ALL_MATERIALS_KEY,
-		"no TBLoader selection shows all cached materials")
+		"no Radiant selection shows all cached materials")
 	var filtered_index := 1
 	for index in plugin.materials_context_picker.item_count:
 		if plugin.materials_context_picker.get_item_metadata(index) == "res://cache-a.tscn::LoaderA":
@@ -61,12 +61,12 @@ func material_context_cache_journey(plugin) -> void:
 	plugin.material_context_selected(filtered_index)
 	checks.check(plugin.materials_grid.item_count == 1 and plugin.materials_grid.get_item_text(0) == "CacheMatA"
 		and plugin.editing_loader.get_ref() == null,
-		"context picker filters a cached TBLoader without opening its scene")
+		"context picker filters a cached Radiant without opening its scene")
 	plugin.persist_material_contexts()
 	plugin.material_contexts.clear()
 	plugin.restore_material_contexts()
 	checks.check(plugin.material_contexts.has("res://cache-a.tscn::LoaderA") and plugin.material_contexts.has("res://cache-b.tscn::LoaderB"),
-		"TBLoader material caches persist after scenes close")
+		"Radiant material caches persist after scenes close")
 	plugin.active_context_key = plugin.ALL_MATERIALS_KEY
 	plugin.editing_loader = weakref(null)
 	plugin.refresh_materials()
@@ -80,7 +80,7 @@ func material_context_cache_journey(plugin) -> void:
 
 func find_tb_plugin(node: Node) -> EditorPlugin:
 	if node is EditorPlugin and node.get_script() != null:
-		if node.get_script().resource_path == "res://addons/tbloader/src/plugin.gd":
+		if node.get_script().resource_path == "res://addons/radiant/src/plugin.gd":
 			return node
 	for child in node.get_children():
 		var found = find_tb_plugin(child)
@@ -140,7 +140,7 @@ func select_none() -> void:
 
 func per_document_history_regression() -> void:
 	var original = ui.session
-	var Session = load("res://addons/tbloader/src/editor/map_session.gd")
+	var Session = load("res://addons/radiant/src/editor/map_session.gd")
 	var a = Session.new()
 	var b = Session.new()
 	ui.set_session(a)
@@ -269,7 +269,7 @@ func run() -> void:
 		and plugin.map_control.get_child(2).text.is_empty() and plugin.map_control.get_child(2).tooltip_text == "Pick Material" and plugin.map_control.get_child(2).toggle_mode
 		and plugin.map_control.get_child(2) == plugin.spatial_actions.PickMaterial,
 		"spatial toolbar uses Build Meshes text, the Radiant icon, and Pick Material")
-	checks.check(plugin.map_control.get_child(0).disabled and plugin.map_control.get_child(1).disabled, "spatial loader actions are disabled without a selected TBLoader")
+	checks.check(plugin.map_control.get_child(0).disabled and plugin.map_control.get_child(1).disabled, "spatial loader actions are disabled without a selected Radiant")
 	var map_toolbar: Control = ui.find_child("MapToolbar", true, false)
 	var chrome: MarginContainer = ui.find_child("MapEditorChrome", true, false)
 	var toolbar_labels: Array[String] = []
@@ -464,7 +464,7 @@ func run() -> void:
 	ui.camera_view.sync_camera_marker(true)
 	checks.check((ui.status.text.begins_with("UNSAVED •") or ui.status.text.begins_with("saved •")) and ui.status.text.contains("meshes") and ui.status.text.contains("grid") and ui.status.text.contains("selected") and ui.status.text.contains("hidden"), "bottom status omits map title and retains editing state")
 	var active_session = ui.session
-	var background = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var background = load("res://addons/radiant/src/editor/map_session.gd").new()
 	checks.check(background.document.save_map("user://background-refresh.map").ok, "background refresh fixture starts clean")
 	background.texture_root = "res://textures-other"
 	ui.set_session(background)
@@ -798,7 +798,7 @@ func run() -> void:
 	key(KEY_Z, true)
 	checks.check(text() == resized, "global action ordering")
 	var merge_origin = ui.session
-	var merge_session = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var merge_session = load("res://addons/radiant/src/editor/map_session.gd").new()
 	ui.set_session(merge_session)
 	var merge_a: Dictionary = ui.session.document.create_cuboid(Vector3(256, 0, 0), Vector3(288, 32, 32), "common/caulk")
 	var merge_b: Dictionary = ui.session.document.create_cuboid(Vector3(288, 0, 0), Vector3(320, 32, 32), "common/caulk")
@@ -866,8 +866,8 @@ func run() -> void:
 	while ui.browser.is_refreshing():
 		await get_tree().process_frame
 	ui.browser.set_search("icon")
-	checks.check(not ui.browser.set_folder("res://addons") and not ui.browser.select_path("res://addons/tbloader/icon.png"), "browser cannot leave loader texture root")
-	checks.check(ui.texture_field.text != "res://addons/tbloader/icon.png" and ui.session.brush(id).faces[0].texture != "res://addons/tbloader/icon.png", "outside-root texture is never assigned")
+	checks.check(not ui.browser.set_folder("res://addons") and not ui.browser.select_path("res://addons/radiant/icon.png"), "browser cannot leave loader texture root")
+	checks.check(ui.texture_field.text != "res://addons/radiant/icon.png" and ui.session.brush(id).faces[0].texture != "res://addons/radiant/icon.png", "outside-root texture is never assigned")
 	ui.browser.set_search("checker")
 	ui.browser.set_folder("res://")
 	checks.check(ui.browser.get_visible_paths().has("res://textures/baseline/checker.png"), "real browser search discovers checker")
@@ -957,8 +957,8 @@ func run() -> void:
 	checks.check(ui.session.components.size() == 1, "graph face component pick")
 	checks.check(ui.camera_view.overlays.get_node_or_null("SelectedFaceFill") == null
 		and ui.camera_view.overlays.get_node_or_null("SelectedFaceEdges") != null
-		and ui.camera_view.overlays.get_node("SelectedFaceEdges").mesh.surface_get_primitive_type(0) == Mesh.PRIMITIVE_TRIANGLES,
-		"camera face selection uses thick blue boundary edges without a face fill")
+		and ui.camera_view.overlays.get_node("SelectedFaceEdges").mesh.surface_get_primitive_type(0) == Mesh.PRIMITIVE_LINES,
+		"camera face selection uses solid blue boundary edges without a face fill")
 	var face_index: int = ui.session.components[0].index
 	ui.texture_field.text = "common/caulk"
 	ui.assign_texture()
@@ -1063,7 +1063,7 @@ func run() -> void:
 	checks.check(not ui.open_path("res://missing.map") and ui.session == original_session, "failed open keeps active session")
 	var open_count = ui.sessions.size()
 	checks.check(ui.open_path("res://journey.map") and ui.session == original_session and ui.sessions.size() == open_count, "opening an existing path activates its tab without duplicating the document")
-	var new_session = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var new_session = load("res://addons/radiant/src/editor/map_session.gd").new()
 	checks.check(new_session.document.import_text(journey).ok, "foreground history fixture imports canonical content")
 	ui.set_session(new_session)
 	new_session.save_enabled = false
@@ -1259,7 +1259,7 @@ func run() -> void:
 	plugin._make_visible(false)
 	checks.check(not camera.flying, "Map tab hide releases camera")
 	checks.check(plugin.built_materials_page.get_parent() == plugin.materials_panel, "leaving Radiant preserves the plugin-owned Map Materials UI")
-	var loader = ClassDB.instantiate("TBLoader")
+	var loader = ClassDB.instantiate("Radiant")
 	loader.name = "SpatialMaterialContext"
 	var material_mesh := MeshInstance3D.new()
 	var material_fixture := StandardMaterial3D.new()
@@ -1337,12 +1337,12 @@ func run() -> void:
 	var old_entities_panel = weakref(plugin.entities_panel)
 	var old_toolbar = weakref(plugin.map_control)
 	ui = null
-	EditorInterface.set_plugin_enabled("tbloader", false)
+	EditorInterface.set_plugin_enabled("radiant", false)
 	await get_tree().process_frame
 	await get_tree().process_frame
 	checks.check(old_ui.get_ref() == null and old_toolbar.get_ref() == null and old_panel.get_ref() == null
 		and old_uv_panel.get_ref() == null and old_entities_panel.get_ref() == null, "disable frees all Map and bottom-panel controls")
-	EditorInterface.set_plugin_enabled("tbloader", true)
+	EditorInterface.set_plugin_enabled("radiant", true)
 	await get_tree().process_frame
 	plugin = find_tb_plugin(get_tree().root)
 	checks.check(plugin != null and plugin.map_editor.is_inside_tree(), "re-enable creates one fresh Map screen")
@@ -1590,7 +1590,7 @@ func maximized_pane_journey() -> void:
 	ui.set_active_slot(0, true)
 	ui.toggle_maximized_slot()
 	var original = ui.session
-	var extra = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var extra = load("res://addons/radiant/src/editor/map_session.gd").new()
 	ui.set_session(extra)
 	checks.check(ui.maximized_slot == 0 and ui.view_slots[0].visible and not ui.right_views.visible,
 		"session switch keeps workspace maximization")
@@ -1809,7 +1809,7 @@ func document_tab_shortcut_journey() -> void:
 	ui.set_session(created)
 	key(KEY_W, true)
 	checks.check(not ui.sessions.has(created) and ui.session == original, "Ctrl+W closes the active Map tab")
-	var named = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var named = load("res://addons/radiant/src/editor/map_session.gd").new()
 	ui.set_session(named)
 	checks.check(named.document.save_map("user://phase2-reopen.map").ok, "reopen fixture writes a saved path")
 	ui.close_document(named)
@@ -1897,7 +1897,7 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	source.add_child(source_world_environment)
 	source_world_environment.owner = source
 	for name_value in ["BoundLoader", "OtherLoader"]:
-		var loader = ClassDB.instantiate("TBLoader")
+		var loader = ClassDB.instantiate("Radiant")
 		loader.name = name_value
 		loader.map_resource = "res://journey-copy.map"
 		loader.texture_path = "res://textures"
@@ -1923,7 +1923,7 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	selection.add_node(loader)
 	plugin.spatial_selection_changed()
 	checks.check(plugin.map_control.visible and plugin.editing_loader.get_ref() == loader and not plugin.map_control.get_child(0).disabled and not plugin.map_control.get_child(1).disabled, "spatial toolbar enables selected-loader actions promptly")
-	checks.check(not ui.loader_actions.BindLoader.disabled, "Map Bind enables promptly for the selected TBLoader")
+	checks.check(not ui.loader_actions.BindLoader.disabled, "Map Bind enables promptly for the selected Radiant")
 	ui.bind_selected()
 	checks.check(ui.session.loader.get_ref() == loader and ui.valid_binding() and not ui.loader_actions.DetachLoader.disabled and not ui.loader_actions.UpdateLoaderPath.disabled and not ui.loader_actions.BuildMeshes.disabled and not ui.rebuild_on_save.disabled, "explicit Bind loads the document and enables bound actions")
 	var source_environment: Environment = root.get_node("WorldEnvironment").environment
@@ -2006,7 +2006,7 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	plugin.spatial_selection_changed()
 	checks.check(ui.session.loader.get_ref() == loader and plugin.editing_loader.get_ref() == other, "second loader selection preserves explicit binding")
 	ui.bind_loader(other)
-	checks.check(ui.session.loader.get_ref() == other, "bind_loader opens the exact requested TBLoader independent of prior binding")
+	checks.check(ui.session.loader.get_ref() == other, "bind_loader opens the exact requested Radiant independent of prior binding")
 	ui.bind_loader(loader)
 	checks.check(ui.session.loader.get_ref() == loader, "bind_loader can return to the exact Inspector loader")
 	var scene_history = manager.get_history_undo_redo(manager.get_object_history_id(root))
@@ -2088,7 +2088,7 @@ func binding_journey(plugin: EditorPlugin) -> void:
 	checks.check(not ui.session.document.is_dirty() and mesh_signature(loader) == old_signature, "external save writes map but defers bake beyond enclosing scene save")
 	var saving_origin = ui.session
 	ui.discover_scene_loaders()
-	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
+	ui.set_session(load("res://addons/radiant/src/editor/map_session.gd").new())
 	ui.session.save_enabled = false
 	for frame in 3:
 		await get_tree().process_frame
@@ -2148,13 +2148,13 @@ func automatic_scene_journey(plugin: EditorPlugin) -> void:
 	nested_branch.name = "Nested"
 	branch.add_child(nested_branch)
 	nested_branch.owner = automatic
-	var automatic_loader = ClassDB.instantiate("TBLoader")
+	var automatic_loader = ClassDB.instantiate("Radiant")
 	automatic_loader.name = "OnlyLoader"
 	automatic_loader.map_resource = "res://journey-copy.map"
 	automatic_loader.texture_path = "res://textures-other"
 	nested_branch.add_child(automatic_loader)
 	automatic_loader.owner = automatic
-	var empty_loader = ClassDB.instantiate("TBLoader")
+	var empty_loader = ClassDB.instantiate("Radiant")
 	empty_loader.name = "EmptyLoader"
 	branch.add_child(empty_loader)
 	empty_loader.owner = automatic
@@ -2169,9 +2169,9 @@ func automatic_scene_journey(plugin: EditorPlugin) -> void:
 	var automatic_root = EditorInterface.get_edited_scene_root()
 	var nested = automatic_root.get_node("Maps/Nested/OnlyLoader")
 	var empty = automatic_root.get_node("Maps/EmptyLoader")
-	checks.check(ui.same_path(ui.session.document.get_path(), "res://journey-copy.map"), "Map tab opens the only TBLoader map in the current scene")
-	checks.check(ui.session.loader.get_ref() == nested and ui.valid_binding(), "automatic discovery includes nested TBLoader nodes")
-	checks.check(ui.browser._texture_root == "res://textures-other", "automatic scene map parses textures from its TBLoader Texture Path")
+	checks.check(ui.same_path(ui.session.document.get_path(), "res://journey-copy.map"), "Map tab opens the only Radiant map in the current scene")
+	checks.check(ui.session.loader.get_ref() == nested and ui.valid_binding(), "automatic discovery includes nested Radiant nodes")
+	checks.check(ui.browser._texture_root == "res://textures-other", "automatic scene map parses textures from its Radiant Texture Path")
 	checks.check(ui.scene_tabs.tab_count == 1 and not ui.scene_tabs.visible and not ui.scene_sessions.has(empty.get_instance_id()), "empty map resources are ignored and one mapped loader opens directly")
 	var first_session = ui.session
 	empty.map_resource = "res://journey-bound.map"
@@ -2214,7 +2214,7 @@ func automatic_scene_journey(plugin: EditorPlugin) -> void:
 func tohunga_editor_journey() -> void:
 	print("TB_UI_STAGE: local Tohunga editor regression")
 	var previous_session = ui.session
-	var delta_session = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var delta_session = load("res://addons/radiant/src/editor/map_session.gd").new()
 	checks.check(delta_session.document.load_map("res://fixtures/tohunga.map").ok, "draw delta session loads Tohunga")
 	var delta_draw: Array = delta_session.draw_data()
 	var unchanged_id: int = delta_draw[2].id
@@ -2429,7 +2429,7 @@ func review_edit(label: String) -> void:
 func review_regressions(plugin: EditorPlugin) -> void:
 	print("TB_UI_STAGE: independent-review lifecycle regressions")
 	var original = ui.session
-	var freshness = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var freshness = load("res://addons/radiant/src/editor/map_session.gd").new()
 	for generation in ui.BAKED_STATE_RECORD_LIMIT + 7:
 		freshness.document.create_cuboid(Vector3(generation * 16, 0, 0), Vector3(generation * 16 + 8, 8, 8), "review/freshness")
 		ui.remember_baked_state(freshness, freshness.document.export_text().value)
@@ -2438,8 +2438,8 @@ func review_regressions(plugin: EditorPlugin) -> void:
 		and freshness_state.current_records.size() == 1 and ui.baked_state_is_current(freshness, freshness_state),
 		"baked freshness records retain the current generation with a strict per-session bound")
 	freshness.dispose()
-	var Session = load("res://addons/tbloader/src/editor/map_session.gd")
-	var Action = load("res://addons/tbloader/src/editor/map_action.gd")
+	var Session = load("res://addons/radiant/src/editor/map_session.gd")
+	var Action = load("res://addons/radiant/src/editor/map_action.gd")
 	var direct = Session.new()
 	var direct_before: Dictionary = direct.capture()
 	direct.document.create_cuboid(Vector3.ZERO, Vector3.ONE * 8, "review/direct")
@@ -2468,7 +2468,7 @@ func review_regressions(plugin: EditorPlugin) -> void:
 	checks.check(not global_stale.history_undo() and global_stale.history_action_count() == 0
 		and global_stale.document.export_text().value == global_stale_text,
 		"out-of-band mutation retires stale local history without restoring it")
-	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
+	ui.set_session(load("res://addons/radiant/src/editor/map_session.gd").new())
 	var accounting_before: Dictionary = ui.session.capture()
 	var small_envelope_bytes: int = ui.session.ui_envelope_retained_bytes(accounting_before)
 	ui.session.selected = PackedInt64Array(range(4096))
@@ -2525,7 +2525,7 @@ func review_regressions(plugin: EditorPlugin) -> void:
 			+ ui.session.ui_envelope_retained_bytes(accounting_local_one) + ui.session.ui_envelope_retained_bytes(accounting_local_two)
 		and accounting_token > 0,
 		"history actions charge symmetric unique roots while structural actions retain independent states")
-	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
+	ui.set_session(load("res://addons/radiant/src/editor/map_session.gd").new())
 	checks.check(ui.save_path("res://discard-regression.map"), "discard regression establishes named baseline")
 	for outcome in ["cancel", "invalid"]:
 		review_edit("before " + outcome)
@@ -2554,7 +2554,7 @@ func review_regressions(plugin: EditorPlugin) -> void:
 	ui.save_all()
 	# No incidental strong reference remains to the background document/history.
 	var background = make_budget_background()
-	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
+	ui.set_session(load("res://addons/radiant/src/editor/map_session.gd").new())
 	var expected: String = background.get_ref().document.export_text().value
 	checks.check(not ui.session.history_undo() and background.get_ref().document.export_text().value == expected,
 		"active local history cannot mutate a background document")
@@ -2566,7 +2566,7 @@ func review_regressions(plugin: EditorPlugin) -> void:
 	ui.session.save_enabled = false
 	ui.save_all()
 	checks.check(FileAccess.get_file_as_string("res://budget-regression.map") == expected and not background.get_ref().document.is_dirty(), "evicted background document remains Save All eligible")
-	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
+	ui.set_session(load("res://addons/radiant/src/editor/map_session.gd").new())
 	ui.history_action_budget = 2
 	for n in 3:
 		review_edit("action budget %d" % n)
@@ -2584,7 +2584,7 @@ func review_regressions(plugin: EditorPlugin) -> void:
 	ui.graph_a.grab_focus()
 
 func make_budget_background() -> WeakRef:
-	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
+	ui.set_session(load("res://addons/radiant/src/editor/map_session.gd").new())
 	review_edit("budget before")
 	review_edit("budget saved")
 	ui.save_path("res://budget-regression.map")
@@ -2641,11 +2641,11 @@ func resolver_regression(plugin: EditorPlugin) -> void:
 	var root = EditorInterface.get_edited_scene_root()
 	var origins: Array = []
 	for folder in ["res://textures", "res://textures-other"]:
-		var loader = ClassDB.instantiate("TBLoader")
+		var loader = ClassDB.instantiate("Radiant")
 		loader.texture_path = folder
 		root.add_child(loader)
 		loader.owner = root
-		var origin = load("res://addons/tbloader/src/editor/map_session.gd").new()
+		var origin = load("res://addons/radiant/src/editor/map_session.gd").new()
 		origin.document.create_cuboid(Vector3.ZERO, Vector3(64, 64, 64), "baseline/checker")
 		origin.loader = weakref(loader)
 		origin.scene = weakref(root)
@@ -2709,7 +2709,7 @@ func mesh_vertex_samples(root: Node) -> Array:
 	return result
 
 func prepare_recovery_regression() -> Dictionary:
-	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
+	ui.set_session(load("res://addons/radiant/src/editor/map_session.gd").new())
 	ui.session.document.import_text(FileAccess.get_file_as_string("res://journey-bound.map"))
 	review_edit("named saved baseline")
 	ui.save_path("res://recovery-named.map")
@@ -2719,7 +2719,7 @@ func prepare_recovery_regression() -> Dictionary:
 	var named_ref = weakref(ui.session)
 	var named_document = weakref(ui.session.document)
 	var old_snapshot: Dictionary = ui.session.document.snapshot().value
-	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
+	ui.set_session(load("res://addons/radiant/src/editor/map_session.gd").new())
 	ui.session.document.import_text(canonical)
 	review_edit("untitled UNSAVED exact content")
 	var untitled = text()
@@ -2731,7 +2731,7 @@ func session_manifest_regression() -> void:
 	for origin in ui.sessions:
 		origin.save_enabled = false
 	var canonical := FileAccess.get_file_as_string("res://journey-bound.map")
-	var clean_a = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var clean_a = load("res://addons/radiant/src/editor/map_session.gd").new()
 	checks.check(clean_a.document.import_text(canonical).ok
 		and clean_a.document.save_map("user://session-clean-a.map").ok, "session manifest clean path A fixture")
 	ui.set_session(clean_a)
@@ -2742,18 +2742,18 @@ func session_manifest_regression() -> void:
 	var recovery_session_ref = weakref(clean_a)
 	var recovery_document_ref = weakref(clean_a.document)
 	clean_a.history_undo()
-	var dirty = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var dirty = load("res://addons/radiant/src/editor/map_session.gd").new()
 	checks.check(dirty.document.import_text(canonical).ok, "session manifest dirty fixture imports")
 	dirty.document.create_cuboid(Vector3.ZERO, Vector3.ONE * 8, "common/caulk")
 	var dirty_text: String = dirty.document.export_text().value
 	ui.set_session(dirty)
-	var pristine = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var pristine = load("res://addons/radiant/src/editor/map_session.gd").new()
 	ui.set_session(pristine)
-	var clean_b = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var clean_b = load("res://addons/radiant/src/editor/map_session.gd").new()
 	checks.check(clean_b.document.import_text(canonical).ok
 		and clean_b.document.save_map("user://session-clean-b.map").ok, "session manifest clean path B fixture")
 	ui.set_session(clean_b)
-	var scene_clean = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var scene_clean = load("res://addons/radiant/src/editor/map_session.gd").new()
 	checks.check(scene_clean.document.import_text(canonical).ok
 		and scene_clean.document.save_map("user://session-scene-clean.map").ok, "session manifest scene path fixture")
 	scene_clean.scene_managed = true
@@ -2826,14 +2826,14 @@ func verify_recovery_regression(expected: Dictionary) -> void:
 	checks.check(ui.session.document.is_dirty() and text() == expected.untitled, "background recovery checkpoint retains original untitled content after undo past new saved baseline")
 	var recovered = ui.session
 	var recovered_count = ui.sessions.size()
-	ui.set_session(load("res://addons/tbloader/src/editor/map_session.gd").new())
+	ui.set_session(load("res://addons/radiant/src/editor/map_session.gd").new())
 	checks.check(ui.session.document.is_dirty(), "New has no saved baseline")
 	checks.check(ui.open_path("res://recovered-copy.map") and ui.session == recovered and ui.session.document.is_dirty() and ui.sessions.size() == recovered_count + 1, "Open restores the retained dirty recovery tab instead of reloading its saved file")
 
 func precision_journey() -> void:
 	print("TB_UI_STAGE: focused-pane, rigid/off-grid and hidden-target regressions")
 	var original = ui.session
-	var scratch = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var scratch = load("res://addons/radiant/src/editor/map_session.gd").new()
 	ui.set_session(scratch)
 	ui.set_tool("Brush")
 	var graph = ui.graph_b
@@ -2930,7 +2930,7 @@ func layers_pane_journey() -> void:
 	checks.check(plugin.entities_panel != null and plugin.uv_panel != null and not layers_bottom,
 		"Layers is not registered as a bottom panel")
 	var original = ui.session
-	var scratch = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var scratch = load("res://addons/radiant/src/editor/map_session.gd").new()
 	ui.set_session(scratch)
 	var graph = ui.graph_a
 	graph.orientation = 2
@@ -3035,7 +3035,7 @@ func layers_pane_journey() -> void:
 func visibility_filter_journey() -> void:
 	print("TB_UI_STAGE: quick visibility filters")
 	var original = ui.session
-	var scratch = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var scratch = load("res://addons/radiant/src/editor/map_session.gd").new()
 	ui.set_session(scratch)
 	var graph = ui.graph_a
 	graph.orientation = 2
@@ -3093,7 +3093,7 @@ func visibility_filter_journey() -> void:
 func step5_native_editor_journey() -> void:
 	print("TB_UI_STAGE: native spatial and preview editor integration")
 	var original = ui.session
-	var scratch = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var scratch = load("res://addons/radiant/src/editor/map_session.gd").new()
 	ui.set_session(scratch)
 	var graph = ui.graph_a
 	graph.orientation = 2
@@ -3150,12 +3150,12 @@ func step5_native_editor_journey() -> void:
 	checks.check(not hits.is_empty() and hits[0].brush_id == ray_back, "ordered native ray passes through a filtered front face")
 	scratch.set_visibility_filter("caulk", false)
 
-	var marker_session = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var marker_session = load("res://addons/radiant/src/editor/map_session.gd").new()
 	ui.set_session(marker_session)
 	var marker_doc = marker_session.document
 	var marker: int = marker_doc.create_point_entity("info_player_start", Vector3(350, 0, 0)).value
 	var target: int = marker_doc.create_cuboid(Vector3(400, -16, -16), Vector3(420, 16, 16), "baseline/checker").value
-	var loader = ClassDB.instantiate("TBLoader")
+	var loader = ClassDB.instantiate("Radiant")
 	loader.map_inverse_scale = 10.0
 	marker_session.loader = weakref(loader)
 	marker_session.changed.emit()
@@ -3192,7 +3192,7 @@ func step5_native_editor_journey() -> void:
 
 func grid_draw_batch_regression() -> void:
 	var original = ui.session
-	var scratch = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var scratch = load("res://addons/radiant/src/editor/map_session.gd").new()
 	ui.set_session(scratch)
 	var graph = ui.graph_a
 	graph.orientation = 2
@@ -3450,7 +3450,7 @@ func grid_draw_batch_regression() -> void:
 
 func vertex_hull_drag_journey() -> void:
 	var original = ui.session
-	var scratch = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var scratch = load("res://addons/radiant/src/editor/map_session.gd").new()
 	ui.set_session(scratch)
 	var graph = ui.graph_a
 	var origin := Vector3(4096, -2048, 1024)
@@ -3492,7 +3492,7 @@ func vertex_hull_drag_journey() -> void:
 	ui.set_tool("Brush")
 	graph.grab_focus()
 	var unsaved_before_pristine: String = ui.unsaved_status()
-	var pristine_session = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var pristine_session = load("res://addons/radiant/src/editor/map_session.gd").new()
 	ui.set_session(pristine_session)
 	checks.check(pristine_session.document.is_dirty() and not pristine_session.has_unsaved_changes()
 		and ui.plugin._get_unsaved_status("") == unsaved_before_pristine,
@@ -3506,7 +3506,7 @@ func vertex_hull_drag_journey() -> void:
 	ui.close_document_tab(pristine_tab)
 	checks.check(not ui.sessions.has(pristine_session) and not ui.dirty_dialog.visible,
 		"closing a pristine empty untitled tab bypasses save and discard confirmation")
-	var modified_empty = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var modified_empty = load("res://addons/radiant/src/editor/map_session.gd").new()
 	ui.set_session(modified_empty)
 	modified_empty.grid = 119
 	var temporary_brush: int = modified_empty.document.create_cuboid(Vector3.ZERO, Vector3.ONE * 16, "common/caulk").value
@@ -3524,7 +3524,7 @@ func vertex_hull_drag_journey() -> void:
 		"closing a modified empty untitled tab still requests confirmation")
 	ui.dirty_dialog.custom_action.emit("discard")
 	checks.check(not ui.sessions.has(modified_empty), "discard closes the modified empty session")
-	var named_dirty = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var named_dirty = load("res://addons/radiant/src/editor/map_session.gd").new()
 	ui.set_session(named_dirty)
 	checks.check(named_dirty.document.save_map("user://named-close-regression.map").ok, "named close fixture establishes a clean path")
 	named_dirty.document.create_cuboid(Vector3.ZERO, Vector3.ONE * 16, "common/caulk")
@@ -3533,7 +3533,7 @@ func vertex_hull_drag_journey() -> void:
 	checks.check(named_dirty.document.is_dirty() and named_dirty.has_unsaved_changes() and ui.dirty_dialog.visible,
 		"closing a named dirty tab still requests confirmation")
 	ui.dirty_dialog.custom_action.emit("discard")
-	var close_session = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var close_session = load("res://addons/radiant/src/editor/map_session.gd").new()
 	checks.check(close_session.document.import_text(original.document.export_text().value).ok, "close-tab fixture imports canonical content")
 	ui.set_session(close_session)
 	var close_tab = ui.document_tabs.current_tab
@@ -3546,7 +3546,7 @@ func vertex_hull_drag_journey() -> void:
 
 func shallow_prism_drag_journey() -> void:
 	var original = ui.session
-	var scratch = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var scratch = load("res://addons/radiant/src/editor/map_session.gd").new()
 	ui.set_session(scratch)
 	var graph = ui.graph_a
 	graph.orientation = 2
@@ -3678,7 +3678,7 @@ func camera_handle_count(color := Color()) -> int:
 func phase5_journey() -> void:
 	print("TB_UI_STAGE: Phase5 component batches, cap/clip direction and all prism axes")
 	var original = ui.session
-	var scratch = load("res://addons/tbloader/src/editor/map_session.gd").new()
+	var scratch = load("res://addons/radiant/src/editor/map_session.gd").new()
 	ui.set_session(scratch)
 	var graph = ui.graph_a
 	graph.grab_focus()
@@ -3718,10 +3718,10 @@ func phase5_journey() -> void:
 		and ui.camera_view.overlays.has_node("SelectedBrushEdges")
 		and brush_edge_mesh.surface_get_primitive_type(0) == Mesh.PRIMITIVE_LINES
 		and brush_edge_mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX].size() > 24
-		and ui.camera_view.overlays.get_node("SelectedFaceEdges").mesh.surface_get_primitive_type(0) == Mesh.PRIMITIVE_TRIANGLES
+		and ui.camera_view.overlays.get_node("SelectedFaceEdges").mesh.surface_get_primitive_type(0) == Mesh.PRIMITIVE_LINES
 		and ui.camera_view.overlays.get_node("SelectedFaceEdges").material_override.albedo_color.b > 0.9
 		and ui.camera_view.overlays.get_node("SelectedFaceEdges").material_override.albedo_color.a == 1.0,
-		"camera renders translucent orange brushes, dotted brush edges, and thick opaque blue selected-face edges")
+		"camera renders translucent orange brushes, dotted brush edges, and solid opaque blue selected-face edges")
 	ui.texture_field.text = "common/caulk"
 	ui.assign_texture()
 	checks.check(scratch.brush(id).faces[0].texture == "common/caulk", "camera quick-face selection scopes material assignment")

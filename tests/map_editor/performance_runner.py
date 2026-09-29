@@ -24,7 +24,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 ENGINE = "/mnt/data/code/godot/bin/godot.linuxbsd.editor.x86_64"
 TEMP = Path("/tmp/opencode")
-LIBRARY = ROOT / "addons/tbloader/bin/libtbloader.linux.template_debug.x86_64.so"
+LIBRARY = ROOT / "addons/radiant/bin/libradiant.linux.template_debug.x86_64.so"
 MARKER = "TB_PERF_COMPLETE:PASS"
 ERROR = re.compile(
     r"SCRIPT ERROR|\b(?:ERROR|FATAL|CRASH)\b|TB_PERF_FAIL|Parse Error|"
@@ -123,8 +123,8 @@ def stage(project, sizes):
     project.mkdir()
     # Real addon copied verbatim except build/import products. Plugins are not
     # enabled: lifecycle/editor_suite work is independently owned and not needed.
-    addon = project / "addons/tbloader"
-    shutil.copytree(ROOT / "addons/tbloader", addon,
+    addon = project / "addons/radiant"
+    shutil.copytree(ROOT / "addons/radiant", addon,
                     ignore=shutil.ignore_patterns("bin", "*.uid", "*.import", ".godot"))
     (addon / "bin").mkdir()
     before = digest(LIBRARY)
@@ -134,7 +134,7 @@ def stage(project, sizes):
         raise Failure("library changed during staging; retry after build finishes")
     shutil.copy2(HERE / "performance_suite.gd", project)
     (project / "project.godot").write_text(
-        'config_version=5\n[application]\nconfig/name="TBLoader native performance"\n'
+        'config_version=5\n[application]\nconfig/name="Radiant native performance"\n'
         '[rendering]\nrenderer/rendering_method="gl_compatibility"\n'
         '[audio]\ndriver/driver="Dummy"\n')
     for count in sizes:
@@ -252,7 +252,7 @@ def main():
         parser.error("positive timeout/samples/repeats; nonnegative warmups; unique brush counts in 8..4096 divisible by 8")
     if not TEMP.is_dir():
         parser.error(f"approved temp directory missing: {TEMP}")
-    logs = Path(tempfile.mkdtemp(prefix="tbloader-performance-", dir=TEMP))
+    logs = Path(tempfile.mkdtemp(prefix="radiant-performance-", dir=TEMP))
     print(f"Artifacts: {logs}", flush=True)
     result = {"status": "FAIL", "settings": vars(args), "runs": []}
     try:

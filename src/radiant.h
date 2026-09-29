@@ -12,9 +12,9 @@ using namespace godot;
 
 namespace godot { class TBMapDocument; }
 
-class TBLoader : public Node3D
+class Radiant : public Node3D
 {
-	GDCLASS(TBLoader, Node3D);
+	GDCLASS(Radiant, Node3D);
 
 public:
 	String m_map_path;
@@ -48,8 +48,8 @@ protected:
 	static void _bind_methods();
 
 public:
-	TBLoader();
-	~TBLoader();
+	Radiant();
+	~Radiant();
 
 	// Map
 	void set_map(const String& map);

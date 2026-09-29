@@ -76,6 +76,9 @@ bool valid_uv_face(const LMFace &face) {
 			!std::isfinite(face.uv_extra.scale_x) || !std::isfinite(face.uv_extra.scale_y) ||
 			std::abs(face.uv_extra.scale_x) < 1e-9 || std::abs(face.uv_extra.scale_y) < 1e-9 ||
 			std::abs(face.uv_extra.scale_x) > 1e9 || std::abs(face.uv_extra.scale_y) > 1e9) return false;
+	if (face.is_bp_uv) return valid(vector(face.uv_valve.u.axis)) && valid(vector(face.uv_valve.v.axis)) &&
+			std::fabs(face.uv_valve.u.axis.x) + std::fabs(face.uv_valve.u.axis.y) > 1e-9 &&
+			std::fabs(face.uv_valve.v.axis.x) + std::fabs(face.uv_valve.v.axis.y) > 1e-9;
 	if (face.is_valve_uv) return valid(vector(face.uv_valve.u.axis)) && valid(vector(face.uv_valve.v.axis)) &&
 			vec3_length(face.uv_valve.u.axis) > 1e-9 && vec3_length(face.uv_valve.v.axis) > 1e-9 &&
 			std::isfinite(face.uv_valve.u.offset) && std::isfinite(face.uv_valve.v.offset) &&
@@ -226,8 +229,11 @@ bool face_source_equal(const LMFace &a, const LMFace &b) {
 	if (!vec3_bits_equal(a.plane_points.v0, b.plane_points.v0)) return false;
 	if (!vec3_bits_equal(a.plane_points.v1, b.plane_points.v1)) return false;
 	if (!vec3_bits_equal(a.plane_points.v2, b.plane_points.v2)) return false;
-	if (a.is_valve_uv != b.is_valve_uv) return false;
-	if (a.is_valve_uv) {
+	if (a.is_valve_uv != b.is_valve_uv || a.is_bp_uv != b.is_bp_uv) return false;
+	if (a.is_bp_uv) {
+		if (!vec3_bits_equal(a.uv_valve.u.axis, b.uv_valve.u.axis)) return false;
+		if (!vec3_bits_equal(a.uv_valve.v.axis, b.uv_valve.v.axis)) return false;
+	} else if (a.is_valve_uv) {
 		if (!vec3_bits_equal(a.uv_valve.u.axis, b.uv_valve.u.axis)) return false;
 		if (!double_bits_equal(a.uv_valve.u.offset, b.uv_valve.u.offset)) return false;
 		if (!vec3_bits_equal(a.uv_valve.v.axis, b.uv_valve.v.axis)) return false;
@@ -843,7 +849,7 @@ Dictionary TBMapDocument::get_face_uv(int64_t id, int face, int64_t topology_rev
 	auto r = check_face(id, face, topology_revision, "get_face_uv"); if (!bool(r["ok"])) return r;
 	const auto *location = live_location(id, 'b');
 	const auto &f = current_brush(location->entity, location->index).faces[face]; Dictionary uv;
-	uv["projection"] = f.is_valve_uv ? "valve" : "classic";
+	uv["projection"] = f.is_bp_uv ? "brushdef" : f.is_valve_uv ? "valve" : "classic";
 	uv["shift"] = f.is_valve_uv ? Vector2(f.uv_valve.u.offset, f.uv_valve.v.offset) : Vector2(f.uv_standard.u, f.uv_standard.v);
 	uv["rotation"] = f.uv_extra.rot; uv["scale"] = Vector2(f.uv_extra.scale_x, f.uv_extra.scale_y);
 	uv["u_axis"] = vector(f.uv_valve.u.axis); uv["v_axis"] = vector(f.uv_valve.v.axis); return success(false, uv);
@@ -872,12 +878,13 @@ Dictionary TBMapDocument::summarize_faces(const Array &targets) const {
 		const String texture = String::utf8(current_face_texture(location->entity, location->index, face_index).c_str());
 		const Vector2 shift = face.is_valve_uv ? Vector2(face.uv_valve.u.offset, face.uv_valve.v.offset) : Vector2(face.uv_standard.u, face.uv_standard.v);
 		const Vector2 scale(face.uv_extra.scale_x, face.uv_extra.scale_y);
+		const String projection = face.is_bp_uv ? "brushdef" : face.is_valve_uv ? "valve" : "classic";
 		valve = valve || face.is_valve_uv;
 		if (first.is_empty()) {
-			first["projection"] = face.is_valve_uv ? "valve" : "classic"; first["shift"] = shift;
+			first["projection"] = projection; first["shift"] = shift;
 			first["rotation"] = face.uv_extra.rot; first["scale"] = scale;
 			first["u_axis"] = vector(face.uv_valve.u.axis); first["v_axis"] = vector(face.uv_valve.v.axis); first_texture = texture;
-		} else if (String(first["projection"]) != (face.is_valve_uv ? "valve" : "classic") ||
+		} else if (String(first["projection"]) != projection ||
 				Vector2(first["shift"]) != shift || double(first["rotation"]) != face.uv_extra.rot ||
 				Vector2(first["scale"]) != scale || first_texture != texture ||
 				(face.is_valve_uv && (Vector3(first["u_axis"]) != vector(face.uv_valve.u.axis) ||
@@ -896,7 +903,7 @@ Dictionary TBMapDocument::set_face_uv(int64_t id, int face, Vector2 shift, doubl
 	auto r = check_face(id, face, topology_revision, "set_face_uv"); if (!bool(r["ok"])) return r;
 	if (!shift.is_finite() || !scale.is_finite() || !std::isfinite(rotation) || std::abs(rotation) > 1e9 || std::abs(shift.x) > 1e9 || std::abs(shift.y) > 1e9 || std::abs(scale.x) < 1e-9 || std::abs(scale.y) < 1e-9 || std::abs(scale.x) > 1e9 || std::abs(scale.y) > 1e9) return failure("INVALID_ARGUMENT", "Invalid UV transform", "set_face_uv");
 	const auto *location = live_location(id, 'b'); const auto &f = current_brush(location->entity, location->index).faces[face];
-	if (f.is_valve_uv) return failure("UNSUPPORTED_PROJECTION", "Valve projection is read-only", "set_face_uv");
+	if (f.is_valve_uv || f.is_bp_uv) return failure("UNSUPPORTED_PROJECTION", "Valve projection is read-only", "set_face_uv");
 	return local_brush_transaction({id}, "set_face_uv", LMEditorBrushDirtyDomain::UVS, [=](auto &drafts) { auto &face_source = drafts[0].faces[face]; face_source.uv_standard = {shift.x, shift.y}; face_source.uv_extra = {rotation, scale.x, scale.y}; return success(); });
 }
 
@@ -937,13 +944,14 @@ Dictionary TBMapDocument::apply_face_edits(const Array &edits) {
 			if (!uv.has("shift") || !uv.has("rotation") || !uv.has("scale") || uv["shift"].get_type() != Variant::VECTOR2 ||
 					(uv["rotation"].get_type() != Variant::FLOAT && uv["rotation"].get_type() != Variant::INT) || uv["scale"].get_type() != Variant::VECTOR2)
 				return failure("INVALID_ARGUMENT", "Invalid UV edit schema", "apply_face_edits");
-			if (source_face.is_valve_uv) return failure("UNSUPPORTED_PROJECTION", "Valve projection requires a semantic UV operation", "apply_face_edits");
+			if (source_face.is_valve_uv || source_face.is_bp_uv) return failure("UNSUPPORTED_PROJECTION", "Valve projection requires a semantic UV operation", "apply_face_edits");
 			edit.uv_face = source_face; edit.uv_face.uv_standard = {Vector2(uv["shift"]).x, Vector2(uv["shift"]).y};
 			edit.uv_face.uv_extra = {double(uv["rotation"]), Vector2(uv["scale"]).x, Vector2(uv["scale"]).y};
 			if (!valid_uv_face(edit.uv_face)) return failure("INVALID_ARGUMENT", "Invalid UV transform", "apply_face_edits");
 			edit.has_uv = true;
 		}
 		if (item.has("uv_op")) {
+			if (source_face.is_bp_uv) return failure("UNSUPPORTED_PROJECTION", "brushDef projection requires a semantic UV operation", "apply_face_edits");
 			if (item["uv_op"].get_type() != Variant::DICTIONARY) return failure("INVALID_ARGUMENT", "Invalid UV operation schema", "apply_face_edits");
 			Dictionary op = item["uv_op"];
 			if (!op.has("kind") || op["kind"].get_type() != Variant::STRING) return failure("INVALID_ARGUMENT", "UV operation requires a kind", "apply_face_edits");

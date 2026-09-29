@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run from repository root. Artifacts stay outside source and the addon library.
 set -euo pipefail
-output="${TB_NATIVE_OUTPUT:-/tmp/opencode/tbloader-native-document}"
+output="${TB_NATIVE_OUTPUT:-/tmp/opencode/radiant-native-document}"
 "${CXX:-clang++}" -std=c++17 -g -O1 -fno-omit-frame-pointer \
   -fsanitize=address,undefined -DLM_STANDALONE -Isrc/map \
   tests/map_editor/native_document_test.cpp \

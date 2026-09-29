@@ -5,7 +5,7 @@ signal changed
 signal message(text: String)
 signal action_recorded(token: RefCounted)
 
-const Action = preload("res://addons/tbloader/src/editor/map_action.gd")
+const Action = preload("res://addons/radiant/src/editor/map_action.gd")
 # Conservative logical ownership charges for Godot containers and Variant slots.
 const UI_DICTIONARY_BYTES = 256
 const UI_PACKED_ARRAY_BYTES = 64

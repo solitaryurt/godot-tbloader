@@ -19,7 +19,7 @@
 #include <godot_cpp/classes/surface_tool.hpp>
 #include <godot_cpp/templates/vmap.hpp>
 
-#include <tb_loader.h>
+#include <radiant.h>
 #include <map_document.h>
 
 #include <map>
@@ -100,7 +100,7 @@ bool safe_classname(const String& classname)
 }
 }
 
-Builder::Builder(TBLoader* loader, Node3D* parent)
+Builder::Builder(Radiant* loader, Node3D* parent)
 {
 	m_loader = loader;
 	m_parent = parent ? parent : loader;
@@ -108,7 +108,7 @@ Builder::Builder(TBLoader* loader, Node3D* parent)
 	m_map = std::make_shared<LMMapData>();
 }
 
-Builder::Builder(TBLoader* loader, Node3D* parent, std::shared_ptr<LMMapData> map) : Builder(loader, parent)
+Builder::Builder(Radiant* loader, Node3D* parent, std::shared_ptr<LMMapData> map) : Builder(loader, parent)
 {
 	m_map = std::move(map);
 }

@@ -21,7 +21,7 @@
 
 using namespace godot;
 
-class TBLoader;
+class Radiant;
 
 enum class ColliderType
 {
@@ -44,7 +44,7 @@ enum class ColliderShape
 class Builder
 {
 public:
-	TBLoader* m_loader;
+	Radiant* m_loader;
 	std::shared_ptr<LMMapData> m_map;
 	Dictionary m_loaded_map_textures; // Texture Name(const char*) - Ref<Texture2D>
 	Dictionary m_loaded_map_materials;
@@ -53,8 +53,8 @@ public:
 	String m_error;
 
 public:
-	Builder(TBLoader* loader, Node3D* parent = nullptr);
-	Builder(TBLoader* loader, Node3D* parent, std::shared_ptr<LMMapData> map);
+	Builder(Radiant* loader, Node3D* parent = nullptr);
+	Builder(Radiant* loader, Node3D* parent, std::shared_ptr<LMMapData> map);
 	~Builder();
 
 	Dictionary load_map(const String& path);

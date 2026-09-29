@@ -11,7 +11,7 @@ func _initialize() -> void:
 		push_error("TB_REAL_MAP is required")
 		quit(2)
 		return
-	var extension_status := GDExtensionManager.load_extension("res://addons/tbloader/tbloader.gdextension")
+	var extension_status := GDExtensionManager.load_extension("res://addons/radiant/radiant.gdextension")
 	if extension_status != GDExtensionManager.LOAD_STATUS_OK:
 		push_error("Extension failed to load: %s" % extension_status)
 		quit(3)

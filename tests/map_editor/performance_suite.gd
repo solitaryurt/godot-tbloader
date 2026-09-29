@@ -59,7 +59,7 @@ func translated(doc, ids: PackedInt64Array, direction: Dictionary) -> Dictionary
 func run() -> void:
 	# No texture assets are needed. Load the staged real extension explicitly,
 	# avoiding an editor/import process and its unrelated lifecycle behavior.
-	var extension_status = GDExtensionManager.load_extension("res://addons/tbloader/tbloader.gdextension")
+	var extension_status = GDExtensionManager.load_extension("res://addons/radiant/radiant.gdextension")
 	if not require(extension_status == GDExtensionManager.LOAD_STATUS_OK, "real staged extension loads"):
 		quit(1)
 		return

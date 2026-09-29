@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the real TBLoader addon in an isolated, disposable Linux Godot project."""
+"""Run the real Radiant addon in an isolated, disposable Linux Godot project."""
 
 import argparse
 import hashlib
@@ -114,13 +114,13 @@ def stage(project):
         '[gd_resource type="StandardMaterial3D" format=3]\n[resource]\nalbedo_color = Color(0.2, 0.4, 0.8, 1)\n'
     )
     write_checker(project / "textures-other/baseline/checker.png", 16, 128, (20, 220, 60))
-    addon = project / "addons" / "tbloader"
+    addon = project / "addons" / "radiant"
     shutil.copytree(
-        ROOT / "addons" / "tbloader", addon,
+        ROOT / "addons" / "radiant", addon,
         ignore=shutil.ignore_patterns("bin", "*.uid", "*.import", ".godot"),
     )
     # Copy exactly the freshly built debug library; never symlink writable inputs.
-    library = ROOT / "addons/tbloader/bin/libtbloader.linux.template_debug.x86_64.so"
+    library = ROOT / "addons/radiant/bin/libradiant.linux.template_debug.x86_64.so"
     if not library.is_file():
         raise GateFailure("debug library missing; run the documented SCons build first")
     (addon / "bin").mkdir()

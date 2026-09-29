@@ -252,7 +252,7 @@ def main():
             for path in sorted(project.rglob("*"))
             if path.is_file() and ".godot" not in path.relative_to(project).parts
         }
-        staged_library = project / "addons/tbloader/bin/libtbloader.linux.template_debug.x86_64.so"
+        staged_library = project / "addons/radiant/bin/libradiant.linux.template_debug.x86_64.so"
         if harness.sha256(staged_library) != result["library_sha256"]:
             raise harness.GateFailure("staged debug library hash differs")
         env["TB_TEST_SUITE"] = "current_editor_performance"

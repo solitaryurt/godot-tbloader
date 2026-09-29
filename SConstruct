@@ -30,21 +30,21 @@ if env["platform"] == "windows" and env["target"] == "template_debug":
 if env["platform"] == "linux":
 	# Keep test/debug artifacts separate from release builds.
 	library = env.SharedLibrary(
-		"addons/tbloader/bin/tbloader.linux.{}.{}{}".format(
+		"addons/radiant/bin/radiant.linux.{}.{}{}".format(
 			env["target"], env["arch"], env["SHLIBSUFFIX"]
 		),
 		source=sources,
 	)
 elif env["platform"] == "osx":
 	library = env.SharedLibrary(
-		"addons/tbloader/bin/libtbloader.{}.framework/libtbloader.{}".format(
+		"addons/radiant/bin/libradiant.{}.framework/libradiant.{}".format(
 			env["platform"], env["platform"]
 		),
 		source=sources,
 	)
 else:
 	library = env.SharedLibrary(
-		"addons/tbloader/bin/tbloader.{}.{}{}".format(
+		"addons/radiant/bin/radiant.{}.{}{}".format(
 			env["platform"], env["arch"], env["SHLIBSUFFIX"]
 		),
 		source=sources,

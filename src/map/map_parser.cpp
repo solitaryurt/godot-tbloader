@@ -139,6 +139,27 @@ class Parser {
 		f.plane_dist = vec3_dot(f.plane_normal, f.plane_points.v0);
 		return true;
 	}
+	bool brushdef_face(LMFace &f) {
+		vec3 row0, row1;
+		if (!point(f.plane_points.v0) || !point(f.plane_points.v1) || !point(f.plane_points.v2) ||
+				!expect("(") || !point(row0) || !point(row1) || !expect(")") || !texture(f.texture_idx)) return false;
+		if (std::fabs(row0.x) + std::fabs(row0.y) < 1e-18 || std::fabs(row1.x) + std::fabs(row1.y) < 1e-18)
+			return fail("Zero brushDef projection axis", "INVALID_GEOMETRY");
+		f.is_bp_uv = true;
+		f.is_valve_uv = false;
+		f.uv_valve.u.axis = row0;
+		f.uv_valve.v.axis = row1;
+		f.uv_extra = {0, 1, 1};
+		if (!is("(") && !is("}") && !current.text.empty()) {
+			f.surface_flags.specified = true;
+			if (!integer(f.surface_flags.contents) || !integer(f.surface_flags.surface) || !integer(f.surface_flags.value)) return false;
+		}
+		vec3 n = vec3_cross(vec3_sub(f.plane_points.v2, f.plane_points.v1), vec3_sub(f.plane_points.v1, f.plane_points.v0));
+		if (vec3_dot(n, n) < 1e-18) return fail("Degenerate face plane", "INVALID_GEOMETRY");
+		f.plane_normal = vec3_normalize(n);
+		f.plane_dist = vec3_dot(f.plane_normal, f.plane_points.v0);
+		return true;
+	}
 	bool patch(LMPatch &p) {
 		p.is_def3 = is("patchDef3");
 		if (!next() || !expect("{") || !texture(p.texture_idx) || !expect("(") || !integer(p.width) || !integer(p.height)) return false;
@@ -175,7 +196,9 @@ class Parser {
 			auto *item = append(e.patches, e.patch_count);
 			return item && patch(*item);
 		}
-		if (!is("(")) return fail("Unsupported or empty primitive; expected brush faces or patchDef2/3", "UNSUPPORTED_SYNTAX");
+		const bool brushdef = is("brushDef") || is("brushDef2");
+		if (brushdef && (!next() || !expect("{"))) return false;
+		if (!brushdef && !is("(")) return fail("Unsupported or empty primitive; expected brush faces or patchDef2/3", "UNSUPPORTED_SYNTAX");
 		*order = { false, e.brush_count };
 		auto *brush = append(e.brushes, e.brush_count);
 		if (!brush) return false;
@@ -183,12 +206,13 @@ class Parser {
 		while (is("(")) {
 			if (b.face_count >= 64) return fail("Brush exceeds 64 faces", "LIMIT_EXCEEDED");
 			auto *item = append(b.faces, b.face_count);
-			if (!item || !face(*item)) return false;
+			if (!item || !(brushdef ? brushdef_face(*item) : face(*item))) return false;
 		}
 		if (b.face_count < 4) return fail("Brush requires at least four planes", "INVALID_GEOMETRY");
 		work += size_t(b.face_count) * b.face_count * b.face_count;
 		if (work > 8000000) return fail("Geometry work budget exceeded", "LIMIT_EXCEEDED");
-		return expect("}");
+		if (!expect("}")) return false;
+		return !brushdef || expect("}");
 	}
 public:
 	Parser(const std::string &s, LMMapData &m, LMParseError &e) : source(s), map(m), error(e) {}

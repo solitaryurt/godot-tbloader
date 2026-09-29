@@ -7,14 +7,14 @@ From the repository root, with the built Linux x86-64 debug addon present:
 ```bash
 DISPLAY=:0 python3 tests/map_editor/window_input_runner.py \
   --godot /mnt/data/code/godot/bin/godot.linuxbsd.editor.x86_64 \
-  --samples 31 --timeout 180 > /tmp/opencode/tbloader-window-input.log 2>&1
-rg 'Artifacts:|FAIL|PASS window_input|ERROR|Traceback' /tmp/opencode/tbloader-window-input.log
+  --samples 31 --timeout 180 > /tmp/opencode/radiant-window-input.log 2>&1
+rg 'Artifacts:|FAIL|PASS window_input|ERROR|Traceback' /tmp/opencode/radiant-window-input.log
 ```
 
 Python 3.11+, Linux `/proc`, `libX11.so.6`, `libXtst.so.6`, an accessible X11/XWayland
 server, and the exact engine pin are required. No installation, Xvfb, xdotool, or
 desktop configuration changes are needed. Run as the sole displayed-editor tester;
-the runner's `/tmp/opencode/tbloader-window-input.lock` prevents concurrent copies
+the runner's `/tmp/opencode/radiant-window-input.lock` prevents concurrent copies
 of this suite. The default is eight measurement samples per fixture; the command
 above reproduces the 31-sample acceptance run. Each editor process is bounded.
 
@@ -65,10 +65,10 @@ No production change was needed for this acceptance.
 
 Authoritative retained run:
 `tests/map_editor/artifacts/window-input-p_80a_gv/`.
-Full outer log: `/tmp/opencode/tbloader-window-input-final.log`.
+Full outer log: `/tmp/opencode/radiant-window-input-final.log`.
 The explicit no-display probe also fails before staging/launch, with zero checks
 and no fallback: `artifacts/window-input-k7uutrsd/result.json`;
-`/tmp/opencode/tbloader-window-input-no-display.log`.
+`/tmp/opencode/radiant-window-input-no-display.log`.
 
 Actual XTest cases:
 

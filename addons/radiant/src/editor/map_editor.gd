@@ -1,17 +1,17 @@
 @tool
 extends VBoxContainer
 
-const Session = preload("res://addons/tbloader/src/editor/map_session.gd")
-const Graph = preload("res://addons/tbloader/src/editor/graph_view.gd")
-const Camera = preload("res://addons/tbloader/src/editor/camera_view.gd")
-const Browser = preload("res://addons/tbloader/src/editor/material_browser.gd")
-const BakeAction = preload("res://addons/tbloader/src/editor/bake_action.gd")
-const UVPane = preload("res://addons/tbloader/src/editor/uv_pane.gd")
-const EntityPane = preload("res://addons/tbloader/src/editor/entity_pane.gd")
-const LayersPane = preload("res://addons/tbloader/src/editor/layers_pane.gd")
+const Session = preload("res://addons/radiant/src/editor/map_session.gd")
+const Graph = preload("res://addons/radiant/src/editor/graph_view.gd")
+const Camera = preload("res://addons/radiant/src/editor/camera_view.gd")
+const Browser = preload("res://addons/radiant/src/editor/material_browser.gd")
+const BakeAction = preload("res://addons/radiant/src/editor/bake_action.gd")
+const UVPane = preload("res://addons/radiant/src/editor/uv_pane.gd")
+const EntityPane = preload("res://addons/radiant/src/editor/entity_pane.gd")
+const LayersPane = preload("res://addons/radiant/src/editor/layers_pane.gd")
 const POINT_ENTITY_CLASSES := ["info_player_start", "light", "player", "target_speaker"]
 const BRUSH_ENTITY_CLASSES := ["area", "func_group", "nocollision", "trigger_location"]
-const BAKED_STATE_META := &"_tbloader_editor_baked_state"
+const BAKED_STATE_META := &"_radiant_editor_baked_state"
 const BAKED_STATE_RECORD_LIMIT := 128
 
 const PANE_TYPES := ["Camera", "Top Grid", "Front Grid", "Side Grid", "UV", "Entities", "Layers"]
@@ -121,10 +121,10 @@ var _icon_cache_scale := 0.0
 var _icon_cache_color := ""
 var _document_tab_signature: Array = []
 var shutting_down = false
-const RECOVERY_PATH = "user://tbloader-map-recovery.json"
-const RECOVERY_META = "tbloader_map_recovery"
+const RECOVERY_PATH = "user://radiant-map-recovery.json"
+const RECOVERY_META = "radiant_map_recovery"
 const RECOVERY_VERSION = 2
-const RECENT_MAPS_PATH = "user://tbloader-recent-maps.json"
+const RECENT_MAPS_PATH = "user://radiant-recent-maps.json"
 const ACCENT_FALLBACK := Color(0.44, 0.73, 0.98)
 var scan_delay = -1.0
 var fallback_entity_pane: Control
@@ -240,8 +240,8 @@ func _ready() -> void:
 		control.button_group = exclusive_tools
 		tool_buttons[mode] = control
 	var loader_group := toolbar_group(toolbar)
-	loader_actions.BindLoader = icon_button(loader_group, "BindLoader", "Bind selected TBLoader", custom_icon("bind_loader"), bind_selected)
-	loader_actions.DetachLoader = icon_button(loader_group, "DetachLoader", "Detach from TBLoader", custom_icon("detach_loader"), detach)
+	loader_actions.BindLoader = icon_button(loader_group, "BindLoader", "Bind selected Radiant", custom_icon("bind_loader"), bind_selected)
+	loader_actions.DetachLoader = icon_button(loader_group, "DetachLoader", "Detach from Radiant", custom_icon("detach_loader"), detach)
 	loader_actions.UpdateLoaderPath = icon_button(loader_group, "UpdateLoaderPath", "Update loader map path", custom_icon("update_loader_path"), update_loader_path)
 	loader_actions.BuildMeshes = icon_button(loader_group, "BuildMeshes", "Build Meshes from saved map", editor_icon("Bake"), bake)
 	icon_button(loader_group, "Materials", "Open Map Materials", editor_icon("StandardMaterial3D"), func(): plugin.show_materials())
@@ -483,7 +483,7 @@ func custom_icon(name: String) -> Texture2D:
 		_icon_cache_color = color
 	if _icon_cache.has(name):
 		return _icon_cache[name]
-	var path := "res://addons/tbloader/icons/map_toolbar/%s.svg" % name
+	var path := "res://addons/radiant/icons/map_toolbar/%s.svg" % name
 	var svg := FileAccess.get_file_as_string(path)
 	if svg.is_empty():
 		return editor_icon("Node3D")
@@ -1667,7 +1667,7 @@ func refresh_status() -> void:
 	for category in visibility_buttons:
 		visibility_buttons[category].set_pressed_no_signal(session.visibility_filters[category])
 	var loader = session.loader.get_ref()
-	binding_label.text = "Bound: %s — %s" % [loader.name, loader.map_resource] if is_instance_valid(loader) else "Standalone document • Select a TBLoader, then explicitly Bind"
+	binding_label.text = "Bound: %s — %s" % [loader.name, loader.map_resource] if is_instance_valid(loader) else "Standalone document • Select a Radiant, then explicitly Bind"
 	update_loader_action_state()
 	var tab_signature: Array = []
 	for origin in sessions:
@@ -2102,7 +2102,7 @@ func sync_resolver(force = false) -> void:
 		if template != null and not template.changed.is_connected(refresh_materials):
 			template.changed.connect(refresh_materials)
 	texture_root.text = root
-	var probe = ClassDB.instantiate("TBLoader")
+	var probe = ClassDB.instantiate("Radiant")
 	var direct: bool = probe.has_method("resolve_material")
 	probe.free()
 	browser.configure(EditorInterface.get_resource_filesystem(), root, null, direct)
@@ -2112,7 +2112,7 @@ func resolve_token(token: String) -> Dictionary:
 	var resolver = session.loader.get_ref()
 	var temporary = not is_instance_valid(resolver)
 	if temporary:
-		resolver = ClassDB.instantiate("TBLoader")
+		resolver = ClassDB.instantiate("Radiant")
 		resolver.texture_path = session.texture_root
 	var result: Dictionary = resolver.call("resolve_material", token) if resolver.has_method("resolve_material") else {}
 	if temporary:
@@ -2650,10 +2650,10 @@ func scene_loaders(root: Node) -> Array[Node]:
 	var loaders: Array[Node] = []
 	if root == null:
 		return loaders
-	if root is TBLoader:
+	if root is Radiant:
 		loaders.append(root)
 	for node in root.find_children("*", "", true, false):
-		if node is TBLoader:
+		if node is Radiant:
 			loaders.append(node)
 	return loaders
 
@@ -2827,7 +2827,7 @@ func update_loader_action_state() -> void:
 		return
 	var selected = plugin.editing_loader.get_ref()
 	var root = EditorInterface.get_edited_scene_root()
-	var can_bind: bool = is_instance_valid(selected) and selected is TBLoader and root != null and (root == selected or root.is_ancestor_of(selected))
+	var can_bind: bool = is_instance_valid(selected) and selected is Radiant and root != null and (root == selected or root.is_ancestor_of(selected))
 	loader_actions.BindLoader.disabled = not can_bind
 	var bound := valid_binding()
 	loader_actions.DetachLoader.disabled = not bound
@@ -2837,8 +2837,8 @@ func update_loader_action_state() -> void:
 
 func bind_loader(loader: Node) -> void:
 	var root = EditorInterface.get_edited_scene_root()
-	if not is_instance_valid(loader) or not loader is TBLoader or root == null or not root.is_ancestor_of(loader) and root != loader:
-		set_status("Choose a TBLoader in the current scene before binding.")
+	if not is_instance_valid(loader) or not loader is Radiant or root == null or not root.is_ancestor_of(loader) and root != loader:
+		set_status("Choose a Radiant in the current scene before binding.")
 		return
 	var id = loader.get_instance_id()
 	if scene_sessions.has(id) and scene_sessions[id].loader.get_ref() == loader:
@@ -2902,7 +2902,7 @@ func update_loader_path() -> void:
 	if same_path(loader.map_resource, path):
 		return
 	var manager = plugin.get_undo_redo()
-	manager.create_action("Set TBLoader map path", UndoRedo.MERGE_DISABLE, EditorInterface.get_edited_scene_root())
+	manager.create_action("Set Radiant map path", UndoRedo.MERGE_DISABLE, EditorInterface.get_edited_scene_root())
 	manager.add_do_property(loader, "map_resource", path)
 	manager.add_undo_property(loader, "map_resource", loader.map_resource)
 	manager.commit_action()
@@ -2965,7 +2965,7 @@ func commit_bake(loader: Node, origin: RefCounted = null) -> bool:
 	last_bake_action = weakref(token)
 	if changed:
 		var manager = plugin.get_undo_redo()
-		manager.create_action("Build TBLoader meshes", UndoRedo.MERGE_DISABLE, EditorInterface.get_edited_scene_root())
+		manager.create_action("Build Radiant meshes", UndoRedo.MERGE_DISABLE, EditorInterface.get_edited_scene_root())
 		manager.add_do_method(token, "restore", true)
 		manager.add_undo_method(token, "restore", false)
 		manager.add_do_reference(token)

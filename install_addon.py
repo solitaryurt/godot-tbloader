@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install the local TBLoader addon without modifying loaded library inodes."""
+"""Install the local Radiant addon without modifying loaded library inodes."""
 
 import argparse
 import os
@@ -57,7 +57,7 @@ def install(source: Path, project: Path) -> None:
 		raise ValueError("addon installation does not permit symlink roots")
 	source = source.resolve(strict=True)
 	project = project.resolve(strict=True)
-	destination = _ensure_directory(project, Path("addons") / "tbloader")
+	destination = _ensure_directory(project, Path("addons") / "radiant")
 	for path in source.rglob("*"):
 		if path.is_symlink():
 			raise ValueError(f"addon source contains a symlink: {path}")
@@ -73,7 +73,7 @@ def install(source: Path, project: Path) -> None:
 def main() -> None:
 	parser = argparse.ArgumentParser(description=__doc__)
 	parser.add_argument("project", type=Path, help="Godot project root")
-	parser.add_argument("--source", type=Path, default=ROOT / "addons" / "tbloader")
+	parser.add_argument("--source", type=Path, default=ROOT / "addons" / "radiant")
 	args = parser.parse_args()
 	if not args.source.is_dir():
 		parser.error(f"addon source does not exist: {args.source}")

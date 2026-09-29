@@ -8,5 +8,9 @@ bool lm_intersect_brush_faces(LMFace f0, LMFace f1, LMFace f2, vec3 *vertex);
 bool lm_brush_vertex_in_hull(const LMFace *faces, int face_count, vec3 vertex);
 LMVertexUV lm_standard_brush_uv(vec3 vertex, const LMFace *face, int texture_width, int texture_height);
 LMVertexUV lm_valve_brush_uv(vec3 vertex, const LMFace *face, int texture_width, int texture_height);
+void lm_brushdef_axis_base(vec3 normal, vec3 &tex_s, vec3 &tex_t);
+void lm_brushdef_world_axes(const LMFace *face, vec3 &u, vec3 &v);
+LMVertexUV lm_brushdef_uv(vec3 vertex, const LMFace *face);
+LMVertexUV lm_face_brush_uv(vec3 vertex, const LMFace *face, int texture_width, int texture_height);
 
 #endif

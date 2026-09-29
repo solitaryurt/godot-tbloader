@@ -21,7 +21,7 @@ export/save/rebuild, deterministic semantic roundtrips, ordered epairs/ownership
 classic/Valve/flags/patch data, malformed/unsupported/UTF-8/limit errors, caller-owned
 queries, stable IDs and epoch-bound snapshots, dirty baseline undo/redo, atomic-save
 failure cleanup, external changes/removal and path aliases. It also retains the real
-**TBLoader** cube bake, coordinate conversion/bounds, twelve triangles, finite UVs,
+**Radiant** cube bake, coordinate conversion/bounds, twelve triangles, finite UVs,
 normals, collision and imported texture checks, and adds empty-worldspawn bake.
 
 `editor` runs an actual `@tool EditorPlugin` inside `--editor`: real graph handlers,
@@ -101,8 +101,8 @@ from these fixtures. Test file writes only target disposable `user://` paths.
 From repository root, with Clang installed and `/tmp/opencode` available:
 
 ```bash
-timeout 180s bash tests/map_editor/run_native_tests.sh > /tmp/opencode/tbloader-phase1-native.log 2>&1
-rg 'error:|ERROR|runtime error|Assertion|PASS|SUMMARY' /tmp/opencode/tbloader-phase1-native.log
+timeout 180s bash tests/map_editor/run_native_tests.sh > /tmp/opencode/radiant-phase1-native.log 2>&1
+rg 'error:|ERROR|runtime error|Assertion|PASS|SUMMARY' /tmp/opencode/radiant-phase1-native.log
 ```
 
 The script compiles **production** parser/writer/model/geometry sources in standalone

@@ -7,7 +7,7 @@ func _initialize() -> void:
 	call_deferred("run")
 
 func run() -> void:
-	if not checks.check(ClassDB.class_exists("TBLoader"), "real native TBLoader is registered"):
+	if not checks.check(ClassDB.class_exists("Radiant"), "real native Radiant is registered"):
 		checks.finish(self, "document")
 		return
 	test_document()
@@ -31,8 +31,8 @@ func run() -> void:
 	test_shallow_vertex_intersections()
 	await test_checked_bake()
 	# Preserve the real bake regression gate alongside native document assertions.
-	var loader = ClassDB.instantiate("TBLoader")
-	checks.check(loader is Node3D, "TBLoader inherits Node3D")
+	var loader = ClassDB.instantiate("Radiant")
+	checks.check(loader is Node3D, "Radiant inherits Node3D")
 	checks.check(loader.map_inverse_scale == 38, "default inverse scale")
 	checks.check(loader.has_method("build_meshes"), "native bake method bound")
 	checks.check(loader.has_signal("bake_finished"), "native bake_finished signal bound")
@@ -83,7 +83,7 @@ func run() -> void:
 	var hull_file := FileAccess.open("user://hull-occluder.map", FileAccess.WRITE)
 	hull_file.store_string("{\n\"classname\" \"worldspawn\"\n{\n( 64 -64 -64 ) ( 64 64 64 ) ( 64 64 -64 ) common/hull 0 0 0 1 1\n( -64 -64 64 ) ( -64 64 -64 ) ( -64 64 64 ) common/hull 0 0 0 1 1\n( -64 64 -64 ) ( 64 64 64 ) ( -64 64 64 ) common/hull 0 0 0 1 1\n( -64 -64 64 ) ( 64 -64 -64 ) ( -64 -64 -64 ) common/hull 0 0 0 1 1\n( -64 -64 64 ) ( 64 64 64 ) ( 64 -64 64 ) common/hull 0 0 0 1 1\n( 64 -64 -64 ) ( -64 64 -64 ) ( -64 -64 -64 ) common/hull 0 0 0 1 1\n}\n}\n")
 	hull_file.close()
-	var hull_loader = ClassDB.instantiate("TBLoader")
+	var hull_loader = ClassDB.instantiate("Radiant")
 	root.add_child(hull_loader)
 	hull_loader.map_resource = "user://hull-occluder.map"
 	var hull_result: Dictionary = hull_loader.build_meshes_checked()
@@ -105,7 +105,7 @@ func run() -> void:
 		checks.check(generated.owner == loader, "root loader owns generated output")
 	loader.free()
 	await process_frame
-	var empty_loader = ClassDB.instantiate("TBLoader")
+	var empty_loader = ClassDB.instantiate("Radiant")
 	root.add_child(empty_loader)
 	empty_loader.map_resource = "res://fixtures/empty.map"
 	empty_loader.build_meshes()
@@ -113,7 +113,7 @@ func run() -> void:
 	checks.check(empty_loader.get_child_count() == 0, "empty worldspawn bake is safe")
 	empty_loader.free()
 	for fixture in ["classic_cube", "valve_cube", "patches", "ownership"]:
-		var roundtrip_loader = ClassDB.instantiate("TBLoader")
+		var roundtrip_loader = ClassDB.instantiate("Radiant")
 		root.add_child(roundtrip_loader)
 		roundtrip_loader.map_resource = "user://roundtrip-" + fixture + ".map"
 		roundtrip_loader.build_meshes()
@@ -788,7 +788,7 @@ func test_checked_bake() -> void:
 	var scene = Node3D.new()
 	scene.name = "BakeScene"
 	root.add_child(scene)
-	var loader = ClassDB.instantiate("TBLoader")
+	var loader = ClassDB.instantiate("Radiant")
 	scene.add_child(loader)
 	loader.owner = scene
 	loader.map_resource = "res://fixtures/classic_cube.map"
@@ -962,7 +962,7 @@ func test_document() -> void:
 	doc.map_changed.connect(func(_revision): events.map += 1)
 	doc.dirty_changed.connect(func(_dirty): events.dirty += 1)
 	doc.preview_changed.connect(func(): events.preview += 1)
-	for fixture in ["empty", "classic_cube", "valve_cube", "patches", "ownership"]:
+	for fixture in ["empty", "classic_cube", "valve_cube", "brushdef_cube", "patches", "ownership"]:
 		expect_ok(doc.load_map("res://fixtures/" + fixture + ".map"), "load " + fixture)
 		checks.check(not doc.is_dirty(), "loaded document is clean")
 		expect_ok(doc.save_map("user://roundtrip-" + fixture + ".map"), "save roundtrip " + fixture)
@@ -983,6 +983,10 @@ func test_document() -> void:
 		elif fixture == "valve_cube":
 			checks.check(text.contains('[ 0 1 0 2.5 ] [ 0 0 -1 -0.5 ]'), "Valve axes and offsets preserved")
 			checks.check(text.count("[ ") == 12, "all Valve faces remain Valve")
+		elif fixture == "brushdef_cube":
+			checks.check(text.contains("brushDef\n") and text.contains("( ( 0.03125 0 0 ) ( 0 0.03125 0 ) )"), "brushDef matrix preserved")
+			checks.check(text.contains('"baseline/checker" 0 0 0\n'), "brushDef surface flags preserved")
+			checks.check(doc.get_face_uv(doc.get_draw_data()[0].id, 4, doc.get_draw_data()[0].topology_revision).value.projection == "brushdef", "brushDef faces report brushdef projection")
 		elif fixture == "patches":
 			checks.check(text.contains("patchDef2\n") and text.contains("( 3 3 1 2 3 )"), "def2 complete header")
 			checks.check(text.contains("patchDef3\n") and text.contains("( 3 3 4 6 7 8 9 )"), "def3 discriminator, subdivisions and header flags")
@@ -1270,7 +1274,7 @@ func test_document() -> void:
 	var further_draw: Dictionary = dimension_restore.get_draw_data()[0]
 	var further_parity_draw: Dictionary = further_parity.get_draw_data()[0]
 	checks.check(further_loaded and further_parity.export_text().value == further_text and further_draw.aabb_min.is_equal_approx(further_parity_draw.aabb_min) and further_draw.aabb_max.is_equal_approx(further_parity_draw.aabb_max) and further_draw.faces[0].texture == further_parity_draw.faces[0].texture, "dimension restore further edit/export/draw parity")
-	var further_loader = ClassDB.instantiate("TBLoader")
+	var further_loader = ClassDB.instantiate("Radiant")
 	var further_target = Node3D.new()
 	root.add_child(further_loader); root.add_child(further_target)
 	checks.check(further_loader.build_visual_preview_checked(dimension_restore, further_target).ok and further_target.get_child_count() > 0, "dimension restore further edit materializes through Builder preparation")
@@ -1418,7 +1422,7 @@ func test_phase2_local_transactions() -> void:
 	expect_ok(phong.translate_vertices(phong_brush.id, PackedInt32Array([0]), Vector3(1, 2, 3), phong_brush.topology_revision), "create non-simple phong override")
 	var phong_oracle = ClassDB.instantiate("TBMapDocument")
 	expect_ok(phong_oracle.import_text(phong.export_text().value), "reparse non-simple phong override")
-	var loader = ClassDB.instantiate("TBLoader")
+	var loader = ClassDB.instantiate("Radiant")
 	var overlay_target = Node3D.new(); var oracle_target = Node3D.new()
 	root.add_child(loader); root.add_child(overlay_target); root.add_child(oracle_target)
 	checks.check(loader.build_visual_preview_checked(phong, overlay_target).ok and loader.build_visual_preview_checked(phong_oracle, oracle_target).ok and built_mesh_data(overlay_target) == built_mesh_data(oracle_target), "clone_map_for_build and Builder regeneration preserve non-simple phong geometry attributes")

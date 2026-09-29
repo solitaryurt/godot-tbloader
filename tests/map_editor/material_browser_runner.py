@@ -52,7 +52,7 @@ def main():
     project = artifacts / "project"
     project.mkdir()
     print("Logs/project:", artifacts)
-    shutil.copy2(ROOT / "addons/tbloader/src/editor/material_browser.gd", project)
+    shutil.copy2(ROOT / "addons/radiant/src/editor/material_browser.gd", project)
     shutil.copy2(HERE / "material_browser_suite.gd", project)
     for directory in ("art", "textures", "addons/material_browser_probe"):
         (project / directory).mkdir(parents=True)
@@ -70,7 +70,7 @@ def main():
     run(args.godot, project, artifacts, "failure-probe", ["--script", "res://material_browser_suite.gd", "--", "--fail-probe"], "", True)
     plugin = project / "addons/material_browser_probe"
     shutil.copy2(HERE / "material_browser_editor_probe.gd", plugin)
-    (plugin / "plugin.cfg").write_text('[plugin]\nname="Material Browser Probe"\ndescription="Independent browser integration"\nauthor="TBLoader"\nversion="1"\nscript="material_browser_editor_probe.gd"\n')
+    (plugin / "plugin.cfg").write_text('[plugin]\nname="Material Browser Probe"\ndescription="Independent browser integration"\nauthor="Radiant"\nversion="1"\nscript="material_browser_editor_probe.gd"\n')
     (project / "project.godot").write_text(config + '[editor_plugins]\nenabled=PackedStringArray("res://addons/material_browser_probe/plugin.cfg")\n')
     run(args.godot, project, artifacts, "editor", ["--editor"], "MATERIAL_BROWSER_EDITOR_PASS")
     print("PASS: runtime, deliberate failure detection, real EditorFileSystem add/remove")

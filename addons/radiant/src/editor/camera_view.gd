@@ -1,7 +1,7 @@
 @tool
 extends Control
 
-const OrientationGizmo = preload("res://addons/tbloader/src/editor/orientation_gizmo.gd")
+const OrientationGizmo = preload("res://addons/radiant/src/editor/orientation_gizmo.gd")
 
 signal camera_moved(map_position: Vector3, map_direction: Vector3)
 
@@ -142,7 +142,6 @@ const MIN_DOLLY_STEP = 0.125
 const MAX_DOLLY_STEP = 128.0
 const DOLLY_STEP_FACTOR = 1.25
 const TRACKPAD_ZOOM_FACTOR = 1.25
-const FACE_EDGE_WIDTH = 2.5
 const BRUSH_EDGE_DASH = 4.0
 const BRUSH_EDGE_GAP = 5.0
 @export_range(2.0, 64.0, 1.0) var selector_half_size := 12.0
@@ -313,7 +312,7 @@ func _ready() -> void:
 	built_appearance_button.name = "BuiltAppearance"
 	built_appearance_button.text = "Built appearance"
 	built_appearance_button.toggle_mode = true
-	built_appearance_button.tooltip_text = "Preview PBR materials and visual geometry using TBLoader build rules"
+	built_appearance_button.tooltip_text = "Preview PBR materials and visual geometry using Radiant build rules"
 	built_appearance_button.accessibility_name = "Built appearance"
 	built_appearance_button.theme_type_variation = "FlatButton"
 	built_appearance_button.custom_minimum_size.y = 28
@@ -742,7 +741,7 @@ func refresh_built_appearance() -> void:
 		map_geometry.show()
 		built_geometry.hide()
 		if is_instance_valid(host):
-			host.set_status("Built appearance requires a bound TBLoader")
+			host.set_status("Built appearance requires a bound Radiant")
 		return
 	var key := "%d:%d:%d:%d:%s" % [host.session.document.get_instance_id(), host.session.preview_generation,
 		host.material_generation, loader.get_instance_id(), visual_loader_signature(loader)]
@@ -985,10 +984,10 @@ func preview_scene_context() -> Dictionary:
 	if not is_instance_valid(root) or map_path.is_empty():
 		return {}
 	var candidates: Array[Node] = []
-	if root is TBLoader:
+	if root is Radiant:
 		candidates.append(root)
 	for node in root.find_children("*", "", true, false):
-		if node is TBLoader:
+		if node is Radiant:
 			candidates.append(node)
 	for candidate in candidates:
 		if host.same_path(candidate.map_resource, map_path):
@@ -1303,29 +1302,6 @@ func append_face_triangles(target: PackedVector3Array, winding: PackedVector3Arr
 		target.append(transform_map_scaled(winding[index], scale_value))
 		target.append(transform_map_scaled(winding[index + 1], scale_value))
 
-func append_quad(target: PackedVector3Array, p0: Vector3, p1: Vector3, p2: Vector3, p3: Vector3) -> void:
-	target.append(p0)
-	target.append(p1)
-	target.append(p2)
-	target.append(p0)
-	target.append(p2)
-	target.append(p3)
-
-func append_thick_segment(target: PackedVector3Array, a: Vector3, b: Vector3, half_width: float) -> void:
-	var along := b - a
-	if along.length_squared() <= 0.0000001:
-		return
-	along = along.normalized()
-	var side := along.cross(Vector3.UP)
-	if side.length_squared() <= 0.0000001:
-		side = along.cross(Vector3.FORWARD)
-	side = side.normalized() * half_width
-	var up := along.cross(side).normalized() * half_width
-	append_quad(target, a - side - up, a + side - up, b + side - up, b - side - up)
-	append_quad(target, a + side - up, a + side + up, b + side + up, b + side - up)
-	append_quad(target, a + side + up, a - side + up, b - side + up, b + side + up)
-	append_quad(target, a - side + up, a - side - up, b - side - up, b - side + up)
-
 func append_dashed_map_line(target: PackedVector3Array, a: Vector3, b: Vector3, scale_value: float) -> void:
 	var delta := b - a
 	var length := delta.length()
@@ -1359,7 +1335,6 @@ func build_overlays(scale_value: float, visual_layer: int) -> void:
 	var brush_triangles := PackedVector3Array()
 	var brush_edges := PackedVector3Array()
 	var face_edges := PackedVector3Array()
-	var face_half_width := FACE_EDGE_WIDTH * 0.5 / scale_value
 	for id in host.session.selected:
 		var brush: Dictionary = host.session.brush(id)
 		if not host.session.brush_visible(brush):
@@ -1378,10 +1353,11 @@ func build_overlays(scale_value: float, visual_layer: int) -> void:
 			if not host.session.material_filtered(face.texture):
 				var winding: PackedVector3Array = face.winding
 				for index in winding.size():
-					append_thick_segment(face_edges, transform_map_scaled(winding[index], scale_value), transform_map_scaled(winding[(index + 1) % winding.size()], scale_value), face_half_width)
+					face_edges.append(transform_map_scaled(winding[index], scale_value))
+					face_edges.append(transform_map_scaled(winding[(index + 1) % winding.size()], scale_value))
 	add_selection_overlay("SelectedBrushFill", brush_triangles, Color(1.0, 0.48, 0.14, 0.14), 1)
 	add_selection_lines("SelectedBrushEdges", brush_edges, Color("ffb657"), 2)
-	add_selection_overlay("SelectedFaceEdges", face_edges, Color(0.16, 0.5, 1.0, 1.0), 3)
+	add_selection_lines("SelectedFaceEdges", face_edges, Color(0.16, 0.5, 1.0, 1.0), 3)
 	if host.tool in ["Face", "Edge", "Vertex"]:
 		var handle_material = StandardMaterial3D.new()
 		handle_material.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
@@ -1785,7 +1761,10 @@ func begin_camera_left(event: InputEventMouseButton) -> void:
 
 func update_camera_gesture(position: Vector2) -> void:
 	if camera_gesture == "brush_paint":
-		paint_brush(brush_aperture_hit(position))
+		var hit := face_hit(position)
+		if hit.is_empty():
+			hit = brush_aperture_hit(position)
+		paint_brush(hit)
 		return
 	if camera_gesture.ends_with("_pending") and position.distance_to(camera_press_position) < DRAG_THRESHOLD:
 		return

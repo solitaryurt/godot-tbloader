@@ -16,7 +16,7 @@ class AtomicInstallTests(unittest.TestCase):
 		with tempfile.TemporaryDirectory() as temporary:
 			root = Path(temporary)
 			source = root / "source.so"
-			destination = root / "project/addons/tbloader/bin/library.so"
+			destination = root / "project/addons/radiant/bin/library.so"
 			source.write_bytes(b"new-library-page")
 			destination.parent.mkdir(parents=True)
 			destination.write_bytes(b"old-library-page")

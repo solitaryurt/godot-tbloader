@@ -8,6 +8,7 @@
 #include <limits>
 
 #include "brush.h"
+#include "brush_geometry_math.h"
 #include "entity.h"
 #include "face.h"
 #include "libmap_math.h"
@@ -253,15 +254,17 @@ void LMGeoGenerator::generate_brush_vertices(int entity_idx, int brush_idx) {
 
 						LMTextureData *texture = map_data->map_data_get_texture(face_inst->texture_idx);
 
-						LMVertexUV uv;
-						if (face_inst->is_valve_uv) {
-							uv = get_valve_uv(vertex, face_inst, texture->width, texture->height);
-						} else {
-							uv = get_standard_uv(vertex, face_inst, texture->width, texture->height);
-						}
+						LMVertexUV uv = lm_face_brush_uv(vertex, face_inst, texture->width, texture->height);
 
 						LMVertexTangent tangent;
-						if (face_inst->is_valve_uv) {
+						if (face_inst->is_bp_uv) {
+							vec3 u_axis, v_axis;
+							lm_brushdef_world_axes(face_inst, u_axis, v_axis);
+							LMFace axes = *face_inst;
+							axes.uv_valve.u.axis = u_axis;
+							axes.uv_valve.v.axis = v_axis;
+							tangent = get_valve_tangent(&axes);
+						} else if (face_inst->is_valve_uv) {
 							tangent = get_valve_tangent(face_inst);
 						} else {
 							tangent = get_standard_tangent(face_inst);

@@ -1,8 +1,8 @@
 @tool
 extends Control
 
-const OrientationGizmo = preload("res://addons/tbloader/src/editor/orientation_gizmo.gd")
-const GraphViewLayer = preload("res://addons/tbloader/src/editor/graph_view_layer.gd")
+const OrientationGizmo = preload("res://addons/radiant/src/editor/orientation_gizmo.gd")
+const GraphViewLayer = preload("res://addons/radiant/src/editor/graph_view_layer.gd")
 
 var host: Control
 var orientation = 2 # hidden axis: XY=2, XZ=1, YZ=0
@@ -95,7 +95,7 @@ const CONTEXT_DRAG_THRESHOLD = 4.0
 const TRACKPAD_ZOOM_FACTOR = 1.25
 const BRUSH_EDGE_DASH = 4.0
 const BRUSH_EDGE_GAP = 5.0
-const FACE_EDGE_WIDTH = 4.0
+const FACE_EDGE_WIDTH = 2.0
 @export_range(2.0, 64.0, 1.0) var selector_half_size = 12.0
 
 func _overlay_font() -> Font:

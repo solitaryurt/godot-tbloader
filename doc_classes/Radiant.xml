@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="UTF-8" ?>
-<class name="TBLoader" inherits="Node3D" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/godotengine/godot/master/doc/class.xsd">
+<class name="Radiant" inherits="Node3D" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="https://raw.githubusercontent.com/godotengine/godot/master/doc/class.xsd">
 	<brief_description>
-		TrenchBroom loader node which can import map files as meshes and entities.
+		Map node that imports .map files as meshes and entities.
 	</brief_description>
 	<description>
 		This node can load TrenchBroom map files, and convert all of its contained meshes and entities to Godot nodes, either using the built-in Godot nodes (like [MeshInstance3D], [OmniLight3D], etc.) or using custom nodes as described by the documentation.
 	</description>
 	<tutorials>
-		<link title="Usage guide">https://github.com/codecat/godot-tbloader?tab=readme-ov-file#usage</link>
+		<link title="Usage guide">https://github.com/codecat/godot-radiant?tab=readme-ov-file#usage</link>
 	</tutorials>
 	<methods>
 		<method name="build_meshes">

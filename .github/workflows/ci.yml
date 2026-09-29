@@ -28,7 +28,7 @@ jobs:
       - name: Native document tests (ASan + UBSan)
         env:
           CXX: clang++
-          TB_NATIVE_OUTPUT: ${{ runner.temp }}/tbloader-native-document
+          TB_NATIVE_OUTPUT: ${{ runner.temp }}/radiant-native-document
         run: bash tests/map_editor/run_native_tests.sh
 
       - name: Installer unit tests
@@ -45,15 +45,15 @@ jobs:
           - name: linux
             os: ubuntu-latest
             command: scons platform=linux target=template_debug arch=x86_64 -j4 && scons platform=linux target=template_release arch=x86_64 -j4
-            artifact: addons/tbloader/bin/libtbloader.linux.*.so
+            artifact: addons/radiant/bin/libradiant.linux.*.so
           - name: windows
             os: windows-latest
             command: scons platform=windows target=template_release arch=x86_64 -j4
-            artifact: addons/tbloader/bin/tbloader.windows.x86_64.dll
+            artifact: addons/radiant/bin/radiant.windows.x86_64.dll
           - name: macos
             os: macos-latest
             command: scons platform=macos target=template_release arch=universal -j4
-            artifact: addons/tbloader/bin/libtbloader.macos.universal.dylib
+            artifact: addons/radiant/bin/libradiant.macos.universal.dylib
     steps:
       - uses: actions/checkout@v4
         with:
@@ -78,7 +78,7 @@ jobs:
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
-          name: tbloader-${{ matrix.name }}
+          name: radiant-${{ matrix.name }}
           path: ${{ matrix.artifact }}
           if-no-files-found: error
 
@@ -93,22 +93,22 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: generated-binaries
-          pattern: tbloader-*
+          pattern: radiant-*
           merge-multiple: true
 
       - name: Assemble addon
         run: |
-          mkdir -p addons/tbloader/bin
-          cp -rf generated-binaries/. addons/tbloader/bin/
-          rm -f addons/tbloader/bin/*.exp addons/tbloader/bin/*.lib addons/tbloader/bin/*.pdb
+          mkdir -p addons/radiant/bin
+          cp -rf generated-binaries/. addons/radiant/bin/
+          rm -f addons/radiant/bin/*.exp addons/radiant/bin/*.lib addons/radiant/bin/*.pdb
           name="${GITHUB_REF_NAME//\//-}"
-          (cd addons && zip -r "../TBLoader-${name}.zip" tbloader)
+          (cd addons && zip -r "../Radiant-${name}.zip" radiant)
 
       - name: Upload addon zip
         uses: actions/upload-artifact@v4
         with:
-          name: tbloader-addon-zip
-          path: TBLoader-*.zip
+          name: radiant-addon-zip
+          path: Radiant-*.zip
           if-no-files-found: error
 
   release:
@@ -122,11 +122,11 @@ jobs:
       - name: Download addon zip
         uses: actions/download-artifact@v4
         with:
-          name: tbloader-addon-zip
+          name: radiant-addon-zip
 
       - name: Create draft release
         uses: softprops/action-gh-release@v2
         with:
           draft: true
           generate_release_notes: true
-          files: TBLoader-*.zip
+          files: Radiant-*.zip

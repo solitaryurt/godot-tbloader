@@ -1,6 +1,6 @@
 # Standalone material browser handoff
 
-`addons/tbloader/src/editor/material_browser.gd` is a reusable `@tool Control`
+`addons/radiant/src/editor/material_browser.gd` is a reusable `@tool Control`
 hosted by the contextual Map Materials bottom panel. Instantiate with
 `preload(...).new()` and give it expanding size flags in the host layout.
 

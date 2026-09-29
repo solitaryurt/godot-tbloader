@@ -5,6 +5,7 @@
 #include "face.h"
 #include "map_edit.h"
 #include "brush_topology.h"
+#include "brush_geometry_math.h"
 #include "editor_brush_geometry.h"
 #include <cmath>
 #include <cassert>
@@ -81,7 +82,7 @@ static void equal_maps(const LMMapData &a, const LMMapData &b) {
 				const auto &g = o.brushes[k].faces[j];
 				equal_vector(f.plane_points.v0, g.plane_points.v0); equal_vector(f.plane_points.v1, g.plane_points.v1); equal_vector(f.plane_points.v2, g.plane_points.v2);
 				assert(!strcmp(a.textures[f.texture_idx].name, b.textures[g.texture_idx].name));
-				assert(f.is_valve_uv == g.is_valve_uv);
+				assert(f.is_valve_uv == g.is_valve_uv && f.is_bp_uv == g.is_bp_uv);
 				assert(f.uv_standard.u == g.uv_standard.u && f.uv_standard.v == g.uv_standard.v);
 				equal_vector(f.uv_valve.u.axis, g.uv_valve.u.axis); equal_vector(f.uv_valve.v.axis, g.uv_valve.v.axis);
 				assert(f.uv_valve.u.offset == g.uv_valve.u.offset && f.uv_valve.v.offset == g.uv_valve.v.offset);
@@ -333,7 +334,7 @@ int main() {
 			}));
 		}
 	}
-	for (const auto *name : { "empty", "classic_cube", "valve_cube", "patches", "ownership" }) {
+	for (const auto *name : { "empty", "classic_cube", "valve_cube", "brushdef_cube", "patches", "ownership" }) {
 		const std::string source = fixture(name);
 		auto map = std::make_shared<LMMapData>();
 		LMMapParser parser(map);
@@ -389,6 +390,12 @@ int main() {
 			check_topology_order(map->entities[e].brushes[b], map->entity_geo[e].brushes[b]),
 			check_editor_geometry_parity(*map, map->entities[e].brushes[b], map->entity_geo[e].brushes[b]),
 			check_uv_only_update(*map, map->entities[e].brushes[b]);
+		if (!strcmp(name, "brushdef_cube")) {
+			const auto &face = map->entities[0].brushes[0].faces[4];
+			assert(face.is_bp_uv && !face.is_valve_uv);
+			const auto uv = lm_brushdef_uv({-16, -32, 24}, &face);
+			assert(std::fabs(uv.u + 1.0) < 1e-9 && std::fabs(uv.v + 0.5) < 1e-9);
+		}
 		if (!strcmp(name, "classic_cube")) {
 			std::vector<LMEditorTextureSize> sizes;
 			const auto &brush = map->entities[0].brushes[0]; const auto &geometry = map->entity_geo[0].brushes[0];

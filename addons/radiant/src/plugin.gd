@@ -1,12 +1,12 @@
 @tool
 extends EditorPlugin
-class_name TBPlugin
+class_name RadiantPlugin
 
 const MAIN_SCREEN_NAME := "Radiant"
-const TBLoaderInspector = preload("res://addons/tbloader/src/editor/tbloader_inspector.gd")
+const RadiantInspector = preload("res://addons/radiant/src/editor/radiant_inspector.gd")
 const STEAM_AUDIO_MATERIAL_PATH := "res://resources/steam_audio_materials"
 const ALL_MATERIALS_KEY := ""
-const MATERIAL_CONTEXTS_PATH := "res://.godot/tbloader_material_contexts.cfg"
+const MATERIAL_CONTEXTS_PATH := "res://.godot/radiant_material_contexts.cfg"
 
 var map_control: Control = null
 var editing_loader: WeakRef = weakref(null)
@@ -41,10 +41,10 @@ func _enter_tree():
 	map_control.set_visible(false)
 	add_control_to_container(EditorPlugin.CONTAINER_SPATIAL_EDITOR_MENU, map_control)
 
-	map_editor = preload("res://addons/tbloader/src/editor/map_editor.gd").new()
+	map_editor = preload("res://addons/radiant/src/editor/map_editor.gd").new()
 	map_editor.plugin = self
 	map_editor.visibility_changed.connect(update_materials_context)
-	inspector_plugin = TBLoaderInspector.new(self)
+	inspector_plugin = RadiantInspector.new(self)
 	add_inspector_plugin(inspector_plugin)
 	materials_panel = create_materials_panel()
 	materials_button = add_control_to_bottom_panel(materials_panel, "Map Materials")
@@ -109,7 +109,7 @@ func _exit_tree():
 	map_control = null
 
 func _handles(_object):
-	# A main-screen plugin that handles TBLoader would auto-switch tabs on scene
+	# A main-screen plugin that handles Radiant would auto-switch tabs on scene
 	# selection. The independent spatial-selection signal owns this toolbar.
 	return false
 
@@ -124,11 +124,11 @@ func _make_visible(visible: bool):
 
 func _get_window_layout(configuration: ConfigFile) -> void:
 	if map_editor != null and map_editor.is_node_ready():
-		configuration.set_value("TBLoader", "map_workspace", map_editor.workspace_state())
+		configuration.set_value("Radiant", "map_workspace", map_editor.workspace_state())
 
 func _set_window_layout(configuration: ConfigFile) -> void:
-	if map_editor != null and map_editor.is_node_ready() and configuration.has_section_key("TBLoader", "map_workspace"):
-		map_editor.restore_workspace_state(configuration.get_value("TBLoader", "map_workspace", {}))
+	if map_editor != null and map_editor.is_node_ready() and configuration.has_section_key("Radiant", "map_workspace"):
+		map_editor.restore_workspace_state(configuration.get_value("Radiant", "map_workspace", {}))
 
 func scene_tab_closed(_path: String) -> void:
 	if map_screen_active and map_editor != null:
@@ -147,7 +147,7 @@ func scene_tree_changed(node: Node) -> void:
 	if not map_screen_active or map_editor == null:
 		return
 	var root = get_editor_interface().get_edited_scene_root()
-	if root != null and node is TBLoader:
+	if root != null and node is Radiant:
 		map_editor.queue_scene_discovery()
 
 func scene_node_renamed(node: Node) -> void:
@@ -169,7 +169,7 @@ func _get_plugin_icon() -> Texture2D:
 func radiant_icon() -> Texture2D:
 	if _radiant_icon != null:
 		return _radiant_icon
-	var svg := FileAccess.get_file_as_string("res://addons/tbloader/icons/radiant.svg")
+	var svg := FileAccess.get_file_as_string("res://addons/radiant/icons/radiant.svg")
 	var image := Image.new()
 	var scale := get_editor_interface().get_editor_scale() * 0.25
 	if svg.is_empty() or image.load_svg_from_string(svg, scale) != OK:
@@ -186,7 +186,7 @@ func _save_external_data() -> void:
 
 func spatial_selection_changed() -> void:
 	var nodes = get_editor_interface().get_selection().get_selected_nodes()
-	var loader = nodes[0] if nodes.size() == 1 and nodes[0] is TBLoader else null
+	var loader = nodes[0] if nodes.size() == 1 and nodes[0] is Radiant else null
 	_edit(loader)
 	update_spatial_toolbar()
 
@@ -206,7 +206,7 @@ func create_map_control() -> Control:
 	button_build_meshes.flat = true
 	button_build_meshes.text = "Build Meshes"
 	button_build_meshes.icon = get_editor_interface().get_base_control().get_theme_icon("Bake", "EditorIcons")
-	button_build_meshes.tooltip_text = "Build Meshes for the selected TBLoader"
+	button_build_meshes.tooltip_text = "Build Meshes for the selected Radiant"
 	button_build_meshes.accessibility_name = "Build Meshes"
 	button_build_meshes.connect("pressed", Callable(self, "build_meshes"))
 	spatial_actions.BuildMeshes = button_build_meshes
@@ -238,14 +238,14 @@ func update_spatial_toolbar() -> void:
 	map_control.visible = true
 	var loader = editing_loader.get_ref()
 	var root = get_editor_interface().get_edited_scene_root()
-	var has_loader: bool = is_instance_valid(loader) and loader is TBLoader and root != null and (root == loader or root.is_ancestor_of(loader))
+	var has_loader: bool = is_instance_valid(loader) and loader is Radiant and root != null and (root == loader or root.is_ancestor_of(loader))
 	spatial_actions.BuildMeshes.disabled = not has_loader
 	spatial_actions.OpenRadiantEditor.disabled = not has_loader
 
 func open_in_map_editor(loader = null) -> void:
 	var target = loader if loader != null else editing_loader.get_ref()
 	get_editor_interface().set_main_screen_editor(MAIN_SCREEN_NAME)
-	if not is_instance_valid(target) or not target is TBLoader or map_editor == null:
+	if not is_instance_valid(target) or not target is Radiant or map_editor == null:
 		return
 	if map_editor.has_method("bind_loader"):
 		map_editor.call("bind_loader", target)
@@ -335,7 +335,7 @@ func create_materials_panel() -> Control:
 	material_picker_button = Button.new()
 	material_picker_button.toggle_mode = true
 	material_picker_button.text = "Pick Material"
-	material_picker_button.tooltip_text = "Pick a TBLoader surface material from the 3D viewport"
+	material_picker_button.tooltip_text = "Pick a Radiant surface material from the 3D viewport"
 	material_picker_button.icon = get_editor_interface().get_base_control().get_theme_icon("ColorPick", "EditorIcons")
 	material_picker_button.toggled.connect(sync_material_picker)
 	header.add_child(material_picker_button)
@@ -380,7 +380,7 @@ func create_entities_panel() -> Control:
 	var panel := VBoxContainer.new()
 	panel.name = "MapEntitiesBottomPanel"
 	panel.custom_minimum_size.y = 220
-	entities_pane = preload("res://addons/tbloader/src/editor/entity_pane.gd").new()
+	entities_pane = preload("res://addons/radiant/src/editor/entity_pane.gd").new()
 	entities_pane.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	panel.add_child(entities_pane)
 	return panel
@@ -395,7 +395,7 @@ func update_materials_context() -> void:
 		var context: Dictionary = material_contexts[active_context_key]
 		materials_context_label.text = "Map materials • %s > %s (cached)" % [context.scene_name, context.node_name]
 	else:
-		materials_context_label.text = "Map materials • All TBLoaders"
+		materials_context_label.text = "Map materials • All maps"
 
 func material_loader():
 	if map_screen_active and map_editor != null and map_editor.session != null:
@@ -434,7 +434,7 @@ func _forward_3d_gui_input(camera: Camera3D, event: InputEvent) -> int:
 		if not hit.is_empty():
 			reveal_material(hit.material, hit.loader)
 		else:
-			push_warning("No TBLoader material found under the cursor.")
+			push_warning("No Radiant material found under the cursor.")
 		return EditorPlugin.AFTER_GUI_INPUT_STOP
 	return EditorPlugin.AFTER_GUI_INPUT_PASS
 
@@ -443,15 +443,15 @@ func pick_material(camera: Camera3D, screen_position: Vector2) -> Dictionary:
 	var ray_direction := camera.project_ray_normal(screen_position)
 	var nearest_distance := camera.far
 	var nearest_material: Material = null
-	var nearest_loader: TBLoader = null
+	var nearest_loader: Radiant = null
 	var scene_root := get_editor_interface().get_edited_scene_root()
 	if scene_root == null:
 		return {}
-	var loaders := scene_root.find_children("*", "TBLoader", true, false)
-	if scene_root is TBLoader:
+	var loaders := scene_root.find_children("*", "Radiant", true, false)
+	if scene_root is Radiant:
 		loaders.push_front(scene_root)
 	for loader_node in loaders:
-		var loader := loader_node as TBLoader
+		var loader := loader_node as Radiant
 		for mesh_node in loader.find_children("*", "MeshInstance3D", true, false):
 			var mesh_instance := mesh_node as MeshInstance3D
 			var mesh: Mesh = mesh_instance.mesh
@@ -492,7 +492,7 @@ func pick_material(camera: Camera3D, screen_position: Vector2) -> Dictionary:
 						nearest_loader = loader
 	return {} if nearest_material == null else {"material": nearest_material, "loader": nearest_loader}
 
-func reveal_material(material: Material, loader: TBLoader) -> void:
+func reveal_material(material: Material, loader: Radiant) -> void:
 	material_picker_button.button_pressed = false
 	editing_loader = weakref(loader)
 	materials_search.text = ""
@@ -557,12 +557,12 @@ func refresh_materials() -> void:
 	update_material_context_picker()
 	filter_materials(materials_search.text)
 	if material_entries.is_empty() and material_contexts.is_empty():
-		materials_count_label.text = "Select a TBLoader to cache its materials, or build meshes first."
+		materials_count_label.text = "Select a Radiant to cache its materials, or build meshes first."
 		materials_button.text = "Map Materials"
 	else:
 		materials_button.text = "Map Materials (%d)" % material_entries.size()
 
-func collect_material_entries(loader: TBLoader) -> Array:
+func collect_material_entries(loader: Radiant) -> Array:
 	var materials := {}
 	for mesh_instance in loader.find_children("*", "MeshInstance3D", true, false):
 		add_material(materials, mesh_instance.material_override, loader)
@@ -577,7 +577,7 @@ func collect_material_entries(loader: TBLoader) -> Array:
 	entries.sort_custom(func(a, b): return a.name.naturalnocasecmp_to(b.name) < 0)
 	return entries
 
-func cache_material_context(loader: TBLoader, entries: Array, make_active: bool, write_cache: bool = true) -> String:
+func cache_material_context(loader: Radiant, entries: Array, make_active: bool, write_cache: bool = true) -> String:
 	var scene_root := find_scene_root(loader)
 	var scene_path := ""
 	var scene_name := ""
@@ -610,8 +610,8 @@ func cache_material_context(loader: TBLoader, entries: Array, make_active: bool,
 func discover_open_scene_loaders() -> void:
 	var wrote_cache := false
 	for scene_root in get_editor_interface().get_open_scene_roots():
-		var loaders := scene_root.find_children("*", "TBLoader", true, false)
-		if scene_root is TBLoader:
+		var loaders := scene_root.find_children("*", "Radiant", true, false)
+		if scene_root is Radiant:
 			loaders.push_front(scene_root)
 		for loader in loaders:
 			cache_material_context(loader, collect_material_entries(loader), false, false)
@@ -680,14 +680,14 @@ func persist_material_contexts() -> void:
 			"materials": serialized,
 		}
 	var config := ConfigFile.new()
-	config.set_value("tbloader", "material_contexts", data)
+	config.set_value("radiant", "material_contexts", data)
 	config.save(MATERIAL_CONTEXTS_PATH)
 
 func restore_material_contexts() -> void:
 	var config := ConfigFile.new()
 	if config.load(MATERIAL_CONTEXTS_PATH) != OK:
 		return
-	var data = config.get_value("tbloader", "material_contexts", {})
+	var data = config.get_value("radiant", "material_contexts", {})
 	if not data is Dictionary:
 		return
 	for key in data:
@@ -770,14 +770,14 @@ func find_context_root(context: Dictionary) -> Node:
 			return scene_root
 	return null
 
-func find_context_loader(context: Dictionary) -> TBLoader:
+func find_context_loader(context: Dictionary) -> Radiant:
 	var scene_root := find_context_root(context)
 	if scene_root == null:
 		return null
 	var node := scene_root.get_node_or_null(NodePath(context.node_path))
-	return node if node is TBLoader else null
+	return node if node is Radiant else null
 
-func activate_context_loader(loader: TBLoader) -> void:
+func activate_context_loader(loader: Radiant) -> void:
 	editing_loader = weakref(loader)
 	var selection := get_editor_interface().get_selection()
 	selection.clear()
@@ -847,7 +847,7 @@ func filter_materials(query: String) -> void:
 		visible_count += 1
 	materials_count_label.text = "%d of %d materials" % [visible_count, material_entries.size()] if not normalized_query.is_empty() else "%d unique material%s" % [visible_count, "" if visible_count == 1 else "s"]
 
-func add_material(materials: Dictionary, material: Material, loader: TBLoader) -> void:
+func add_material(materials: Dictionary, material: Material, loader: Radiant) -> void:
 	if material == null:
 		return
 	var path = material.resource_path

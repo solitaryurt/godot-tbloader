@@ -121,8 +121,8 @@ The verified fixed debug library has SHA-256:
 `cd7cf4434f5a9a0f9c6d3493c9418055dd7432d56e1cbd5faf7c49ffc5a216db`.
 `run_tests.py` copies this exact library into each isolated project's addon and
 records matching source/staged hashes in `result.json`. This repository's
-`tbloader.gdextension` selects `libtbloader.linux.template_debug.x86_64.so` for
-the Linux editor. Legacy `libtbloader.linux.x86_64.so` and release artifacts also
+`radiant.gdextension` selects `libradiant.linux.template_debug.x86_64.so` for
+the Linux editor. Legacy `libradiant.linux.x86_64.so` and release artifacts also
 exist and are not the tested library.
 
 Several sibling project addon manifests still select the legacy filename. Their

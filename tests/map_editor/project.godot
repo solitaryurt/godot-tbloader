@@ -1,7 +1,7 @@
 config_version=5
 
 [application]
-config/name="TBLoader Phase 0 tests"
+config/name="Radiant Phase 0 tests"
 
 [rendering]
 renderer/rendering_method="gl_compatibility"
@@ -10,4 +10,4 @@ renderer/rendering_method="gl_compatibility"
 driver/driver="Dummy"
 
 [editor_plugins]
-enabled=PackedStringArray("res://addons/tbloader/plugin.cfg", "res://addons/map_editor_tests/plugin.cfg")
+enabled=PackedStringArray("res://addons/radiant/plugin.cfg", "res://addons/map_editor_tests/plugin.cfg")

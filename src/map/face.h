@@ -46,6 +46,7 @@ typedef struct LMFace {
 	int texture_idx;
 
 	bool is_valve_uv;
+	bool is_bp_uv;
 	LMStandardUV uv_standard;
 	LMValveUV uv_valve;
 	LMFaceUVExtra uv_extra;

@@ -36,6 +36,15 @@ LMMapEdit::LMMapEdit(const LMMapData &map) {
 		entities.push_back(std::move(e));
 	}
 }
+void write_edit_brush(std::string &out, const std::vector<LMEditFace> &faces) {
+	bool brushdef = false;
+	for (const auto &f : faces) if (f.plane.is_bp_uv) { brushdef = true; break; }
+	out += "{\n";
+	if (brushdef) out += "brushDef\n{\n";
+	for (const auto &f : faces) out += lm_write_face(f.plane, f.texture);
+	if (brushdef) out += "}\n";
+	out += "}\n";
+}
 std::string LMMapEdit::text(size_t reserve) const {
 	std::string out;
 	out.reserve(reserve);
@@ -44,11 +53,7 @@ std::string LMMapEdit::text(size_t reserve) const {
 		for (const auto &p : e.epairs) out += lm_quote(p.first) + " " + lm_quote(p.second) + "\n";
 		for (const auto &p : e.primitives) {
 			if (p.patch) out += p.patch_text;
-			else {
-				out += "{\n";
-				for (const auto &f : p.faces) out += lm_write_face(f.plane, f.texture);
-				out += "}\n";
-			}
+			else write_edit_brush(out, p.faces);
 		}
 		out += "}\n";
 	}
@@ -106,9 +111,9 @@ void lm_edit_rotate_brush(LMEditPrimitive &brush, vec3 pivot, int axis, double r
 }
 
 bool lm_edit_prune_faces(LMEditPrimitive &brush) {
-	std::string source = "{\n\"classname\" \"worldspawn\"\n{\n";
-	for (const auto &f : brush.faces) source += lm_write_face(f.plane, f.texture);
-	source += "}\n}\n";
+	std::string source = "{\n\"classname\" \"worldspawn\"\n";
+	write_edit_brush(source, brush.faces);
+	source += "}\n";
 	auto candidate = std::make_shared<LMMapData>();
 	if (!LMMapParser(candidate).load_from_text(source)) return false;
 	LMGeoGenerator(candidate).run();

@@ -1,10 +1,10 @@
-# TBLoader Product Requirements
+# Radiant Product Requirements
 
 Status: Draft
 
 ## Product Direction
 
-TBLoader should make TrenchBroom-authored maps feel native inside Godot without turning generated
+Radiant should make TrenchBroom-authored maps feel native inside Godot without turning generated
 scene content into fragile hand-authored data. The main workflow is:
 
 1. Build structural geometry in TrenchBroom.
@@ -13,7 +13,7 @@ scene content into fragile hand-authored data. The main workflow is:
 
 The product should clearly distinguish source data, persistent overrides, and generated output.
 Generated children remain disposable. Any user-authored operation that must survive regeneration must
-be stored on the `TBLoader`, in the source map, or in an explicit resource referenced by the loader.
+be stored on the `Radiant`, in the source map, or in an explicit resource referenced by the loader.
 
 ## Goals
 
@@ -36,12 +36,12 @@ be stored on the `TBLoader`, in the source map, or in an explicit resource refer
 
 ### Problem
 
-`TBLoader.build_meshes()` clears and recreates generated children. Directly edited normals,
+`Radiant.build_meshes()` clears and recreates generated children. Directly edited normals,
 materials, transforms, metadata, and generated nodes are therefore lost on every regeneration.
 
 ### Requirements
 
-- Add an override resource referenced by each `TBLoader`.
+- Add an override resource referenced by each `Radiant`.
 - Create an embedded override resource automatically on the first persistent edit.
 - Allow users to save it as an external `.tres` for explicit sharing and version control.
 - Apply overrides during generation, before lightmap unwrap or other operations that may duplicate or
@@ -55,7 +55,7 @@ materials, transforms, metadata, and generated nodes are therefore lost on every
 ### Stable Geometry Identity
 
 Transient entity, brush, and face indices are insufficient because source ordering can change.
-TBLoader should derive canonical identifiers:
+Radiant should derive canonical identifiers:
 
 - Entity ID: explicit source ID or target name when unique; otherwise a canonical entity signature.
 - Face ID: hash of a quantized plane, texture, and texture axes.
@@ -75,7 +75,7 @@ survive map regeneration.
 
 ### Interaction Model
 
-- Add a **Normals** edit mode to the TBLoader 3D editor tools.
+- Add a **Normals** edit mode to the Radiant 3D editor tools.
 - Support **Face** and **Edge** selection modes.
 - Ray-pick generated triangles and resolve them back to their source entity, brush, and face.
 - Render selected faces and edges as viewport overlays without modifying map materials.
@@ -198,7 +198,7 @@ The Map Materials panel should grow from a browser into a focused map-material w
 - Provide property presets and bulk property editing.
 - Preserve safe user-authored child nodes through explicit attachment slots rather than by relying on
   generated hierarchy paths.
-- Support post-build extension hooks for project-specific generation without forking TBLoader.
+- Support post-build extension hooks for project-specific generation without forking Radiant.
 - Show broken target links and a graph of entity relationships.
 
 ## Feature: Lighting and Optimization
@@ -213,7 +213,7 @@ The Map Materials panel should grow from a browser into a focused map-material w
 
 ## Feature: Export and Team Workflow
 
-- Store project-wide defaults in a shared TBLoader settings resource.
+- Store project-wide defaults in a shared Radiant settings resource.
 - Allow per-loader overrides without duplicating the full settings set.
 - Export and import material mappings, gameplay surface mappings, and build profiles.
 - Provide deterministic diagnostics and override files suitable for code review.
@@ -261,7 +261,7 @@ The Map Materials panel should grow from a browser into a focused map-material w
 - Embedded override resources are convenient, while external resources are easier to share; both
   should use the same schema.
 - Direct synchronization back into TrenchBroom is limited by the `.map` format. Entity-wide settings
-  can live in map properties, but precise edge state should remain a TBLoader override unless a
+  can live in map properties, but precise edge state should remain a Radiant override unless a
   durable source-side ID extension is introduced.
 - The editor must remain responsive on large maps; picking and adjacency data may need compact caches
   built during generation.

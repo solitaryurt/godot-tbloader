@@ -16,7 +16,7 @@ func _enter_tree() -> void:
 		call_deferred("start")
 
 func find_plugin(node: Node) -> EditorPlugin:
-	if node is EditorPlugin and node.get_script() != null and node.get_script().resource_path == "res://addons/tbloader/src/plugin.gd":
+	if node is EditorPlugin and node.get_script() != null and node.get_script().resource_path == "res://addons/radiant/src/plugin.gd":
 		return node
 	for child in node.get_children():
 		var found = find_plugin(child)

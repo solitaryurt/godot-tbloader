@@ -392,7 +392,7 @@ def main():
     x, process, journey = None, None, None
     lock = None
     try:
-        lock = Path("/tmp/opencode/tbloader-window-input.lock").open("w")
+        lock = Path("/tmp/opencode/radiant-window-input.lock").open("w")
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -422,7 +422,7 @@ def main():
         plugin = target / "plugin.cfg"
         plugin.write_text(plugin.read_text().replace('script="editor_suite.gd"', 'script="window_input_observer.gd"'))
         config = project / "project.godot"
-        config.write_text(config.read_text().replace("TBLoader Phase 0 tests", "TBLoader XTest isolated acceptance"))
+        config.write_text(config.read_text().replace("Radiant Phase 0 tests", "Radiant XTest isolated acceptance"))
         # Import retains the existing strict suite; observer is activated afterwards.
         env = os.environ.copy()
         env["TB_TEST_SUITE"], env["TB_TEST_PROBE"] = "import", ""
@@ -441,7 +441,7 @@ def main():
         harness.execute(base + ["--headless", "--editor"], project, env, args.timeout, logs, "import", "TB_TEST_COMPLETE:import:PASS")
         plugin.write_text(original_cfg.replace('script="editor_suite.gd"', 'script="window_input_observer.gd"'))
         result["inputs"] = {str(p.relative_to(project)): harness.sha256(p) for p in sorted(project.rglob("*")) if p.is_file() and ".godot" not in p.relative_to(project).parts}
-        if harness.sha256(project / "addons/tbloader/bin/libtbloader.linux.template_debug.x86_64.so") != result["library_sha256"]:
+        if harness.sha256(project / "addons/radiant/bin/libradiant.linux.template_debug.x86_64.so") != result["library_sha256"]:
             raise harness.GateFailure("Staged library hash differs")
         env["TB_TEST_SUITE"] = "window_input"
         for phase in ("input", "reopen"):

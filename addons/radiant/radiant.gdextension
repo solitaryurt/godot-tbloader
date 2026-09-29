@@ -1,0 +1,12 @@
+[configuration]
+entry_symbol = "radiant_init"
+compatibility_minimum = "4.1"
+
+[icons]
+Radiant = "res://addons/radiant/icons/radiant.svg"
+
+[libraries]
+windows.x86_64 = "bin/radiant.windows.x86_64.dll"
+linux.debug.x86_64 = "bin/libradiant.linux.template_debug.x86_64.so"
+linux.release.x86_64 = "bin/libradiant.linux.template_release.x86_64.so"
+macos = "bin/libradiant.macos.universal.dylib"

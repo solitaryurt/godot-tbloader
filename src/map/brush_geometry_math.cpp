@@ -76,3 +76,40 @@ LMVertexUV lm_valve_brush_uv(vec3 vertex, const LMFace *face, int texture_width,
 	uv.u += face->uv_valve.u.offset / texture_width; uv.v += face->uv_valve.v.offset / texture_height;
 	return uv;
 }
+
+void lm_brushdef_axis_base(vec3 normal, vec3 &tex_s, vec3 &tex_t) {
+	vec3 n = normal;
+	if (std::fabs(n.x) < 1e-6) n.x = 0;
+	if (std::fabs(n.y) < 1e-6) n.y = 0;
+	if (std::fabs(n.z) < 1e-6) n.z = 0;
+	const double rot_y = -std::atan2(n.z, std::sqrt(n.x * n.x + n.y * n.y));
+	const double rot_z = std::atan2(n.y, n.x);
+	const double sin_z = std::sin(rot_z), cos_z = std::cos(rot_z);
+	const double sin_y = std::sin(rot_y), cos_y = std::cos(rot_y);
+	tex_s = {-sin_z, cos_z, 0};
+	tex_t = {-sin_y * cos_z, -sin_y * sin_z, -cos_y};
+}
+
+void lm_brushdef_world_axes(const LMFace *face, vec3 &u, vec3 &v) {
+	vec3 tex_s, tex_t;
+	lm_brushdef_axis_base(face->plane_normal, tex_s, tex_t);
+	u = vec3_add(vec3_mul_double(tex_s, face->uv_valve.u.axis.x), vec3_mul_double(tex_t, face->uv_valve.u.axis.y));
+	v = vec3_add(vec3_mul_double(tex_s, face->uv_valve.v.axis.x), vec3_mul_double(tex_t, face->uv_valve.v.axis.y));
+}
+
+LMVertexUV lm_brushdef_uv(vec3 vertex, const LMFace *face) {
+	vec3 tex_s, tex_t;
+	lm_brushdef_axis_base(face->plane_normal, tex_s, tex_t);
+	const double s = vec3_dot(vertex, tex_s);
+	const double t = vec3_dot(vertex, tex_t);
+	return {
+		face->uv_valve.u.axis.x * s + face->uv_valve.u.axis.y * t + face->uv_valve.u.axis.z,
+		face->uv_valve.v.axis.x * s + face->uv_valve.v.axis.y * t + face->uv_valve.v.axis.z,
+	};
+}
+
+LMVertexUV lm_face_brush_uv(vec3 vertex, const LMFace *face, int texture_width, int texture_height) {
+	if (face->is_bp_uv) return lm_brushdef_uv(vertex, face);
+	if (face->is_valve_uv) return lm_valve_brush_uv(vertex, face, texture_width, texture_height);
+	return lm_standard_brush_uv(vertex, face, texture_width, texture_height);
+}

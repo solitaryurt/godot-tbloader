@@ -137,8 +137,7 @@ bool valid_face(const LMFace &face) {
 }
 
 LMVertexUV face_uv(vec3 vertex, const LMFace &face, LMEditorTextureSize texture) {
-	return face.is_valve_uv ? lm_valve_brush_uv(vertex, &face, texture.width, texture.height) :
-			lm_standard_brush_uv(vertex, &face, texture.width, texture.height);
+	return lm_face_brush_uv(vertex, &face, texture.width, texture.height);
 }
 
 LMEditorBrushBuildResult failure(LMEditorBrushBuildStatus status) {

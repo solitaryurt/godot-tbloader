@@ -39,6 +39,13 @@ void vector(std::string &out, const vec3 &v) { number(out, v.x); out += ' '; num
 void point(std::string &out, const vec3 &v) { out += "( "; vector(out, v); out += " ) "; }
 void face_to(std::string &out, const LMFace &f, const std::string &texture) {
 	point(out, f.plane_points.v0); point(out, f.plane_points.v1); point(out, f.plane_points.v2);
+	if (f.is_bp_uv) {
+		out += "( ( "; vector(out, f.uv_valve.u.axis); out += " ) ( "; vector(out, f.uv_valve.v.axis); out += " ) ) ";
+		quote_to(out, texture.c_str());
+		if (f.surface_flags.specified) { out += ' '; integer(out, f.surface_flags.contents); out += ' '; integer(out, f.surface_flags.surface); out += ' '; integer(out, f.surface_flags.value); }
+		out += '\n';
+		return;
+	}
 	quote_to(out, texture.c_str()); out += ' ';
 	if (f.is_valve_uv) {
 		out += "[ "; vector(out, f.uv_valve.u.axis); out += ' '; number(out, f.uv_valve.u.offset); out += " ] [ ";
@@ -49,10 +56,14 @@ void face_to(std::string &out, const LMFace &f, const std::string &texture) {
 	out += '\n';
 }
 void brush(std::string &out, const LMMapData &map, const LMBrush &b) {
+	bool brushdef = false;
+	for (int i = 0; i < b.face_count; ++i) if (b.faces[i].is_bp_uv) { brushdef = true; break; }
 	out += "{\n";
+	if (brushdef) out += "brushDef\n{\n";
 	for (int i = 0; i < b.face_count; ++i) {
 		face_to(out, b.faces[i], map.textures[b.faces[i].texture_idx].name);
 	}
+	if (brushdef) out += "}\n";
 	out += "}\n";
 }
 void patch(std::string &out, const LMMapData &map, const LMPatch &p) {

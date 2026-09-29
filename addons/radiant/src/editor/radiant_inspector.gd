@@ -7,14 +7,14 @@ func _init(plugin: EditorPlugin) -> void:
 	plugin_ref = weakref(plugin)
 
 func _can_handle(object: Object) -> bool:
-	return object is TBLoader
+	return object is Radiant
 
 func _parse_begin(object: Object) -> void:
 	var loader_ref := weakref(object)
 	var open_button := Button.new()
 	open_button.name = "OpenRadiantEditor"
 	open_button.text = "Open Radiant Editor"
-	open_button.tooltip_text = "Open this TBLoader in the Radiant map editor"
+	open_button.tooltip_text = "Open this map in the Radiant editor"
 	var host = plugin_ref.get_ref()
 	if is_instance_valid(host) and host.has_method("radiant_icon"):
 		open_button.icon = host.radiant_icon()

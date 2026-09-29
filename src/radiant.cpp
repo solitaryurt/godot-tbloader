@@ -1,4 +1,4 @@
-#include <tb_loader.h>
+#include <radiant.h>
 
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
@@ -8,64 +8,64 @@
 #include <cmath>
 #include <vector>
 
-void TBLoader::_bind_methods()
+void Radiant::_bind_methods()
 {
-	ClassDB::bind_method(D_METHOD("set_map", "map_resource"), &TBLoader::set_map);
-	ClassDB::bind_method(D_METHOD("get_map"), &TBLoader::get_map);
-	ClassDB::bind_method(D_METHOD("set_inverse_scale", "map_inverse_scale"), &TBLoader::set_inverse_scale);
-	ClassDB::bind_method(D_METHOD("get_inverse_scale"), &TBLoader::get_inverse_scale);
+	ClassDB::bind_method(D_METHOD("set_map", "map_resource"), &Radiant::set_map);
+	ClassDB::bind_method(D_METHOD("get_map"), &Radiant::get_map);
+	ClassDB::bind_method(D_METHOD("set_inverse_scale", "map_inverse_scale"), &Radiant::set_inverse_scale);
+	ClassDB::bind_method(D_METHOD("get_inverse_scale"), &Radiant::get_inverse_scale);
 
-	ClassDB::bind_method(D_METHOD("set_lighting_unwrap_texel_size", "lighting_unwrap_texel_size"), &TBLoader::set_lighting_unwrap_texel_size);
-	ClassDB::bind_method(D_METHOD("get_lighting_unwrap_texel_size"), &TBLoader::get_lighting_unwrap_texel_size);
-	ClassDB::bind_method(D_METHOD("set_lighting_unwrap_uv2", "lighting_unwrap_uv2"), &TBLoader::set_lighting_unwrap_uv2);
-	ClassDB::bind_method(D_METHOD("get_lighting_unwrap_uv2"), &TBLoader::get_lighting_unwrap_uv2);
+	ClassDB::bind_method(D_METHOD("set_lighting_unwrap_texel_size", "lighting_unwrap_texel_size"), &Radiant::set_lighting_unwrap_texel_size);
+	ClassDB::bind_method(D_METHOD("get_lighting_unwrap_texel_size"), &Radiant::get_lighting_unwrap_texel_size);
+	ClassDB::bind_method(D_METHOD("set_lighting_unwrap_uv2", "lighting_unwrap_uv2"), &Radiant::set_lighting_unwrap_uv2);
+	ClassDB::bind_method(D_METHOD("get_lighting_unwrap_uv2"), &Radiant::get_lighting_unwrap_uv2);
 
-	ClassDB::bind_method(D_METHOD("set_collision", "option_collision"), &TBLoader::set_collision);
-	ClassDB::bind_method(D_METHOD("get_collision"), &TBLoader::get_collision);
-	ClassDB::bind_method(D_METHOD("set_filter_nearest", "option_filter_nearest"), &TBLoader::set_filter_nearest);
-	ClassDB::bind_method(D_METHOD("get_filter_nearest"), &TBLoader::get_filter_nearest);
-	ClassDB::bind_method(D_METHOD("set_skip_hidden_layers", "option_skip_hidden_layers"), &TBLoader::set_skip_hidden_layers);
-	ClassDB::bind_method(D_METHOD("get_skip_hidden_layers"), &TBLoader::get_skip_hidden_layers);
-	ClassDB::bind_method(D_METHOD("set_skip_empty_meshes", "option_skip_empty_meshes"), &TBLoader::set_skip_empty_meshes);
-	ClassDB::bind_method(D_METHOD("get_skip_empty_meshes"), &TBLoader::get_skip_empty_meshes);
-	ClassDB::bind_method(D_METHOD("set_clip_texture_name", "option_clip_texture_name"), &TBLoader::set_clip_texture_name);
-	ClassDB::bind_method(D_METHOD("get_clip_texture_name"), &TBLoader::get_clip_texture_name);
-	ClassDB::bind_method(D_METHOD("set_cushion_texture_name", "option_cushion_texture_name"), &TBLoader::set_cushion_texture_name);
-	ClassDB::bind_method(D_METHOD("get_cushion_texture_name"), &TBLoader::get_cushion_texture_name);
-	ClassDB::bind_method(D_METHOD("set_ladder_texture_name", "option_ladder_texture_name"), &TBLoader::set_ladder_texture_name);
-	ClassDB::bind_method(D_METHOD("get_ladder_texture_name"), &TBLoader::get_ladder_texture_name);
-	ClassDB::bind_method(D_METHOD("set_no_wall_jump_texture_name", "option_no_wall_jump_texture_name"), &TBLoader::set_no_wall_jump_texture_name);
-	ClassDB::bind_method(D_METHOD("get_no_wall_jump_texture_name"), &TBLoader::get_no_wall_jump_texture_name);
-	ClassDB::bind_method(D_METHOD("set_skip_texture_name", "option_skip_texture_name"), &TBLoader::set_skip_texture_name);
-	ClassDB::bind_method(D_METHOD("get_skip_texture_name"), &TBLoader::get_skip_texture_name);
-	ClassDB::bind_method(D_METHOD("set_lightmap_hull", "option_lightmap_hull"), &TBLoader::set_lightmap_hull);
-	ClassDB::bind_method(D_METHOD("get_lightmap_hull"), &TBLoader::get_lightmap_hull);
-	ClassDB::bind_method(D_METHOD("set_visual_layer_mask", "option_visual_layer_mask"), &TBLoader::set_visual_layer_mask);
-	ClassDB::bind_method(D_METHOD("get_visual_layer_mask"), &TBLoader::get_visual_layer_mask);
-	ClassDB::bind_method(D_METHOD("set_skybox_layer_mask", "option_skybox_layer_mask"), &TBLoader::set_skybox_layer_mask);
-	ClassDB::bind_method(D_METHOD("get_skybox_layer_mask"), &TBLoader::get_skybox_layer_mask);
-	ClassDB::bind_method(D_METHOD("set_collision_layer_mask", "option_collision_layer_mask"), &TBLoader::set_collision_layer_mask);
-	ClassDB::bind_method(D_METHOD("get_collision_layer_mask"), &TBLoader::get_collision_layer_mask);
-	ClassDB::bind_method(D_METHOD("set_clip_collision_layer_mask", "option_collision_layer_mask"), &TBLoader::set_clip_collision_layer_mask);
-	ClassDB::bind_method(D_METHOD("get_clip_collision_layer_mask"), &TBLoader::get_clip_collision_layer_mask);
+	ClassDB::bind_method(D_METHOD("set_collision", "option_collision"), &Radiant::set_collision);
+	ClassDB::bind_method(D_METHOD("get_collision"), &Radiant::get_collision);
+	ClassDB::bind_method(D_METHOD("set_filter_nearest", "option_filter_nearest"), &Radiant::set_filter_nearest);
+	ClassDB::bind_method(D_METHOD("get_filter_nearest"), &Radiant::get_filter_nearest);
+	ClassDB::bind_method(D_METHOD("set_skip_hidden_layers", "option_skip_hidden_layers"), &Radiant::set_skip_hidden_layers);
+	ClassDB::bind_method(D_METHOD("get_skip_hidden_layers"), &Radiant::get_skip_hidden_layers);
+	ClassDB::bind_method(D_METHOD("set_skip_empty_meshes", "option_skip_empty_meshes"), &Radiant::set_skip_empty_meshes);
+	ClassDB::bind_method(D_METHOD("get_skip_empty_meshes"), &Radiant::get_skip_empty_meshes);
+	ClassDB::bind_method(D_METHOD("set_clip_texture_name", "option_clip_texture_name"), &Radiant::set_clip_texture_name);
+	ClassDB::bind_method(D_METHOD("get_clip_texture_name"), &Radiant::get_clip_texture_name);
+	ClassDB::bind_method(D_METHOD("set_cushion_texture_name", "option_cushion_texture_name"), &Radiant::set_cushion_texture_name);
+	ClassDB::bind_method(D_METHOD("get_cushion_texture_name"), &Radiant::get_cushion_texture_name);
+	ClassDB::bind_method(D_METHOD("set_ladder_texture_name", "option_ladder_texture_name"), &Radiant::set_ladder_texture_name);
+	ClassDB::bind_method(D_METHOD("get_ladder_texture_name"), &Radiant::get_ladder_texture_name);
+	ClassDB::bind_method(D_METHOD("set_no_wall_jump_texture_name", "option_no_wall_jump_texture_name"), &Radiant::set_no_wall_jump_texture_name);
+	ClassDB::bind_method(D_METHOD("get_no_wall_jump_texture_name"), &Radiant::get_no_wall_jump_texture_name);
+	ClassDB::bind_method(D_METHOD("set_skip_texture_name", "option_skip_texture_name"), &Radiant::set_skip_texture_name);
+	ClassDB::bind_method(D_METHOD("get_skip_texture_name"), &Radiant::get_skip_texture_name);
+	ClassDB::bind_method(D_METHOD("set_lightmap_hull", "option_lightmap_hull"), &Radiant::set_lightmap_hull);
+	ClassDB::bind_method(D_METHOD("get_lightmap_hull"), &Radiant::get_lightmap_hull);
+	ClassDB::bind_method(D_METHOD("set_visual_layer_mask", "option_visual_layer_mask"), &Radiant::set_visual_layer_mask);
+	ClassDB::bind_method(D_METHOD("get_visual_layer_mask"), &Radiant::get_visual_layer_mask);
+	ClassDB::bind_method(D_METHOD("set_skybox_layer_mask", "option_skybox_layer_mask"), &Radiant::set_skybox_layer_mask);
+	ClassDB::bind_method(D_METHOD("get_skybox_layer_mask"), &Radiant::get_skybox_layer_mask);
+	ClassDB::bind_method(D_METHOD("set_collision_layer_mask", "option_collision_layer_mask"), &Radiant::set_collision_layer_mask);
+	ClassDB::bind_method(D_METHOD("get_collision_layer_mask"), &Radiant::get_collision_layer_mask);
+	ClassDB::bind_method(D_METHOD("set_clip_collision_layer_mask", "option_collision_layer_mask"), &Radiant::set_clip_collision_layer_mask);
+	ClassDB::bind_method(D_METHOD("get_clip_collision_layer_mask"), &Radiant::get_clip_collision_layer_mask);
 
-	ClassDB::bind_method(D_METHOD("set_entity_common", "entity_common"), &TBLoader::set_entity_common);
-	ClassDB::bind_method(D_METHOD("get_entity_common"), &TBLoader::get_entity_common);
-	ClassDB::bind_method(D_METHOD("set_entity_path", "entity_path"), &TBLoader::set_entity_path);
-	ClassDB::bind_method(D_METHOD("get_entity_path"), &TBLoader::get_entity_path);
+	ClassDB::bind_method(D_METHOD("set_entity_common", "entity_common"), &Radiant::set_entity_common);
+	ClassDB::bind_method(D_METHOD("get_entity_common"), &Radiant::get_entity_common);
+	ClassDB::bind_method(D_METHOD("set_entity_path", "entity_path"), &Radiant::set_entity_path);
+	ClassDB::bind_method(D_METHOD("get_entity_path"), &Radiant::get_entity_path);
 
-	ClassDB::bind_method(D_METHOD("set_texture_path", "texture_path"), &TBLoader::set_texture_path);
-	ClassDB::bind_method(D_METHOD("get_texture_path"), &TBLoader::get_texture_path);
-	ClassDB::bind_method(D_METHOD("set_material_template", "material"), &TBLoader::set_material_template);
-	ClassDB::bind_method(D_METHOD("get_material_template"), &TBLoader::get_material_template);
-	ClassDB::bind_method(D_METHOD("set_material_texture_path", "texture_path"), &TBLoader::set_material_texture_path);
-	ClassDB::bind_method(D_METHOD("get_material_texture_path"), &TBLoader::get_material_texture_path);
+	ClassDB::bind_method(D_METHOD("set_texture_path", "texture_path"), &Radiant::set_texture_path);
+	ClassDB::bind_method(D_METHOD("get_texture_path"), &Radiant::get_texture_path);
+	ClassDB::bind_method(D_METHOD("set_material_template", "material"), &Radiant::set_material_template);
+	ClassDB::bind_method(D_METHOD("get_material_template"), &Radiant::get_material_template);
+	ClassDB::bind_method(D_METHOD("set_material_texture_path", "texture_path"), &Radiant::set_material_texture_path);
+	ClassDB::bind_method(D_METHOD("get_material_texture_path"), &Radiant::get_material_texture_path);
 
-	ClassDB::bind_method(D_METHOD("clear"), &TBLoader::clear);
-	ClassDB::bind_method(D_METHOD("build_meshes"), &TBLoader::build_meshes);
-	ClassDB::bind_method(D_METHOD("build_meshes_checked"), &TBLoader::build_meshes_checked);
-	ClassDB::bind_method(D_METHOD("build_visual_preview_checked", "document", "target"), &TBLoader::build_visual_preview_checked);
-	ClassDB::bind_method(D_METHOD("resolve_material", "token"), &TBLoader::resolve_material);
+	ClassDB::bind_method(D_METHOD("clear"), &Radiant::clear);
+	ClassDB::bind_method(D_METHOD("build_meshes"), &Radiant::build_meshes);
+	ClassDB::bind_method(D_METHOD("build_meshes_checked"), &Radiant::build_meshes_checked);
+	ClassDB::bind_method(D_METHOD("build_visual_preview_checked", "document", "target"), &Radiant::build_visual_preview_checked);
+	ClassDB::bind_method(D_METHOD("resolve_material", "token"), &Radiant::resolve_material);
 	ADD_SIGNAL(MethodInfo("map_resource_changed", PropertyInfo(Variant::STRING, "path")));
 	ADD_SIGNAL(MethodInfo("bake_finished"));
 
@@ -103,217 +103,217 @@ void TBLoader::_bind_methods()
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "texture_material_texture_path", PROPERTY_HINT_NONE, "Material Texture Property Path"), "set_material_texture_path", "get_material_texture_path");
 }
 
-TBLoader::TBLoader()
+Radiant::Radiant()
 {
 }
 
-TBLoader::~TBLoader()
+Radiant::~Radiant()
 {
 }
 
-void TBLoader::set_map(const String& map)
+void Radiant::set_map(const String& map)
 {
 	if (m_map_path == map) return;
 	m_map_path = map;
 	emit_signal("map_resource_changed", m_map_path);
 }
 
-String TBLoader::get_map() const
+String Radiant::get_map() const
 {
 	return m_map_path;
 }
 
-void TBLoader::set_inverse_scale(int scale)
+void Radiant::set_inverse_scale(int scale)
 {
 	m_inverse_scale = scale;
 }
 
-int TBLoader::get_inverse_scale()
+int Radiant::get_inverse_scale()
 {
 	return m_inverse_scale;
 }
 
-void TBLoader::set_lighting_unwrap_uv2(bool enabled)
+void Radiant::set_lighting_unwrap_uv2(bool enabled)
 {
 	m_lighting_unwrap_uv2 = enabled;
 }
 
-bool TBLoader::get_lighting_unwrap_uv2()
+bool Radiant::get_lighting_unwrap_uv2()
 {
 	return m_lighting_unwrap_uv2;
 }
 
-void TBLoader::set_lighting_unwrap_texel_size(double size)
+void Radiant::set_lighting_unwrap_texel_size(double size)
 {
 	m_lighting_unwrap_texel_size = size;
 }
 
-double TBLoader::get_lighting_unwrap_texel_size()
+double Radiant::get_lighting_unwrap_texel_size()
 {
 	return m_lighting_unwrap_texel_size;
 }
 
-void TBLoader::set_collision(bool enabled)
+void Radiant::set_collision(bool enabled)
 {
 	m_collision = enabled;
 }
 
-bool TBLoader::get_collision()
+bool Radiant::get_collision()
 {
 	return m_collision;
 }
 
-void TBLoader::set_skip_hidden_layers(bool enabled)
+void Radiant::set_skip_hidden_layers(bool enabled)
 {
 	m_skip_hidden_layers = enabled;
 }
 
-bool TBLoader::get_skip_hidden_layers()
+bool Radiant::get_skip_hidden_layers()
 {
 	return m_skip_hidden_layers;
 }
 
-void TBLoader::set_skip_empty_meshes(bool enabled)
+void Radiant::set_skip_empty_meshes(bool enabled)
 {
 	m_skip_empty_meshes = enabled;
 }
 
-bool TBLoader::get_skip_empty_meshes()
+bool Radiant::get_skip_empty_meshes()
 {
 	return m_skip_empty_meshes;
 }
 
-void TBLoader::set_filter_nearest(bool enabled)
+void Radiant::set_filter_nearest(bool enabled)
 {
 	m_filter_nearest = enabled;
 }
 
-bool TBLoader::get_filter_nearest()
+bool Radiant::get_filter_nearest()
 {
 	return m_filter_nearest;
 }
 
-void TBLoader::set_clip_texture_name(const String& clip_texture_name)
+void Radiant::set_clip_texture_name(const String& clip_texture_name)
 {
 	m_clip_texture_name = clip_texture_name;
 }
 
-String TBLoader::get_clip_texture_name()
+String Radiant::get_clip_texture_name()
 {
 	return m_clip_texture_name;
 }
 
-void TBLoader::set_ladder_texture_name(const String& ladder_texture_name)
+void Radiant::set_ladder_texture_name(const String& ladder_texture_name)
 {
 	m_ladder_texture_name = ladder_texture_name;
 }
 
-String TBLoader::get_ladder_texture_name()
+String Radiant::get_ladder_texture_name()
 {
 	return m_ladder_texture_name;
 }
 
-void TBLoader::set_cushion_texture_name(const String& cushion_texture_name)
+void Radiant::set_cushion_texture_name(const String& cushion_texture_name)
 {
 	m_cushion_texture_name = cushion_texture_name;
 }
 
-String TBLoader::get_cushion_texture_name()
+String Radiant::get_cushion_texture_name()
 {
 	return m_cushion_texture_name;
 }
 
-void TBLoader::set_no_wall_jump_texture_name(const String& no_wall_jump_texture_name)
+void Radiant::set_no_wall_jump_texture_name(const String& no_wall_jump_texture_name)
 {
 	m_no_wall_jump_texture_name = no_wall_jump_texture_name;
 }
 
-String TBLoader::get_no_wall_jump_texture_name()
+String Radiant::get_no_wall_jump_texture_name()
 {
 	return m_no_wall_jump_texture_name;
 }
 
-void TBLoader::set_skip_texture_name(const String& skip_texture_name)
+void Radiant::set_skip_texture_name(const String& skip_texture_name)
 {
 	m_skip_texture_name = skip_texture_name;
 }
 
-String TBLoader::get_skip_texture_name()
+String Radiant::get_skip_texture_name()
 {
 	return m_skip_texture_name;
 }
 
-void TBLoader::set_lightmap_hull(const String& lightmap_hull)
+void Radiant::set_lightmap_hull(const String& lightmap_hull)
 {
 	m_lightmap_hull = lightmap_hull;
 }
 
-String TBLoader::get_lightmap_hull()
+String Radiant::get_lightmap_hull()
 {
 	return m_lightmap_hull;
 }
 
-uint32_t TBLoader::get_visual_layer_mask()
+uint32_t Radiant::get_visual_layer_mask()
 {
 	return m_visual_layer_mask;
 }
 
-void TBLoader::set_visual_layer_mask(uint32_t visual_layer_mask)
+void Radiant::set_visual_layer_mask(uint32_t visual_layer_mask)
 {
 	m_visual_layer_mask = visual_layer_mask;
 }
 
-uint32_t TBLoader::get_skybox_layer_mask()
+uint32_t Radiant::get_skybox_layer_mask()
 {
 	return m_skybox_layer_mask;
 }
 
-void TBLoader::set_skybox_layer_mask(uint32_t skybox_layer_mask)
+void Radiant::set_skybox_layer_mask(uint32_t skybox_layer_mask)
 {
 	m_skybox_layer_mask = skybox_layer_mask;
 }
 
-uint32_t TBLoader::get_collision_layer_mask()
+uint32_t Radiant::get_collision_layer_mask()
 {
 	return m_collision_layer_mask;
 }
 
-void TBLoader::set_collision_layer_mask(uint32_t collision_layer_mask)
+void Radiant::set_collision_layer_mask(uint32_t collision_layer_mask)
 {
 	m_collision_layer_mask = collision_layer_mask;
 }
 
-uint32_t TBLoader::get_clip_collision_layer_mask()
+uint32_t Radiant::get_clip_collision_layer_mask()
 {
 	return m_clip_collision_layer_mask;
 }
 
-void TBLoader::set_clip_collision_layer_mask(uint32_t collision_layer_mask)
+void Radiant::set_clip_collision_layer_mask(uint32_t collision_layer_mask)
 {
 	m_clip_collision_layer_mask = collision_layer_mask;
 }
 
-void TBLoader::set_entity_common(bool enabled)
+void Radiant::set_entity_common(bool enabled)
 {
 	m_entity_common = enabled;
 }
 
-bool TBLoader::get_entity_common()
+bool Radiant::get_entity_common()
 {
 	return m_entity_common;
 }
 
-void TBLoader::set_entity_path(const String& path)
+void Radiant::set_entity_path(const String& path)
 {
 	m_entity_path = path;
 }
 
-String TBLoader::get_entity_path()
+String Radiant::get_entity_path()
 {
 	return m_entity_path;
 }
 
-void TBLoader::set_texture_path(const String& path)
+void Radiant::set_texture_path(const String& path)
 {
 	if (path.is_empty()) {
 		UtilityFunctions::push_warning("WARNING: texture_path should not be empty");
@@ -321,32 +321,32 @@ void TBLoader::set_texture_path(const String& path)
 	m_texture_path = path;
 }
 
-String TBLoader::get_texture_path()
+String Radiant::get_texture_path()
 {
 	return m_texture_path;
 }
 
-void TBLoader::set_material_template(const Ref<Material>& material)
+void Radiant::set_material_template(const Ref<Material>& material)
 {
 	m_material_template = material;
 }
 
-Ref<Material> TBLoader::get_material_template()
+Ref<Material> Radiant::get_material_template()
 {
 	return m_material_template;
 }
 
-void TBLoader::set_material_texture_path(const String& texture_path)
+void Radiant::set_material_texture_path(const String& texture_path)
 {
 	m_material_texture_path = texture_path;
 }
 
-String TBLoader::get_material_texture_path()
+String Radiant::get_material_texture_path()
 {
 	return m_material_texture_path;
 }
 
-void TBLoader::clear()
+void Radiant::clear()
 {
 	while (get_child_count() > 0) {
 		auto child = get_child(0);
@@ -355,7 +355,7 @@ void TBLoader::clear()
 	}
 }
 
-void TBLoader::build_meshes()
+void Radiant::build_meshes()
 {
 	Dictionary result = build_meshes_checked();
 	if (!bool(result["ok"])) {
@@ -381,7 +381,7 @@ void collect_generated_owners(Node* node, Node* owner, std::vector<Node*>& nodes
 }
 }
 
-Dictionary TBLoader::build_meshes_checked()
+Dictionary Radiant::build_meshes_checked()
 {
 	if (m_building) return build_failure("BUSY", "A map build is already in progress", m_map_path, "build_meshes_checked");
 	if (m_inverse_scale <= 0 || (m_lighting_unwrap_uv2 && (!std::isfinite(m_lighting_unwrap_texel_size) || m_lighting_unwrap_texel_size <= 0))) {
@@ -427,7 +427,7 @@ Dictionary TBLoader::build_meshes_checked()
 	return result;
 }
 
-Dictionary TBLoader::build_visual_preview_checked(const Ref<TBMapDocument>& document, Node3D* target)
+Dictionary Radiant::build_visual_preview_checked(const Ref<TBMapDocument>& document, Node3D* target)
 {
 	const StringName operation = "build_visual_preview_checked";
 	String path = document.is_valid() ? document->get_path() : String();
@@ -470,7 +470,7 @@ Dictionary TBLoader::build_visual_preview_checked(const Ref<TBMapDocument>& docu
 	return result;
 }
 
-Dictionary TBLoader::resolve_material(const String& token)
+Dictionary Radiant::resolve_material(const String& token)
 {
 	return Builder(this).resolve_material(token);
 }
