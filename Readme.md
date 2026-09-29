@@ -1,9 +1,12 @@
-# Radiant for Godot
+# godot-radiant
+Radiant is a Godot 4 addon for editing and building `.map` levels. Its Radiant-style editor lets
+you work with brushes, textures, UVs, and entities directly in Godot, while a `Radiant` node builds
+the map into meshes, collision shapes, and supported entity nodes for your scene. You can also edit
+maps in TrenchBroom; the `.map` file remains the editable source.
+
 Made as an alternative to [Qodot](https://github.com/QodotPlugin/qodot-plugin), using much of the
 same map parsing code using the original [libmap](https://github.com/QodotPlugin/libmap) and a
 modified [C++ port](https://github.com/EIRTeam/qodot/tree/4.0) of it.
-
-It includes a Radiant-style `.map` editor built directly into Godot.
 
 # Why not Qodot?
 Qodot is great! It works really well. I initially made Radiant because I wanted to try several
@@ -25,7 +28,7 @@ There are some other alternatives, as well:
 
 # Usage
 To install Radiant, you can either install it through [AssetLib](https://godotengine.org/asset-library/asset/1265)
-(search for "TrenchBroom Loader"), or by downloading a [release from Github](https://github.com/codecat/godot-radiant/releases)
+(currently listed as "TrenchBroom Loader"), or by downloading a [release from GitHub](https://github.com/codecat/godot-tbloader/releases)
 and extracting it to your project's `addons` folder, so that you have a structure like this:
 ```
 project/addons/radiant/plugin.cfg
